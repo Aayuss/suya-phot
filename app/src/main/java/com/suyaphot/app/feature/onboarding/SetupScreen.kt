@@ -1,9 +1,10 @@
 package com.suyaphot.app.feature.onboarding
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,7 +17,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
@@ -25,25 +27,29 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import com.suyaphot.app.R
 import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.core.database.entity.VaultEntity
 import com.suyaphot.app.core.model.VaultKind
-import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.PinDots
 import com.suyaphot.app.ui.components.SecurePinPad
 import com.suyaphot.app.ui.components.SuyaButton
+import com.suyaphot.app.ui.components.SuyaTextField
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import kotlinx.coroutines.Dispatchers
@@ -65,17 +71,27 @@ fun SetupScreen(
     container: AppContainer,
     onSetupComplete: () -> Unit
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var currentStep by remember { mutableStateOf(SetupStep.WELCOME) }
+    var currentStep by rememberSaveable { mutableStateOf(SetupStep.WELCOME) }
 
-    var initialPin by remember { mutableStateOf("") }
-    var confirmPin by remember { mutableStateOf("") }
+    var initialPin by rememberSaveable { mutableStateOf("") }
+    var confirmPin by rememberSaveable { mutableStateOf("") }
     var pinErrorMessage by remember { mutableStateOf<String?>(null) }
     var shakeTrigger by remember { mutableStateOf(0) }
 
-    var generatedRecoveryCode by remember { mutableStateOf("") }
-    var recoveryConfirmationInput by remember { mutableStateOf("") }
+    var generatedRecoveryCode by rememberSaveable { mutableStateOf("") }
+    var group1Input by rememberSaveable { mutableStateOf("") }
+    var group2Input by rememberSaveable { mutableStateOf("") }
     var recoveryErrorMessage by remember { mutableStateOf<String?>(null) }
+
+    var createdVaultId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Check biometric support
+    val canEnrollBiometrics = remember {
+        val bm = BiometricManager.from(context)
+        bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
+    }
 
     Box(
         modifier = Modifier
@@ -139,7 +155,7 @@ fun SetupScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Choose a numeric PIN (6 digits recommended)",
+                            text = "Choose a numeric PIN (6 digits)",
                             fontFamily = SoraFontFamily,
                             fontSize = 13.sp,
                             color = SuyaColors.TextMuted
@@ -235,7 +251,7 @@ fun SetupScreen(
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
-                            text = "Your Recovery Kit",
+                            text = "Your Recovery Code",
                             fontFamily = SoraFontFamily,
                             fontWeight = FontWeight.Medium,
                             fontSize = 22.sp,
@@ -243,7 +259,7 @@ fun SetupScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Write down this high-entropy recovery code. If you ever forget your PIN, this is the ONLY way to recover your vault.",
+                            text = "Write down this 128-bit recovery code. If you ever forget your PIN, this is the ONLY way to recover your vault.",
                             fontFamily = SoraFontFamily,
                             fontSize = 13.sp,
                             color = SuyaColors.TextMuted,
@@ -264,9 +280,10 @@ fun SetupScreen(
                                     text = generatedRecoveryCode,
                                     fontFamily = SoraFontFamily,
                                     fontWeight = FontWeight.SemiBold,
-                                    fontSize = 20.sp,
-                                    letterSpacing = 2.sp,
-                                    color = SuyaColors.White
+                                    fontSize = 16.sp,
+                                    letterSpacing = 1.sp,
+                                    color = SuyaColors.White,
+                                    textAlign = TextAlign.Center
                                 )
                             }
                         }
@@ -274,7 +291,73 @@ fun SetupScreen(
                         SuyaButton(
                             text = "I Have Saved This Code",
                             onClick = {
-                                // Finalize vault creation
+                                currentStep = SetupStep.CONFIRM_RECOVERY
+                            },
+                            modifier = Modifier.fillMaxWidth(0.9f)
+                        )
+                    }
+                }
+
+                SetupStep.CONFIRM_RECOVERY -> {
+                    val groups = generatedRecoveryCode.split("-")
+                    val expectedGroup2 = groups.getOrNull(1) ?: ""
+                    val expectedGroup5 = groups.getOrNull(4) ?: ""
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        Text(
+                            text = "Confirm Recovery Code",
+                            fontFamily = SoraFontFamily,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 22.sp,
+                            color = SuyaColors.White
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "To ensure you wrote down your code accurately, please enter Group 2 and Group 5 below.",
+                            fontFamily = SoraFontFamily,
+                            fontSize = 13.sp,
+                            color = SuyaColors.TextMuted,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        SuyaTextField(
+                            value = group1Input,
+                            onValueChange = { if (it.length <= 4) group1Input = it.uppercase() },
+                            placeholder = "4 characters",
+                            label = "Group 2"
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        SuyaTextField(
+                            value = group2Input,
+                            onValueChange = { if (it.length <= 4) group2Input = it.uppercase() },
+                            placeholder = "4 characters",
+                            label = "Group 5"
+                        )
+
+                        if (recoveryErrorMessage != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = recoveryErrorMessage!!,
+                                fontFamily = SoraFontFamily,
+                                fontSize = 12.sp,
+                                color = SuyaColors.Negative
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(28.dp))
+                        SuyaButton(
+                            text = "Verify & Create Vault",
+                            onClick = {
+                                if (group1Input != expectedGroup2 || group2Input != expectedGroup5) {
+                                    recoveryErrorMessage = "Entered groups do not match. Check your notes."
+                                    return@SuyaButton
+                                }
+
                                 scope.launch {
                                     val masterKey = container.keyManager.generateMasterKey()
                                     val pinChars = initialPin.toCharArray()
@@ -283,6 +366,7 @@ fun SetupScreen(
                                     val recoveryEnvelope = container.keyManager.createRecoveryEnvelope(masterKey, normRecovery)
 
                                     val vaultId = UUID.randomUUID().toString()
+                                    createdVaultId = vaultId
                                     val vaultEntity = VaultEntity(
                                         id = vaultId,
                                         kindCode = VaultKind.REAL.code,
@@ -299,10 +383,8 @@ fun SetupScreen(
                                     }
 
                                     // Unlock active session
-                                    val authResult = container.pinAuthenticator.authenticateWithPin(pinChars)
-                                    if (authResult is com.suyaphot.app.domain.auth.AuthResult.Success) {
-                                        onSetupComplete()
-                                    }
+                                    container.pinAuthenticator.authenticateWithPin(pinChars)
+                                    currentStep = SetupStep.COMPLETE
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(0.9f)
@@ -310,7 +392,104 @@ fun SetupScreen(
                     }
                 }
 
-                SetupStep.CONFIRM_RECOVERY, SetupStep.COMPLETE -> {}
+                SetupStep.COMPLETE -> {
+                    val activity = context as? FragmentActivity
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "Success",
+                            tint = SuyaColors.Positive,
+                            modifier = Modifier.size(56.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Vault Secured",
+                            fontFamily = SoraFontFamily,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 24.sp,
+                            color = SuyaColors.White
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Your cryptographic vault is now initialized and ready to protect your media.",
+                            fontFamily = SoraFontFamily,
+                            fontSize = 14.sp,
+                            color = SuyaColors.TextMuted,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(32.dp))
+
+                        if (canEnrollBiometrics && activity != null && createdVaultId != null) {
+                            SuyaButton(
+                                text = "Enable Fingerprint Unlock",
+                                onClick = {
+                                    val vaultId = createdVaultId!!
+                                    try {
+                                        val encryptCipher = container.keyManager.createBiometricEncryptCipher(vaultId)
+                                        val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                                            .setTitle("Enable Biometric Unlock")
+                                            .setSubtitle("Confirm your fingerprint to enable biometric unlock")
+                                            .setNegativeButtonText("Skip")
+                                            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                                            .build()
+
+                                        val biometricPrompt = BiometricPrompt(
+                                            activity,
+                                            ContextCompat.getMainExecutor(activity),
+                                            object : BiometricPrompt.AuthenticationCallback() {
+                                                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                                                    val authCipher = result.cryptoObject?.cipher ?: return
+                                                    val session = container.sessionManager.sessionState.value
+                                                    if (session is com.suyaphot.app.domain.auth.VaultSession.Unlocked) {
+                                                        session.masterKeyHandle.useBytes { masterKey ->
+                                                            val envelope = authCipher.doFinal(masterKey)
+                                                            val iv = authCipher.iv
+                                                            scope.launch(Dispatchers.IO) {
+                                                                container.database.vaultDao().updateBiometricEnvelope(vaultId, envelope, iv)
+                                                                withContext(Dispatchers.Main) {
+                                                                    onSetupComplete()
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        onSetupComplete()
+                                                    }
+                                                }
+
+                                                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                                                    onSetupComplete()
+                                                }
+                                            }
+                                        )
+
+                                        biometricPrompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(encryptCipher))
+                                    } catch (e: Exception) {
+                                        onSetupComplete()
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(0.9f)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            SuyaButton(
+                                text = "Skip for Now",
+                                onClick = onSetupComplete,
+                                variant = ButtonVariant.Ghost,
+                                modifier = Modifier.fillMaxWidth(0.9f)
+                            )
+                        } else {
+                            SuyaButton(
+                                text = "Enter Vault",
+                                onClick = onSetupComplete,
+                                modifier = Modifier.fillMaxWidth(0.9f)
+                            )
+                        }
+                    }
+                }
             }
         }
     }

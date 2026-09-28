@@ -1,6 +1,8 @@
 package com.suyaphot.app.domain.folders
 
+import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
+import com.suyaphot.app.core.database.SuyaDatabase
 import com.suyaphot.app.core.database.dao.FolderDao
 import com.suyaphot.app.core.database.dao.MediaItemDao
 import com.suyaphot.app.core.database.entity.FolderEntity
@@ -22,15 +24,27 @@ enum class FolderDeletePolicy {
  * Manages nested logical folder hierarchy and cycle prevention.
  */
 class FolderManager(
-    private val sessionManager: SessionManager,
+    private val sessionManager: SessionManager? = null,
     private val folderDao: FolderDao,
-    private val mediaItemDao: MediaItemDao
+    private val mediaItemDao: MediaItemDao? = null,
+    private val database: SuyaDatabase? = null
 ) {
 
     private fun getCurrentSession(): VaultSession.Unlocked {
-        val s = sessionManager.sessionState.value
+        val sm = checkNotNull(sessionManager) { "SessionManager is required" }
+        val s = sm.sessionState.value
         check(s is VaultSession.Unlocked) { "Vault is locked" }
         return s
+    }
+
+    companion object {
+        fun normalizeFolderName(raw: String): String {
+            val name = raw.trim()
+            require(name.isNotEmpty()) { "Folder name cannot be blank" }
+            require(name.length <= 120) { "Folder name cannot exceed 120 characters" }
+            require(name.none { it.isISOControl() }) { "Folder name contains invalid characters" }
+            return name
+        }
     }
 
     /**
@@ -38,12 +52,30 @@ class FolderManager(
      */
     suspend fun createFolder(name: String, parentId: String?): String = withContext(Dispatchers.IO) {
         val session = getCurrentSession()
+        val cleanName = normalizeFolderName(name)
+
+        if (parentId != null) {
+            val parent = folderDao.getFolderForVault(parentId, session.vaultId)
+            requireNotNull(parent) { "Parent folder does not exist in current vault" }
+        }
+
+        // Validate sibling names don't conflict case-insensitively
+        val siblings = folderDao.getSubFoldersSync(session.vaultId, parentId)
+        val conflict = siblings.any { sibling ->
+            val sibName = try {
+                val dec = Aead.decryptWithPrependedNonce(session.metaSubkey, sibling.encryptedName, sibling.id.toByteArray(Charsets.UTF_8))
+                String(dec, Charsets.UTF_8)
+            } catch (e: Exception) { "" }
+            sibName.equals(cleanName, ignoreCase = true)
+        }
+        require(!conflict) { "A folder with this name already exists in this folder" }
+
         val folderId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
 
         val encryptedName = Aead.encryptWithPrependedNonce(
             keyBytes = session.metaSubkey,
-            plaintext = name.trim().toByteArray(Charsets.UTF_8),
+            plaintext = cleanName.toByteArray(Charsets.UTF_8),
             aad = folderId.toByteArray(Charsets.UTF_8)
         )
 
@@ -66,9 +98,25 @@ class FolderManager(
      */
     suspend fun renameFolder(folderId: String, newName: String) = withContext(Dispatchers.IO) {
         val session = getCurrentSession()
+        val cleanName = normalizeFolderName(newName)
+
+        val folder = folderDao.getFolderForVault(folderId, session.vaultId)
+        requireNotNull(folder) { "Folder not found in current vault" }
+
+        val siblings = folderDao.getSubFoldersSync(session.vaultId, folder.parentId)
+        val conflict = siblings.any { sibling ->
+            if (sibling.id == folderId) return@any false
+            val sibName = try {
+                val dec = Aead.decryptWithPrependedNonce(session.metaSubkey, sibling.encryptedName, sibling.id.toByteArray(Charsets.UTF_8))
+                String(dec, Charsets.UTF_8)
+            } catch (e: Exception) { "" }
+            sibName.equals(cleanName, ignoreCase = true)
+        }
+        require(!conflict) { "A folder with this name already exists in this folder" }
+
         val encryptedName = Aead.encryptWithPrependedNonce(
             keyBytes = session.metaSubkey,
-            plaintext = newName.trim().toByteArray(Charsets.UTF_8),
+            plaintext = cleanName.toByteArray(Charsets.UTF_8),
             aad = folderId.toByteArray(Charsets.UTF_8)
         )
         folderDao.renameFolder(folderId, encryptedName, System.currentTimeMillis())
@@ -102,39 +150,70 @@ class FolderManager(
     }
 
     /**
-     * Deletes a folder according to the chosen policy for its contents.
+     * Deletes a folder according to the chosen policy for its contents using a Room transaction.
      */
-    suspend fun deleteFolder(folderId: String, policy: FolderDeletePolicy) = withContext(Dispatchers.IO) {
-        val folder = folderDao.getFolder(folderId) ?: return@withContext
-        val parentId = folder.parentId
+    suspend fun deleteFolder(
+        folderId: String,
+        policy: FolderDeletePolicy
+    ) = withContext(Dispatchers.IO) {
+        val session = getCurrentSession()
 
-        when (policy) {
-            FolderDeletePolicy.MOVE_CONTENTS_TO_PARENT -> {
-                // Move media to parent
-                val subItems = mediaItemDao.getItemsByIds(
-                    // get ids in folder
-                    emptyList() // handled in bulk update
-                )
-                // Re-parent subfolders
-                val childFolders = folderDao.getSubFoldersSync(folder.vaultId, folderId)
-                for (child in childFolders) {
-                    folderDao.moveFolder(child.id, parentId, System.currentTimeMillis())
+        val db = checkNotNull(database) { "SuyaDatabase is required" }
+        val mDao = checkNotNull(mediaItemDao) { "MediaItemDao is required" }
+
+        db.withTransaction {
+            val folder = folderDao.getFolderForVault(
+                folderId = folderId,
+                vaultId = session.vaultId
+            ) ?: return@withTransaction
+
+            val parentId = folder.parentId
+            val now = System.currentTimeMillis()
+
+            when (policy) {
+                FolderDeletePolicy.MOVE_CONTENTS_TO_PARENT -> {
+                    mDao.moveFolderContents(
+                        vaultId = session.vaultId,
+                        sourceFolderId = folderId,
+                        targetFolderId = parentId,
+                        now = now
+                    )
+                    folderDao.reparentChildren(
+                        vaultId = session.vaultId,
+                        oldParentId = folderId,
+                        newParentId = parentId,
+                        now = now
+                    )
+                }
+
+                FolderDeletePolicy.DELETE_CONTENTS_TO_TRASH -> {
+                    mDao.trashFolderContents(
+                        vaultId = session.vaultId,
+                        folderId = folderId,
+                        now = now
+                    )
+                    folderDao.reparentChildren(
+                        vaultId = session.vaultId,
+                        oldParentId = folderId,
+                        newParentId = parentId,
+                        now = now
+                    )
                 }
             }
-            FolderDeletePolicy.DELETE_CONTENTS_TO_TRASH -> {
-                // Soft-delete items to trash
-                val now = System.currentTimeMillis()
-                // All items in folder deletedAt = now
-            }
+
+            folderDao.deleteForVault(
+                folderId = folderId,
+                vaultId = session.vaultId
+            )
         }
-        folderDao.delete(folderId)
     }
 
     /**
      * Moves media items between folders without re-encryption.
      */
     suspend fun moveMediaToFolder(mediaIds: List<String>, targetFolderId: String?) = withContext(Dispatchers.IO) {
-        mediaItemDao.moveItemsToFolder(mediaIds, targetFolderId, System.currentTimeMillis())
+        val mDao = checkNotNull(mediaItemDao) { "MediaItemDao is required" }
+        mDao.moveItemsToFolder(mediaIds, targetFolderId, System.currentTimeMillis())
     }
 
     /**
@@ -147,10 +226,15 @@ class FolderManager(
 
         val session = getCurrentSession()
         val trail = mutableListOf<Pair<String?, String>>()
+        val visited = mutableSetOf<String>()
         var cursor: String? = folderId
 
         while (cursor != null) {
-            val entity = folderDao.getFolder(cursor) ?: break
+            if (!visited.add(cursor)) {
+                // Cycle detected, stop traversing to prevent infinite loop
+                break
+            }
+            val entity = folderDao.getFolderForVault(cursor, session.vaultId) ?: break
             val name = try {
                 val dec = Aead.decryptWithPrependedNonce(session.metaSubkey, entity.encryptedName, entity.id.toByteArray(Charsets.UTF_8))
                 String(dec, Charsets.UTF_8)
@@ -169,8 +253,9 @@ class FolderManager(
      */
     fun getSubFoldersFlow(parentId: String?): Flow<List<Folder>> {
         val session = getCurrentSession()
-        return folderDao.getSubFolders(session.vaultId, parentId).map { entities ->
-            entities.map { entity ->
+        return folderDao.getSubFoldersWithCount(session.vaultId, parentId).map { list ->
+            list.map { item ->
+                val entity = item.folder
                 val name = try {
                     val dec = Aead.decryptWithPrependedNonce(session.metaSubkey, entity.encryptedName, entity.id.toByteArray(Charsets.UTF_8))
                     String(dec, Charsets.UTF_8)
@@ -185,7 +270,8 @@ class FolderManager(
                     createdAt = entity.createdAt,
                     updatedAt = entity.updatedAt,
                     coverMediaId = entity.coverMediaId,
-                    sortOrder = entity.sortOrder
+                    sortOrder = entity.sortOrder,
+                    itemCount = item.itemCount
                 )
             }
         }

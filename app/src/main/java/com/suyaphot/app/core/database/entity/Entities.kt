@@ -1,17 +1,23 @@
 package com.suyaphot.app.core.database.entity
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "vaults")
+@Entity(
+    tableName = "vaults",
+    indices = [
+        Index(value = ["kindCode"], unique = true)
+    ]
+)
 data class VaultEntity(
     @PrimaryKey val id: String,
     val kindCode: Int, // 0 = REAL, 1 = SECONDARY
     val createdAt: Long,
     val schemaVersion: Int,
     val pinEnvelope: ByteArray,
-    val recoveryEnvelope: ByteArray,
+    val recoveryEnvelope: ByteArray? = null,
     val biometricEnvelope: ByteArray? = null,
     val biometricIv: ByteArray? = null
 ) {
@@ -34,9 +40,18 @@ data class VaultEntity(
 
 @Entity(
     tableName = "folders",
+    foreignKeys = [
+        ForeignKey(
+            entity = VaultEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["vaultId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
     indices = [
         Index("vaultId"),
-        Index("parentId")
+        Index("parentId"),
+        Index(value = ["vaultId", "parentId"])
     ]
 )
 data class FolderEntity(
@@ -68,13 +83,22 @@ data class FolderEntity(
 
 @Entity(
     tableName = "media_items",
+    foreignKeys = [
+        ForeignKey(
+            entity = VaultEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["vaultId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
     indices = [
         Index("vaultId"),
         Index("folderId"),
         Index("importedAt"),
         Index("deletedAt"),
         Index("favorite"),
-        Index("mediaTypeCode")
+        Index("mediaTypeCode"),
+        Index(value = ["vaultId", "sha256Hex"])
     ]
 )
 data class MediaItemEntity(
@@ -112,6 +136,14 @@ data class MediaItemEntity(
 
 @Entity(
     tableName = "jobs",
+    foreignKeys = [
+        ForeignKey(
+            entity = VaultEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["vaultId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
     indices = [
         Index("stateCode"),
         Index("vaultId")
@@ -144,14 +176,18 @@ data class VaultJobEntity(
 
 @Entity(
     tableName = "intruder_events",
-    indices = [Index("createdAt")]
+    indices = [
+        Index("realVaultId"),
+        Index("createdAt")
+    ]
 )
 data class IntruderEventEntity(
     @PrimaryKey val id: String,
+    val realVaultId: String,
     val createdAt: Long,
-    val failureType: String,
+    val reasonCode: Int, // 1 = PIN_FAILED, 2 = LOCKOUT
     val encryptedImageRelativePath: String?,
-    val encryptedDetails: ByteArray
+    val encryptedDetails: ByteArray?
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

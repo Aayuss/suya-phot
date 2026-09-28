@@ -11,7 +11,6 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.CipherInputStream
-import javax.crypto.CipherOutputStream
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -86,7 +85,7 @@ class VaultCrypto {
      * @param itemId Unique ID of the media item.
      * @param isVideo True if video, false if image.
      * @param plaintextSize Known plaintext size, or -1 if unknown.
-     * @param onProgress Callback invoked periodically with (bytesWritten, totalExpectedBytes).
+     * @param onProgress Callback invoked periodically with (bytesProcessed, totalExpectedBytes).
      * @return SHA-256 digest and total plaintext bytes read.
      */
     fun encryptStream(
@@ -108,6 +107,7 @@ class VaultCrypto {
 
         val itemKey = deriveItemKey(mediaSubkey, itemSalt, itemId)
 
+        val headerPlaintextSize = if (plaintextSize >= 0L) plaintextSize else -1L
         val headerBuffer = ByteBuffer.allocate(HEADER_SIZE).order(ByteOrder.BIG_ENDIAN)
         headerBuffer.put(MAGIC_BYTES)
         headerBuffer.put(FORMAT_VERSION)
@@ -115,7 +115,7 @@ class VaultCrypto {
         headerBuffer.putShort(0.toShort()) // reserved
         headerBuffer.put(itemSalt)
         headerBuffer.put(nonce)
-        headerBuffer.putLong(plaintextSize)
+        headerBuffer.putLong(headerPlaintextSize)
         val headerBytes = headerBuffer.array()
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -128,14 +128,17 @@ class VaultCrypto {
         var totalRead = 0L
         var lastProgressTime = 0L
 
-        FileOutputStream(outputFile).use { fos ->
-            fos.write(headerBytes)
-            CipherOutputStream(fos, cipher).use { cos ->
+        try {
+            FileOutputStream(outputFile).use { fos ->
+                fos.write(headerBytes)
                 val buffer = ByteArray(BUFFER_SIZE)
                 var read: Int
                 while (input.read(buffer).also { read = it } != -1) {
-                    cos.write(buffer, 0, read)
                     sha256Digest.update(buffer, 0, read)
+                    val encrypted = cipher.update(buffer, 0, read)
+                    if (encrypted != null && encrypted.isNotEmpty()) {
+                        fos.write(encrypted)
+                    }
                     totalRead += read
 
                     val now = System.currentTimeMillis()
@@ -144,18 +147,17 @@ class VaultCrypto {
                         onProgress?.invoke(totalRead, plaintextSize)
                     }
                 }
-                cos.flush()
+
+                val finalBytes = cipher.doFinal()
+                if (finalBytes != null && finalBytes.isNotEmpty()) {
+                    fos.write(finalBytes)
+                }
+
+                fos.flush()
                 runCatching { fos.fd.sync() }
             }
-        }
-
-        // If plaintext size was not known upfront, update the header with the actual size
-        if (plaintextSize <= 0 && totalRead > 0) {
-            java.io.RandomAccessFile(outputFile, "rw").use { raf ->
-                raf.seek(36) // Offset of plaintextSize in header
-                raf.writeLong(totalRead)
-                runCatching { raf.fd.sync() }
-            }
+        } finally {
+            itemKey.fill(0)
         }
 
         return VerificationResult(
@@ -190,33 +192,57 @@ class VaultCrypto {
                     headerBytes[3] == MAGIC_BYTES[3]) { "Invalid magic bytes in vault file" }
             check(headerBytes[4] == FORMAT_VERSION) { "Unsupported vault file version: ${headerBytes[4]}" }
 
+            val buf = ByteBuffer.wrap(headerBytes).order(ByteOrder.BIG_ENDIAN)
+            buf.position(8)
             val itemSalt = ByteArray(16)
-            System.arraycopy(headerBytes, 8, itemSalt, 0, 16)
+            buf.get(itemSalt)
 
             val nonce = ByteArray(12)
-            System.arraycopy(headerBytes, 24, nonce, 0, 12)
+            buf.get(nonce)
+
+            val expectedPlaintextSize = buf.getLong()
 
             val itemKey = deriveItemKey(mediaSubkey, itemSalt, itemId)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(itemKey, "AES"), GCMParameterSpec(128, nonce))
-            cipher.updateAAD(headerBytes)
+            try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(itemKey, "AES"), GCMParameterSpec(128, nonce))
+                cipher.updateAAD(headerBytes)
 
-            val sha256Digest = MessageDigest.getInstance("SHA-256")
-            var plaintextSize = 0L
+                val sha256Digest = MessageDigest.getInstance("SHA-256")
+                val inputBuffer = ByteArray(BUFFER_SIZE)
+                var totalPlaintext = 0L
 
-            CipherInputStream(fis, cipher).use { cis ->
-                val buffer = ByteArray(BUFFER_SIZE)
-                var read: Int
-                while (cis.read(buffer).also { read = it } != -1) {
-                    sha256Digest.update(buffer, 0, read)
-                    plaintextSize += read
+                while (true) {
+                    val read = fis.read(inputBuffer)
+                    if (read < 0) break
+                    val plain = cipher.update(inputBuffer, 0, read)
+                    if (plain != null && plain.isNotEmpty()) {
+                        sha256Digest.update(plain)
+                        totalPlaintext += plain.size
+                        plain.fill(0)
+                    }
                 }
-            }
 
-            return VerificationResult(
-                plaintextSize = plaintextSize,
-                sha256 = sha256Digest.digest()
-            )
+                val finalPlain = cipher.doFinal()
+                if (finalPlain != null && finalPlain.isNotEmpty()) {
+                    sha256Digest.update(finalPlain)
+                    totalPlaintext += finalPlain.size
+                    finalPlain.fill(0)
+                }
+
+                if (expectedPlaintextSize >= 0L) {
+                    check(totalPlaintext == expectedPlaintextSize) {
+                        "Plaintext size mismatch: expected $expectedPlaintextSize, got $totalPlaintext"
+                    }
+                }
+
+                return VerificationResult(
+                    plaintextSize = totalPlaintext,
+                    sha256 = sha256Digest.digest()
+                )
+            } finally {
+                itemKey.fill(0)
+            }
         }
     }
 
@@ -254,35 +280,53 @@ class VaultCrypto {
             val expectedPlaintextSize = buf.getLong()
 
             val itemKey = deriveItemKey(mediaSubkey, itemSalt, itemId)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(itemKey, "AES"), GCMParameterSpec(128, nonce))
-            cipher.updateAAD(headerBytes)
+            try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(itemKey, "AES"), GCMParameterSpec(128, nonce))
+                cipher.updateAAD(headerBytes)
 
-            val sha256Digest = MessageDigest.getInstance("SHA-256")
-            var plainBytesWritten = 0L
-            var lastProgressTime = 0L
+                val sha256Digest = MessageDigest.getInstance("SHA-256")
+                var plainBytesWritten = 0L
+                var lastProgressTime = 0L
+                val inputBuffer = ByteArray(BUFFER_SIZE)
 
-            CipherInputStream(fis, cipher).use { cis ->
-                val buffer = ByteArray(BUFFER_SIZE)
-                var read: Int
-                while (cis.read(buffer).also { read = it } != -1) {
-                    outputStream.write(buffer, 0, read)
-                    sha256Digest.update(buffer, 0, read)
-                    plainBytesWritten += read
-
-                    val now = System.currentTimeMillis()
-                    if (now - lastProgressTime >= 150) {
-                        lastProgressTime = now
-                        onProgress?.invoke(plainBytesWritten, expectedPlaintextSize)
+                while (true) {
+                    val read = fis.read(inputBuffer)
+                    if (read < 0) break
+                    val plain = cipher.update(inputBuffer, 0, read)
+                    if (plain != null && plain.isNotEmpty()) {
+                        outputStream.write(plain)
+                        sha256Digest.update(plain)
+                        plainBytesWritten += plain.size
+                        val now = System.currentTimeMillis()
+                        if (now - lastProgressTime >= 150) {
+                            lastProgressTime = now
+                            onProgress?.invoke(plainBytesWritten, expectedPlaintextSize)
+                        }
                     }
                 }
-                outputStream.flush()
-            }
 
-            return VerificationResult(
-                plaintextSize = plainBytesWritten,
-                sha256 = sha256Digest.digest()
-            )
+                val finalPlain = cipher.doFinal()
+                if (finalPlain != null && finalPlain.isNotEmpty()) {
+                    outputStream.write(finalPlain)
+                    sha256Digest.update(finalPlain)
+                    plainBytesWritten += finalPlain.size
+                }
+                outputStream.flush()
+
+                if (expectedPlaintextSize >= 0L) {
+                    check(plainBytesWritten == expectedPlaintextSize) {
+                        "Plaintext size mismatch: expected $expectedPlaintextSize, got $plainBytesWritten"
+                    }
+                }
+
+                return VerificationResult(
+                    plaintextSize = plainBytesWritten,
+                    sha256 = sha256Digest.digest()
+                )
+            } finally {
+                itemKey.fill(0)
+            }
         }
     }
 
@@ -318,11 +362,15 @@ class VaultCrypto {
             buf.get(nonce)
 
             val itemKey = deriveItemKey(mediaSubkey, itemSalt, itemId)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(itemKey, "AES"), GCMParameterSpec(128, nonce))
-            cipher.updateAAD(headerBytes)
+            try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(itemKey, "AES"), GCMParameterSpec(128, nonce))
+                cipher.updateAAD(headerBytes)
 
-            return CipherInputStream(fis, cipher)
+                return CipherInputStream(fis, cipher)
+            } finally {
+                itemKey.fill(0)
+            }
         } catch (e: Exception) {
             fis.close()
             throw e

@@ -1,7 +1,11 @@
 package com.suyaphot.app.app
 
 import android.content.Context
+import com.suyaphot.app.core.crypto.AndroidKeystoreIntruderKeyProvider
+import com.suyaphot.app.core.crypto.AndroidKeystorePepperProvider
+import com.suyaphot.app.core.crypto.IntruderKeyProvider
 import com.suyaphot.app.core.crypto.KeyManager
+import com.suyaphot.app.core.crypto.PepperProvider
 import com.suyaphot.app.core.crypto.VaultCrypto
 import com.suyaphot.app.core.database.SuyaDatabase
 import com.suyaphot.app.core.datastore.SecurityPreferences
@@ -13,6 +17,7 @@ import com.suyaphot.app.domain.auth.PinAuthenticator
 import com.suyaphot.app.domain.auth.SessionManager
 import com.suyaphot.app.domain.folders.FolderManager
 import com.suyaphot.app.domain.importmedia.ImportCoordinator
+import com.suyaphot.app.domain.importmedia.ImportRecoveryManager
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.domain.restore.RestoreCoordinator
 import com.suyaphot.app.feature.intruder.IntruderCaptureManager
@@ -25,7 +30,9 @@ class AppContainer(val context: Context) {
 
     val database: SuyaDatabase by lazy { SuyaDatabase.create(context) }
     val preferences: SecurityPreferences by lazy { SecurityPreferences(context) }
-    val keyManager: KeyManager by lazy { KeyManager(context) }
+    val pepperProvider: PepperProvider by lazy { AndroidKeystorePepperProvider() }
+    val keyManager: KeyManager by lazy { KeyManager(context, pepperProvider) }
+    val intruderKeyProvider: IntruderKeyProvider by lazy { AndroidKeystoreIntruderKeyProvider() }
     val vaultCrypto: VaultCrypto by lazy { VaultCrypto() }
     val vaultFileStore: VaultFileStore by lazy { VaultFileStore(context) }
     val metadataReader: MetadataReader by lazy { MetadataReader(context) }
@@ -47,12 +54,21 @@ class AppContainer(val context: Context) {
         ImportCoordinator(
             context = context,
             sessionManager = sessionManager,
+            database = database,
             mediaItemDao = database.mediaItemDao(),
             vaultJobDao = database.vaultJobDao(),
             metadataReader = metadataReader,
             thumbnailGenerator = thumbnailGenerator,
             vaultCrypto = vaultCrypto,
             fileStore = vaultFileStore
+        )
+    }
+
+    val importRecoveryManager: ImportRecoveryManager by lazy {
+        ImportRecoveryManager(
+            database = database,
+            fileStore = vaultFileStore,
+            vaultCrypto = vaultCrypto
         )
     }
 
@@ -75,7 +91,8 @@ class AppContainer(val context: Context) {
         FolderManager(
             sessionManager = sessionManager,
             folderDao = database.folderDao(),
-            mediaItemDao = database.mediaItemDao()
+            mediaItemDao = database.mediaItemDao(),
+            database = database
         )
     }
 
@@ -84,7 +101,8 @@ class AppContainer(val context: Context) {
             context = context,
             fileStore = vaultFileStore,
             intruderEventDao = database.intruderEventDao(),
-            sessionManager = sessionManager
+            vaultDao = database.vaultDao(),
+            intruderKeyProvider = intruderKeyProvider
         )
     }
 

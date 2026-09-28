@@ -2,8 +2,10 @@ package com.suyaphot.app.domain.importmedia
 
 import android.content.Context
 import android.net.Uri
+import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.VaultCrypto
+import com.suyaphot.app.core.database.SuyaDatabase
 import com.suyaphot.app.core.database.dao.MediaItemDao
 import com.suyaphot.app.core.database.dao.VaultJobDao
 import com.suyaphot.app.core.database.entity.MediaItemEntity
@@ -21,10 +23,50 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.ByteBuffer
 import java.util.UUID
+
+data class ImportJobPayload(
+    val sourceUri: String,
+    val targetFolderId: String?,
+    val itemId: String
+) {
+    fun serialize(): ByteArray {
+        val uriBytes = sourceUri.toByteArray(Charsets.UTF_8)
+        val folderBytes = (targetFolderId ?: "").toByteArray(Charsets.UTF_8)
+        val itemBytes = itemId.toByteArray(Charsets.UTF_8)
+        val buf = ByteBuffer.allocate(4 + uriBytes.size + 4 + folderBytes.size + 4 + itemBytes.size)
+        buf.putInt(uriBytes.size)
+        buf.put(uriBytes)
+        buf.putInt(folderBytes.size)
+        buf.put(folderBytes)
+        buf.putInt(itemBytes.size)
+        buf.put(itemBytes)
+        return buf.array()
+    }
+
+    companion object {
+        fun deserialize(bytes: ByteArray): ImportJobPayload {
+            val buf = ByteBuffer.wrap(bytes)
+            val uriLen = buf.int
+            val uriBytes = ByteArray(uriLen).also(buf::get)
+            val folderLen = buf.int
+            val folderBytes = ByteArray(folderLen).also(buf::get)
+            val itemLen = buf.int
+            val itemBytes = ByteArray(itemLen).also(buf::get)
+            val folderStr = String(folderBytes, Charsets.UTF_8)
+            return ImportJobPayload(
+                sourceUri = String(uriBytes, Charsets.UTF_8),
+                targetFolderId = folderStr.ifEmpty { null },
+                itemId = String(itemBytes, Charsets.UTF_8)
+            )
+        }
+    }
+}
 
 sealed interface ImportResult {
     data class Success(
+        val jobId: String,
         val itemId: String,
         val uri: Uri,
         val sha256Hex: String,
@@ -44,6 +86,7 @@ sealed interface ImportResult {
 class ImportCoordinator(
     private val context: Context,
     private val sessionManager: SessionManager,
+    private val database: SuyaDatabase,
     private val mediaItemDao: MediaItemDao,
     private val vaultJobDao: VaultJobDao,
     private val metadataReader: MetadataReader,
@@ -73,12 +116,28 @@ class ImportCoordinator(
         val finalMediaFile = fileStore.getMediaFile(vaultId, itemId)
         val thumbFile = fileStore.getThumbFile(vaultId, itemId)
 
+        var finalCommitted = false
+        var dbCommitted = false
+
+        // Section 12: Encrypt job payload with metaSubkey
+        val rawPayload = ImportJobPayload(
+            sourceUri = uri.toString(),
+            targetFolderId = folderId,
+            itemId = itemId
+        ).serialize()
+
+        val encryptedPayload = Aead.encryptWithPrependedNonce(
+            keyBytes = session.metaSubkey,
+            plaintext = rawPayload,
+            aad = "job:$jobId:v1".toByteArray(Charsets.UTF_8)
+        )
+
         val jobEntity = VaultJobEntity(
             id = jobId,
             vaultId = vaultId,
             typeCode = JobType.IMPORT.code,
             stateCode = JobState.QUEUED.code,
-            encryptedPayload = uri.toString().toByteArray(Charsets.UTF_8),
+            encryptedPayload = encryptedPayload,
             progressCurrent = 0L,
             progressTotal = 0L,
             createdAt = System.currentTimeMillis(),
@@ -111,13 +170,14 @@ class ImportCoordinator(
 
             val sha256Hex = bytesToHex(verifyResult.sha256)
 
-            // Duplicate check
+            // Section 16: Duplicate check (active items only)
             if (skipDuplicates) {
                 val existing = mediaItemDao.findBySha256(vaultId, sha256Hex)
                 if (existing != null) {
                     partialFile.delete()
                     vaultJobDao.updateState(jobId, JobState.COMPLETED.code, System.currentTimeMillis())
                     return@withContext ImportResult.Success(
+                        jobId = jobId,
                         itemId = existing.id,
                         uri = uri,
                         sha256Hex = sha256Hex,
@@ -126,10 +186,11 @@ class ImportCoordinator(
                 }
             }
 
-            // 3. Durability sync & commit partial file to final .sph
+            // 3. Commit partial file to final .sph
             vaultJobDao.updateState(jobId, JobState.DURABILITY_SYNC.code, System.currentTimeMillis())
             val committed = fileStore.commitPartial(partialFile, finalMediaFile)
             check(committed) { "Failed to atomically commit partial file" }
+            finalCommitted = true
 
             // 4. Verifying encrypted file
             vaultJobDao.updateState(jobId, JobState.VERIFYING.code, System.currentTimeMillis())
@@ -137,19 +198,19 @@ class ImportCoordinator(
             check(reVerify.sha256.contentEquals(verifyResult.sha256)) { "Checksum mismatch after encryption" }
             check(reVerify.plaintextSize == verifyResult.plaintextSize) { "Plaintext length mismatch" }
 
-            // 5. Generate thumbnail
+            // 5. Generate thumbnail with zero full-file buffering
             if (sourceMeta.mediaType == MediaType.IMAGE) {
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    thumbnailGenerator.generateAndEncryptImageThumbnail(
-                        imageStream = stream,
-                        thumbSubkey = session.thumbSubkey,
-                        outputThumbFile = thumbFile,
-                        orientation = sourceMeta.metadata.orientation ?: 0
-                    )
-                }
+                thumbnailGenerator.generateAndEncryptImageThumbnail(
+                    imageUri = uri,
+                    itemId = itemId,
+                    thumbSubkey = session.thumbSubkey,
+                    outputThumbFile = thumbFile,
+                    orientation = sourceMeta.metadata.orientation ?: 0
+                )
             } else {
                 thumbnailGenerator.generateAndEncryptVideoThumbnail(
                     videoUri = uri,
+                    itemId = itemId,
                     thumbSubkey = session.thumbSubkey,
                     outputThumbFile = thumbFile
                 )
@@ -163,7 +224,7 @@ class ImportCoordinator(
                 aad = itemId.toByteArray(Charsets.UTF_8)
             )
 
-            // 7. Commit database record
+            // 7. Transactional DB commit (Section 15)
             val now = System.currentTimeMillis()
             val mediaEntity = MediaItemEntity(
                 id = itemId,
@@ -182,24 +243,35 @@ class ImportCoordinator(
                 deletedAt = null,
                 previousFolderId = null
             )
-            mediaItemDao.insert(mediaEntity)
-            vaultJobDao.updateState(jobId, JobState.AWAITING_SOURCE_DELETE.code, now)
+
+            database.withTransaction {
+                mediaItemDao.insert(mediaEntity)
+                vaultJobDao.updateState(jobId, JobState.AWAITING_SOURCE_DELETE.code, now)
+            }
+            dbCommitted = true
 
             SafeLog.d("ImportCoordinator", "Successfully imported media item: $itemId")
             ImportResult.Success(
+                jobId = jobId,
                 itemId = itemId,
                 uri = uri,
                 sha256Hex = sha256Hex
             )
         } catch (ce: CancellationException) {
-            if (partialFile.exists()) partialFile.delete()
+            // Section 14: Orphan-safe cancellation cleanup
+            runCatching { if (partialFile.exists()) partialFile.delete() }
+            if (finalCommitted && !dbCommitted) {
+                runCatching { if (finalMediaFile.exists()) finalMediaFile.delete() }
+                runCatching { if (thumbFile.exists()) thumbFile.delete() }
+            }
             vaultJobDao.updateState(jobId, JobState.CANCELLED.code, System.currentTimeMillis(), "Cancelled")
             throw ce
         } catch (e: Exception) {
             SafeLog.e("ImportCoordinator", "Import failed for URI: $uri", e)
-            if (partialFile.exists()) partialFile.delete()
-            if (finalMediaFile.exists() && mediaItemDao.getItem(itemId) == null) {
-                finalMediaFile.delete()
+            runCatching { if (partialFile.exists()) partialFile.delete() }
+            if (finalCommitted && !dbCommitted) {
+                runCatching { if (finalMediaFile.exists()) finalMediaFile.delete() }
+                runCatching { if (thumbFile.exists()) thumbFile.delete() }
             }
             vaultJobDao.updateState(jobId, JobState.FAILED.code, System.currentTimeMillis(), e.message)
             ImportResult.Failure(uri, e.message ?: "Unknown import error", sourceUntouched = true)

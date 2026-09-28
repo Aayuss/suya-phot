@@ -22,6 +22,22 @@ android {
         }
     }
 
+    val keystorePath = providers.gradleProperty("SUYA_KEYSTORE_PATH").orNull
+    val keystorePassword = providers.gradleProperty("SUYA_KEYSTORE_PASSWORD").orNull
+    val keyAlias = providers.gradleProperty("SUYA_KEY_ALIAS").orNull
+    val keyPassword = providers.gradleProperty("SUYA_KEY_PASSWORD").orNull
+
+    signingConfigs {
+        if (keystorePath != null && keystorePassword != null && keyAlias != null && keyPassword != null) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = keystorePassword
+                this.keyAlias = keyAlias
+                this.keyPassword = keyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -30,7 +46,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfigs.findByName("release")?.let {
+                signingConfig = it
+            }
         }
         debug {
             applicationIdSuffix = ".debug"
@@ -62,6 +80,10 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {
@@ -124,3 +146,8 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+

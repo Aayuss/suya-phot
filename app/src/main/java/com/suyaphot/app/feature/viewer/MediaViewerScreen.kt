@@ -129,13 +129,26 @@ fun MediaViewerScreen(
 
                 val vaultFile = container.vaultFileStore.getMediaFile(session.vaultId, itemId)
                 if (entity.mediaTypeCode == MediaType.IMAGE.code) {
-                    val stream = container.vaultCrypto.openDecryptedStream(vaultFile, session.mediaSubkey, itemId)
-                    val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
-                    fullBitmap = BitmapFactory.decodeStream(stream, null, opts)
-                    stream.close()
+                    val stream1 = container.vaultCrypto.openDecryptedStream(vaultFile, session.mediaSubkey, itemId)
+                    val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeStream(stream1, null, boundsOpts)
+                    stream1.close()
+
+                    val reqSize = 2560
+                    val maxDim = maxOf(boundsOpts.outWidth, boundsOpts.outHeight)
+                    val sampleSize = if (maxDim > reqSize) (maxDim / reqSize).coerceAtLeast(1) else 1
+
+                    val stream2 = container.vaultCrypto.openDecryptedStream(vaultFile, session.mediaSubkey, itemId)
+                    val decodeOpts = BitmapFactory.Options().apply {
+                        inSampleSize = sampleSize
+                        inPreferredConfig = Bitmap.Config.RGB_565
+                    }
+                    fullBitmap = BitmapFactory.decodeStream(stream2, null, decodeOpts)
+                    stream2.close()
                 } else {
-                    // Video: decrypt to temporary private playback file
-                    val temp = File(context.cacheDir, "playback_${itemId}.mp4")
+                    // Video: decrypt to temporary file in dedicated playback_cache
+                    val ext = metadata?.originalFileExtension ?: "mp4"
+                    val temp = container.vaultFileStore.createPlaybackTempFile(ext)
                     FileOutputStream(temp).use { fos ->
                         container.vaultCrypto.decryptTo(vaultFile, session.mediaSubkey, itemId, fos)
                     }

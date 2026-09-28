@@ -1,5 +1,7 @@
 package com.suyaphot.app.feature.security
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
@@ -21,7 +24,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
@@ -34,6 +36,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -41,9 +44,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.core.database.entity.VaultEntity
 import com.suyaphot.app.core.model.VaultKind
@@ -66,6 +74,7 @@ fun SecurityScreen(
     onViewIntruderLogs: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val session = container.sessionManager.sessionState.collectAsState().value
     val isSecondary = (session as? VaultSession.Unlocked)?.kind == VaultKind.SECONDARY
@@ -73,7 +82,6 @@ fun SecurityScreen(
     val screenshotProtection by container.preferences.screenshotProtection.collectAsState(initial = true)
     val intruderEnabled by container.preferences.intruderSelfieEnabled.collectAsState(initial = false)
     val intruderThreshold by container.preferences.intruderTriggerCount.collectAsState(initial = 3)
-    val shizukuEnabled by container.preferences.shizukuEnabled.collectAsState(initial = false)
 
     var showSecondaryPinDialog by remember { mutableStateOf(false) }
     var secondaryPinInput by remember { mutableStateOf("") }
@@ -81,6 +89,63 @@ fun SecurityScreen(
 
     var isRunningIntegrityCheck by remember { mutableStateOf(false) }
     var integrityStatusMessage by remember { mutableStateOf<String?>(null) }
+
+    val realVault by produceState<VaultEntity?>(initialValue = null, key1 = session) {
+        value = withContext(Dispatchers.IO) {
+            container.database.vaultDao().getVaultByKind(VaultKind.REAL.code)
+        }
+    }
+
+    val secondaryVault by produceState<VaultEntity?>(initialValue = null, key1 = showSecondaryPinDialog) {
+        value = withContext(Dispatchers.IO) {
+            container.database.vaultDao().getVaultByKind(VaultKind.SECONDARY.code)
+        }
+    }
+
+    val isBiometricEnrolled = realVault?.biometricEnvelope != null && realVault?.biometricIv != null
+    val canEnrollBiometrics = remember {
+        val bm = BiometricManager.from(context)
+        bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
+    }
+
+    if (isSecondary) {
+        // Dedicated safe screen for secondary / decoy vault mode (Section 28)
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(SuyaColors.Background)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                SuyaTopBar(title = "Security")
+
+                Column(
+                    modifier = Modifier.padding(horizontal = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    SecurityCard(
+                        title = "Vault Encryption",
+                        subtitle = "AES-256-GCM hardware-backed streaming encryption",
+                        icon = Icons.Default.Lock,
+                        statusText = "Active",
+                        statusPositive = true
+                    )
+
+                    SecurityToggleRow(
+                        title = "Screenshot Protection",
+                        subtitle = "Blocks screenshots and hides preview in Android Recents",
+                        icon = Icons.Default.VisibilityOff,
+                        checked = screenshotProtection,
+                        onCheckedChange = { scope.launch { container.preferences.setScreenshotProtection(it) } }
+                    )
+                }
+            }
+        }
+        return
+    }
 
     Box(
         modifier = modifier
@@ -111,9 +176,60 @@ fun SecurityScreen(
                     title = "Recovery Kit",
                     subtitle = "128-bit emergency recovery key envelope",
                     icon = Icons.Default.Key,
-                    statusText = "Configured",
-                    statusPositive = true
+                    statusText = if (realVault?.recoveryEnvelope != null) "Configured" else "None",
+                    statusPositive = realVault?.recoveryEnvelope != null
                 )
+
+                // Biometric Unlock
+                if (canEnrollBiometrics) {
+                    SecurityToggleRow(
+                        title = "Fingerprint Unlock",
+                        subtitle = "Hardware-backed biometric unwrap via Android Keystore",
+                        icon = Icons.Default.Fingerprint,
+                        checked = isBiometricEnrolled,
+                        onCheckedChange = { enable ->
+                            val activity = context as? FragmentActivity ?: return@SecurityToggleRow
+                            val real = realVault ?: return@SecurityToggleRow
+                            if (enable) {
+                                try {
+                                    val encryptCipher = container.keyManager.createBiometricEncryptCipher(real.id)
+                                    val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                                        .setTitle("Enable Biometric Unlock")
+                                        .setSubtitle("Confirm fingerprint to link biometric key to vault")
+                                        .setNegativeButtonText("Cancel")
+                                        .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                                        .build()
+
+                                    val biometricPrompt = BiometricPrompt(
+                                        activity,
+                                        ContextCompat.getMainExecutor(activity),
+                                        object : BiometricPrompt.AuthenticationCallback() {
+                                            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                                                val authCipher = result.cryptoObject?.cipher ?: return
+                                                val currentSession = container.sessionManager.sessionState.value
+                                                if (currentSession is VaultSession.Unlocked) {
+                                                    currentSession.masterKeyHandle.useBytes { masterKey ->
+                                                        val envelope = authCipher.doFinal(masterKey)
+                                                        val iv = authCipher.iv
+                                                        scope.launch(Dispatchers.IO) {
+                                                            container.database.vaultDao().updateBiometricEnvelope(real.id, envelope, iv)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    )
+                                    biometricPrompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(encryptCipher))
+                                } catch (ignored: Exception) {}
+                            } else {
+                                scope.launch(Dispatchers.IO) {
+                                    container.keyManager.deleteBiometricKey(real.id)
+                                    container.database.vaultDao().updateBiometricEnvelope(real.id, null, null)
+                                }
+                            }
+                        }
+                    )
+                }
 
                 // Screenshot & Recents Protection Toggle
                 SecurityToggleRow(
@@ -142,39 +258,28 @@ fun SecurityScreen(
                     )
                 }
 
-                // Shizuku Enhancement Toggle
-                SecurityToggleRow(
-                    title = "Shizuku File Operations",
-                    subtitle = "Optional privileged deletion without individual prompts",
-                    icon = Icons.Default.Shield,
-                    checked = shizukuEnabled,
-                    onCheckedChange = { scope.launch { container.preferences.setShizukuEnabled(it) } }
+                // Secondary Access PIN (Decoy vault)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Secondary Access",
+                    fontFamily = SoraFontFamily,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 15.sp,
+                    color = SuyaColors.White
+                )
+                Text(
+                    text = "Configure a secondary PIN that opens an isolated, independent vault with separate folders and media.",
+                    fontFamily = SoraFontFamily,
+                    fontSize = 12.sp,
+                    color = SuyaColors.TextMuted
                 )
 
-                // Secondary Access PIN (Decoy vault) - only shown when in real vault
-                if (!isSecondary) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Secondary Access",
-                        fontFamily = SoraFontFamily,
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 15.sp,
-                        color = SuyaColors.White
-                    )
-                    Text(
-                        text = "Configure a secondary PIN that opens an isolated, independent vault with separate folders and media.",
-                        fontFamily = SoraFontFamily,
-                        fontSize = 12.sp,
-                        color = SuyaColors.TextMuted
-                    )
-
-                    SuyaButton(
-                        text = "Set Secondary Access PIN",
-                        onClick = { showSecondaryPinDialog = true },
-                        variant = ButtonVariant.Secondary,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+                SuyaButton(
+                    text = if (secondaryVault != null) "Change Secondary PIN" else "Set Secondary Access PIN",
+                    onClick = { showSecondaryPinDialog = true },
+                    variant = ButtonVariant.Secondary,
+                    modifier = Modifier.fillMaxWidth()
+                )
 
                 // Vault Integrity Check
                 Spacer(modifier = Modifier.height(6.dp))
@@ -193,10 +298,11 @@ fun SecurityScreen(
                     ) {
                         CircularProgressIndicator(
                             color = SuyaColors.Accent,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
                         )
                         Text(
-                            text = "Auditing AES-GCM tags and SHA-256 checksums...",
+                            text = "Auditing cryptographic integrity...",
                             fontFamily = SoraFontFamily,
                             fontSize = 13.sp,
                             color = SuyaColors.TextMuted
@@ -253,7 +359,7 @@ fun SecurityScreen(
                 secondaryPinInput = ""
                 secondaryPinError = null
             },
-            title = "Secondary Access PIN",
+            title = if (secondaryVault != null) "Change Secondary PIN" else "Secondary Access PIN",
             content = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
@@ -264,9 +370,14 @@ fun SecurityScreen(
                     )
                     SuyaTextField(
                         value = secondaryPinInput,
-                        onValueChange = { if (it.length <= 6) secondaryPinInput = it },
+                        onValueChange = {
+                            val digits = it.filter(Char::isDigit)
+                            if (digits.length <= 6) secondaryPinInput = digits
+                        },
                         placeholder = "Enter 6-digit secondary PIN",
-                        label = "Secondary PIN"
+                        label = "Secondary PIN",
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
                     )
                     if (secondaryPinError != null) {
                         Text(
@@ -284,28 +395,43 @@ fun SecurityScreen(
                     secondaryPinError = "Secondary PIN must be 6 digits"
                     return@SuyaDialog
                 }
-                scope.launch {
-                    val secMasterKey = container.keyManager.generateMasterKey()
-                    val pinEnvelope = container.keyManager.createPinEnvelope(secMasterKey, secondaryPinInput.toCharArray())
-                    val dummyRecovery = container.keyManager.generateRecoverySecret()
-                    val normRecovery = container.keyManager.normalizeRecoverySecret(dummyRecovery)
-                    val recoveryEnvelope = container.keyManager.createRecoveryEnvelope(secMasterKey, normRecovery)
 
-                    val secVaultId = UUID.randomUUID().toString()
-                    val secVaultEntity = VaultEntity(
-                        id = secVaultId,
-                        kindCode = VaultKind.SECONDARY.code,
-                        createdAt = System.currentTimeMillis(),
-                        schemaVersion = 1,
-                        pinEnvelope = pinEnvelope.serialize(),
-                        recoveryEnvelope = recoveryEnvelope.serialize(),
-                        biometricEnvelope = null,
-                        biometricIv = null
-                    )
+                scope.launch {
+                    val pinChars = secondaryPinInput.toCharArray()
+                    val matchesReal = container.pinAuthenticator.isSameAsRealPin(pinChars)
+                    if (matchesReal) {
+                        secondaryPinError = "Secondary PIN must be different from your main PIN"
+                        return@launch
+                    }
 
                     withContext(Dispatchers.IO) {
-                        container.database.vaultDao().insert(secVaultEntity)
+                        val existing = container.database.vaultDao().getVaultByKind(VaultKind.SECONDARY.code)
+                        if (existing != null) {
+                            // Update existing secondary PIN envelope
+                            val secMasterKey = container.keyManager.generateMasterKey()
+                            val newEnvelope = container.keyManager.createPinEnvelope(secMasterKey, pinChars)
+                            container.database.vaultDao().updatePinEnvelope(existing.id, newEnvelope.serialize())
+                            secMasterKey.fill(0)
+                        } else {
+                            // Create new secondary vault (nullable recovery envelope, Section 32)
+                            val secMasterKey = container.keyManager.generateMasterKey()
+                            val pinEnvelope = container.keyManager.createPinEnvelope(secMasterKey, pinChars)
+                            val secVaultId = UUID.randomUUID().toString()
+                            val secVaultEntity = VaultEntity(
+                                id = secVaultId,
+                                kindCode = VaultKind.SECONDARY.code,
+                                createdAt = System.currentTimeMillis(),
+                                schemaVersion = 1,
+                                pinEnvelope = pinEnvelope.serialize(),
+                                recoveryEnvelope = null,
+                                biometricEnvelope = null,
+                                biometricIv = null
+                            )
+                            container.database.vaultDao().insert(secVaultEntity)
+                            secMasterKey.fill(0)
+                        }
                     }
+
                     showSecondaryPinDialog = false
                     secondaryPinInput = ""
                 }
@@ -323,7 +449,7 @@ private fun SecurityCard(
     statusPositive: Boolean
 ) {
     Surface(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(16.dp),
         color = SuyaColors.Fill06,
         border = androidx.compose.foundation.BorderStroke(1.dp, SuyaColors.Line),
         modifier = Modifier.fillMaxWidth()
@@ -335,29 +461,43 @@ private fun SecurityCard(
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = SuyaColors.Fill07,
-                modifier = Modifier.size(42.dp)
+                modifier = Modifier.size(44.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        tint = SuyaColors.Accent,
-                        modifier = Modifier.size(22.dp)
-                    )
+                    Icon(icon, contentDescription = null, tint = SuyaColors.White, modifier = Modifier.size(22.dp))
                 }
             }
             Spacer(modifier = Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = title, fontFamily = SoraFontFamily, fontWeight = FontWeight.Medium, fontSize = 15.sp, color = SuyaColors.White)
-                Text(text = subtitle, fontFamily = SoraFontFamily, fontSize = 12.sp, color = SuyaColors.TextMuted)
+                Text(
+                    text = title,
+                    fontFamily = SoraFontFamily,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 15.sp,
+                    color = SuyaColors.White
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = subtitle,
+                    fontFamily = SoraFontFamily,
+                    fontSize = 12.sp,
+                    color = SuyaColors.TextMuted
+                )
             }
-            Text(
-                text = statusText,
-                fontFamily = SoraFontFamily,
-                fontWeight = FontWeight.Medium,
-                fontSize = 12.sp,
-                color = if (statusPositive) SuyaColors.Positive else SuyaColors.Negative
-            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (statusPositive) SuyaColors.Positive.copy(alpha = 0.15f) else SuyaColors.Fill07
+            ) {
+                Text(
+                    text = statusText,
+                    fontFamily = SoraFontFamily,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (statusPositive) SuyaColors.Positive else SuyaColors.TextMuted,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                )
+            }
         }
     }
 }
@@ -371,7 +511,7 @@ private fun SecurityToggleRow(
     onCheckedChange: (Boolean) -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(16.dp),
         color = SuyaColors.Fill06,
         border = androidx.compose.foundation.BorderStroke(1.dp, SuyaColors.Line),
         modifier = Modifier.fillMaxWidth()
@@ -383,30 +523,39 @@ private fun SecurityToggleRow(
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = SuyaColors.Fill07,
-                modifier = Modifier.size(42.dp)
+                modifier = Modifier.size(44.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        tint = SuyaColors.White,
-                        modifier = Modifier.size(22.dp)
-                    )
+                    Icon(icon, contentDescription = null, tint = SuyaColors.White, modifier = Modifier.size(22.dp))
                 }
             }
             Spacer(modifier = Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = title, fontFamily = SoraFontFamily, fontWeight = FontWeight.Medium, fontSize = 15.sp, color = SuyaColors.White)
-                Text(text = subtitle, fontFamily = SoraFontFamily, fontSize = 12.sp, color = SuyaColors.TextMuted)
+                Text(
+                    text = title,
+                    fontFamily = SoraFontFamily,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 15.sp,
+                    color = SuyaColors.White
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = subtitle,
+                    fontFamily = SoraFontFamily,
+                    fontSize = 12.sp,
+                    color = SuyaColors.TextMuted
+                )
             }
+            Spacer(modifier = Modifier.width(10.dp))
             Switch(
                 checked = checked,
                 onCheckedChange = onCheckedChange,
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = SuyaColors.White,
                     checkedTrackColor = SuyaColors.Accent,
-                    uncheckedThumbColor = SuyaColors.White,
-                    uncheckedTrackColor = SuyaColors.ToggleOff
+                    uncheckedThumbColor = SuyaColors.TextMuted,
+                    uncheckedTrackColor = SuyaColors.Fill07,
+                    uncheckedBorderColor = Color.Transparent
                 )
             )
         }

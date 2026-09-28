@@ -23,18 +23,22 @@ object SafeLog {
     }
 
     fun w(tag: String, message: String, throwable: Throwable? = null) {
-        if (throwable != null) {
-            Log.w("$TAG_PREFIX$tag", sanitize(message), throwable)
-        } else {
-            Log.w("$TAG_PREFIX$tag", sanitize(message))
+        if (BuildConfig.DEBUG) {
+            if (throwable != null) {
+                Log.w("$TAG_PREFIX$tag", sanitize(message), throwable)
+            } else {
+                Log.w("$TAG_PREFIX$tag", sanitize(message))
+            }
         }
     }
 
     fun e(tag: String, message: String, throwable: Throwable? = null) {
-        if (throwable != null) {
-            Log.e("$TAG_PREFIX$tag", sanitize(message), throwable)
-        } else {
-            Log.e("$TAG_PREFIX$tag", sanitize(message))
+        if (BuildConfig.DEBUG) {
+            if (throwable != null) {
+                Log.e("$TAG_PREFIX$tag", sanitize(message), throwable)
+            } else {
+                Log.e("$TAG_PREFIX$tag", sanitize(message))
+            }
         }
     }
 

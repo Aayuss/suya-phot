@@ -24,7 +24,7 @@ import com.suyaphot.app.core.database.entity.VaultJobEntity
         IntruderEventEntity::class
     ],
     version = 1,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class SuyaDatabase : RoomDatabase() {
 

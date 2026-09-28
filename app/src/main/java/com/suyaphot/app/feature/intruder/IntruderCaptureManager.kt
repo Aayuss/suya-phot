@@ -10,12 +10,13 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.suyaphot.app.core.crypto.Aead
+import com.suyaphot.app.core.crypto.IntruderKeyProvider
 import com.suyaphot.app.core.database.dao.IntruderEventDao
+import com.suyaphot.app.core.database.dao.VaultDao
 import com.suyaphot.app.core.database.entity.IntruderEventEntity
+import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
-import com.suyaphot.app.domain.auth.SessionManager
-import com.suyaphot.app.domain.auth.VaultSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -25,12 +26,14 @@ import java.util.UUID
 
 /**
  * Handles silent CameraX front-camera capture upon failed PIN threshold.
+ * Encrypts images and details with a dedicated non-exportable Keystore AES-GCM key.
  */
 class IntruderCaptureManager(
     private val context: Context,
     private val fileStore: VaultFileStore,
     private val intruderEventDao: IntruderEventDao,
-    private val sessionManager: SessionManager
+    private val vaultDao: VaultDao,
+    private val intruderKeyProvider: IntruderKeyProvider
 ) {
 
     fun hasCameraPermission(): Boolean {
@@ -107,30 +110,43 @@ class IntruderCaptureManager(
         }
     }
 
+    private suspend fun getRealVaultId(): String {
+        return vaultDao.getVaultByKind(VaultKind.REAL.code)?.id ?: "default_real_vault"
+    }
+
     private suspend fun encryptAndSaveIntruder(tempFile: File, failureReason: String) = withContext(Dispatchers.IO) {
         try {
             val eventId = UUID.randomUUID().toString()
             val rawBytes = tempFile.readBytes()
             tempFile.delete() // Promptly delete plaintext temp file
 
-            // Fallback key if vault is currently locked during intruder attempt
-            val dummyKey = "suya-phot-intruder-safety-key-256".toByteArray(Charsets.UTF_8).copyOf(32)
-            val encryptedBytes = Aead.encryptWithPrependedNonce(
-                keyBytes = dummyKey,
+            val key = intruderKeyProvider.getOrCreateKey()
+            val aad = "suya-phot:intruder:v1:$eventId".toByteArray(Charsets.UTF_8)
+
+            val encryptedImageBytes = Aead.encryptWithPrependedNonce(
+                keyBytes = key.encoded,
                 plaintext = rawBytes,
-                aad = eventId.toByteArray(Charsets.UTF_8)
+                aad = aad
             )
 
-            val destFile = fileStore.getSecurityFile("global_security", eventId)
+            val encryptedDetails = Aead.encryptWithPrependedNonce(
+                keyBytes = key.encoded,
+                plaintext = failureReason.toByteArray(Charsets.UTF_8),
+                aad = aad
+            )
+
+            val realVaultId = getRealVaultId()
+            val destFile = fileStore.getSecurityFile(realVaultId, eventId)
             destFile.parentFile?.mkdirs()
-            destFile.writeBytes(encryptedBytes)
+            destFile.writeBytes(encryptedImageBytes)
 
             val event = IntruderEventEntity(
                 id = eventId,
+                realVaultId = realVaultId,
                 createdAt = System.currentTimeMillis(),
-                failureType = failureReason,
+                reasonCode = 1,
                 encryptedImageRelativePath = destFile.name,
-                encryptedDetails = failureReason.toByteArray(Charsets.UTF_8)
+                encryptedDetails = encryptedDetails
             )
             intruderEventDao.insert(event)
             SafeLog.d("IntruderCaptureManager", "Intruder photo saved: $eventId")
@@ -141,12 +157,22 @@ class IntruderCaptureManager(
 
     private suspend fun logEventWithoutPhoto(reason: String) = withContext(Dispatchers.IO) {
         val eventId = UUID.randomUUID().toString()
+        val realVaultId = getRealVaultId()
+        val key = intruderKeyProvider.getOrCreateKey()
+        val aad = "suya-phot:intruder:v1:$eventId".toByteArray(Charsets.UTF_8)
+        val encryptedDetails = Aead.encryptWithPrependedNonce(
+            keyBytes = key.encoded,
+            plaintext = reason.toByteArray(Charsets.UTF_8),
+            aad = aad
+        )
+
         val event = IntruderEventEntity(
             id = eventId,
+            realVaultId = realVaultId,
             createdAt = System.currentTimeMillis(),
-            failureType = reason,
+            reasonCode = 1,
             encryptedImageRelativePath = null,
-            encryptedDetails = reason.toByteArray(Charsets.UTF_8)
+            encryptedDetails = encryptedDetails
         )
         intruderEventDao.insert(event)
     }
