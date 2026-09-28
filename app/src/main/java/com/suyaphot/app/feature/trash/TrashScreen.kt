@@ -18,9 +18,11 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -54,6 +56,24 @@ fun TrashScreen(
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
 
+    // Auto-purge items in trash older than 30 days upon opening TrashScreen (Section 60)
+    LaunchedEffect(vaultId) {
+        if (vaultId.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                val thirtyDaysAgo = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
+                val expired = container.database.mediaItemDao().getExpiredTrash(vaultId, thirtyDaysAgo)
+                if (expired.isNotEmpty()) {
+                    val expiredIds = expired.map { it.id }
+                    for (item in expired) {
+                        container.vaultFileStore.getMediaFile(vaultId, item.id).delete()
+                        container.vaultFileStore.getThumbFile(vaultId, item.id).delete()
+                    }
+                    container.database.mediaItemDao().deleteBatch(expiredIds)
+                }
+            }
+        }
+    }
+
     val trashFlow = remember(vaultId) {
         container.database.mediaItemDao().getTrashItems(vaultId)
     }
@@ -78,7 +98,8 @@ fun TrashScreen(
         }
     }
 
-    val selectedIds = remember { mutableStateListOf<String>() }
+    val selectedIds = remember { mutableStateMapOf<String, Unit>() }
+    val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     var showEmptyTrashDialog by remember { mutableStateOf(false) }
 
     Box(
@@ -111,30 +132,30 @@ fun TrashScreen(
                 )
             } else {
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
+                    columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(2.dp),
                     modifier = Modifier.weight(1f)
                 ) {
                     items(items, key = { it.id }) { item ->
-                        val isSelected = selectedIds.contains(item.id)
+                        val isSelected = selectedIds.containsKey(item.id)
                         MediaTile(
                             item = item,
                             isSelected = isSelected,
                             isInSelectionMode = selectedIds.isNotEmpty(),
                             onClick = {
                                 if (isSelected) selectedIds.remove(item.id)
-                                else selectedIds.add(item.id)
+                                else selectedIds[item.id] = Unit
                             },
                             onLongClick = {
-                                if (!selectedIds.contains(item.id)) selectedIds.add(item.id)
+                                if (!selectedIds.containsKey(item.id)) selectedIds[item.id] = Unit
                             },
                             thumbLoader = { itemId ->
                                 val thumbFile = container.vaultFileStore.getThumbFile(vaultId, itemId)
                                 val subkey = (container.sessionManager.sessionState.value as? VaultSession.Unlocked)?.thumbSubkey
                                 if (subkey != null) {
-                                    container.thumbnailGenerator.decryptThumbnail(thumbFile, subkey)
+                                    container.thumbnailGenerator.decryptThumbnail(thumbFile, subkey, itemId)
                                 } else null
                             }
                         )
@@ -154,7 +175,7 @@ fun TrashScreen(
                             text = "Restore (${selectedIds.size})",
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
-                                    val toRestore = selectedIds.toList()
+                                    val toRestore = selectedIds.keys.toList()
                                     selectedIds.clear()
                                     container.database.mediaItemDao().restoreFromTrash(toRestore, System.currentTimeMillis())
                                 }
@@ -165,7 +186,7 @@ fun TrashScreen(
                             text = "Delete Forever",
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
-                                    val toDelete = selectedIds.toList()
+                                    val toDelete = selectedIds.keys.toList()
                                     selectedIds.clear()
                                     for (id in toDelete) {
                                         container.vaultFileStore.getMediaFile(vaultId, id).delete()

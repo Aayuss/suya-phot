@@ -40,9 +40,12 @@ Importing an item (e.g. from Samsung Gallery share or in-app picker) follows thi
    - Verify computed SHA-256 matches source hash.
 7. **DATABASE COMMIT**: Insert item record into Room transactionally; mark job `AWAITING_SOURCE_DELETE`.
 8. **SOURCE DELETION**:
-   - Request system deletion via `MediaStore.createDeleteRequest` (Standard Mode) or privileged delete (Shizuku Mode).
+   - Request user deletion via standard Android `MediaStore.createDeleteRequest`.
+   - (Note: Shizuku privileged deletion is intentionally removed for v1 to guarantee zero IPC exposure, deferred to post-v1 roadmap).
    - If user denies deletion, encrypted vault item is safely retained, and UI reports original still exists.
    - Source is NEVER deleted if any previous step fails.
+9. **CRASH RECOVERY**:
+   - On every unlocked session start, `ImportRecoveryManager` reconciles unfinished jobs. Partially written `.partial` files are safely pruned, verified uncommitted items are restored or finalized, and source deletion requests are reprompted.
 
 ---
 
@@ -61,6 +64,19 @@ Importing an item (e.g. from Samsung Gallery share or in-app picker) follows thi
 
 ## 4. Recovery System
 
-- **Path A (Biometric Reset)**: If fingerprint is configured, user authenticates with biometric to unwrap the `VaultMasterKey` and re-wrap with a new PIN without re-encrypting media.
-- **Path B (Recovery Kit)**: 128-bit random secret shown during setup can be entered to unwrap the recovery envelope and configure a new PIN.
-- Recovery code rotation creates a fresh envelope and invalidates the previous code.
+- **Path A (Biometric Reset)**: If fingerprint is configured, user authenticates with biometric (`BiometricPrompt` with `CryptoObject`) to unwrap the `VaultMasterKey` and re-wrap with a new PIN without re-encrypting media.
+- **Path B (Recovery Kit)**:
+  - 128-bit high-entropy secret (16 bytes random) generated at setup.
+  - Formatted into 26 Base32 characters grouped as `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX`.
+  - Normalization strips hyphens and spaces, converting to uppercase and enforcing exact 26 characters.
+  - Derives recovery KEK using HKDF-SHA256 (`suya-phot-recovery-kek`), unwraps the master key, and allows resetting the PIN.
+  - Recovery code rotation creates a fresh envelope and invalidates the previous code.
+
+---
+
+## 5. Ephemeral Playback Cache
+
+- For video streaming playback with Media3 ExoPlayer, files are decrypted on-demand into `context.cacheDir/playback_cache/`.
+- No unencrypted media files remain permanently on disk:
+  - Bound to the Compose lifecycle (`DisposableEffect`), the temporary file is unlinked immediately when the user navigates away or closes the media viewer.
+  - Any background transition or session lock automatically destroys the active player and deletes all files in `playback_cache/`.

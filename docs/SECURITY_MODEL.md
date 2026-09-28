@@ -29,21 +29,25 @@ Using domain separation info strings:
 ### 2.2 PIN Wrapping (PBKDF2-HMAC-SHA256 + Keystore Pepper)
 1. User enters numeric PIN (minimum 4 digits, recommended 6+).
 2. Generate 16-byte random salt.
-3. PBKDF2-HMAC-SHA256 with 100,000+ iterations derives an intermediate key.
-4. Intermediate key is combined with an Android Keystore HMAC pepper (hardware-backed).
+3. PBKDF2-HMAC-SHA256 with 100,000+ calibrated iterations derives an intermediate key.
+4. Intermediate key is combined with an Android Keystore HMAC pepper (hardware-backed key alias `suya_phot_pepper_key`).
 5. Resulting KEK wraps the `VaultMasterKey` using AES-256-GCM.
-6. Stored envelope: `{version, salt, iterations, nonce, wrappedMasterKey}`.
-7. Verification: Successful GCM tag authentication indicates correct PIN without storing any plaintext hash.
+6. Stored envelope: `{version, salt, iterations, nonce, wrappedMasterKey}` (Version 1).
+7. Verification: Successful GCM tag authentication indicates correct PIN without storing any plaintext hash or password equivalent.
 
 ### 2.3 Biometric Wrapping (Android Keystore + BiometricPrompt)
-- An AES-256-GCM key is generated inside Android Keystore requiring `setUserAuthenticationRequired(true)`.
-- `BiometricPrompt` uses `CryptoObject` to unwrap the `VaultMasterKey`.
-- Unlocking does not persist any plaintext key to disk.
+- An AES-256-GCM key is generated inside Android Keystore with `KeyGenParameterSpec` requiring `setUserAuthenticationRequired(true)` and alias `suya_phot_bio_<vaultId>`.
+- Unlocking initializes an authenticated cipher passed to `BiometricPrompt.CryptoObject(cipher)`.
+- Upon biometric confirmation by the OS, the cipher decrypts the biometric envelope and unwraps the `VaultMasterKey` directly into memory.
+- Plaintext keys are never persisted to disk or flash storage.
 
-### 2.4 Recovery Envelope
-- A high-entropy 128-bit secret is generated at setup and displayed to the user as formatted chunks.
-- The secret is hashed/HKDF-derived into a recovery KEK to wrap the `VaultMasterKey`.
-- Plaintext recovery code is never persisted.
+### 2.4 Recovery Envelope (128-Bit Base32 Code)
+- A high-entropy 128-bit (16-byte) cryptographically secure random secret is generated at setup.
+- The secret is encoded into a 26-character Base32 Crockford/RFC4648 format, displayed as 7 groups: `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX`.
+- Normalization strips hyphens and whitespace, uppercasing the input and strictly enforcing the exact 26-character length.
+- HKDF-SHA256 derives a 256-bit recovery KEK with domain separation info `suya-phot-recovery-kek` and a random 16-byte salt.
+- The master key is wrapped via AES-256-GCM and stored in Room as `RecoveryEnvelope` `{version, salt, nonce, wrappedMasterKey}`.
+- Plaintext recovery codes are never stored on device. Entering the valid recovery code allows setting a new PIN without re-encrypting existing media files.
 
 ---
 

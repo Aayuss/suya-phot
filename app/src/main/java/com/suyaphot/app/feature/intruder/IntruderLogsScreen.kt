@@ -37,6 +37,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.core.crypto.Aead
+import com.suyaphot.app.core.model.VaultKind
+import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.SuyaButton
@@ -57,8 +59,36 @@ fun IntruderLogsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val session by container.sessionManager.sessionState.collectAsState()
+    val isSecondary = (session as? VaultSession.Unlocked)?.kind == VaultKind.SECONDARY
+    val realVaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
+
+    // Secondary vault mode must never see real intruder logs
+    if (isSecondary) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(SuyaColors.Background)
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                SuyaTopBar(
+                    title = "Security Log",
+                    navigationIcon = Icons.AutoMirrored.Filled.ArrowBack,
+                    onNavigationClick = onBack
+                )
+                EmptyState(
+                    icon = Icons.Default.CameraAlt,
+                    title = "No Logs Available",
+                    subtitle = "No security events are recorded for this session.",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        return
+    }
+
     val scope = rememberCoroutineScope()
-    val events by container.database.intruderEventDao().getAllEvents().collectAsState(initial = emptyList())
+    val events by container.database.intruderEventDao().getEventsForVault(realVaultId).collectAsState(initial = emptyList())
     val dateFormat = SimpleDateFormat("MMM dd, yyyy  h:mm a", Locale.getDefault())
 
     Box(
@@ -77,7 +107,12 @@ fun IntruderLogsScreen(
                             text = "Clear All",
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
-                                    container.database.intruderEventDao().deleteAll()
+                                    for (event in events) {
+                                        event.encryptedImageRelativePath?.let {
+                                            container.vaultFileStore.getSecurityFile(realVaultId, event.id).delete()
+                                        }
+                                    }
+                                    container.database.intruderEventDao().deleteAllForVault(realVaultId)
                                 }
                             },
                             variant = ButtonVariant.Ghost
@@ -110,17 +145,19 @@ fun IntruderLogsScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(14.dp)
                             ) {
-                                // Decrypt intruder photo if available
                                 val photoFile = event.encryptedImageRelativePath?.let {
-                                    container.vaultFileStore.getSecurityFile("global_security", event.id)
+                                    container.vaultFileStore.getSecurityFile(realVaultId, event.id)
                                 }
 
                                 if (photoFile != null && photoFile.exists()) {
-                                    val dummyKey = "suya-phot-intruder-safety-key-256".toByteArray(Charsets.UTF_8).copyOf(32)
+                                    val key = container.intruderKeyProvider.getOrCreateKey()
+                                    val aad = "suya-phot:intruder:v1:${event.id}".toByteArray(Charsets.UTF_8)
                                     val bitmap = try {
-                                        val dec = Aead.decryptWithPrependedNonce(dummyKey, photoFile.readBytes(), event.id.toByteArray(Charsets.UTF_8))
+                                        val dec = Aead.decryptWithPrependedNonce(key.encoded, photoFile.readBytes(), aad)
                                         BitmapFactory.decodeByteArray(dec, 0, dec.size)
-                                    } catch (e: Exception) { null }
+                                    } catch (e: Exception) {
+                                        null
+                                    }
 
                                     if (bitmap != null) {
                                         Image(
@@ -155,9 +192,22 @@ fun IntruderLogsScreen(
 
                                 Spacer(modifier = Modifier.width(14.dp))
 
+                                val detailText = if (event.encryptedDetails != null) {
+                                    try {
+                                        val key = container.intruderKeyProvider.getOrCreateKey()
+                                        val aad = "suya-phot:intruder:v1:${event.id}".toByteArray(Charsets.UTF_8)
+                                        val dec = Aead.decryptWithPrependedNonce(key.encoded, event.encryptedDetails, aad)
+                                        String(dec, Charsets.UTF_8)
+                                    } catch (e: Exception) {
+                                        "Failed PIN attempt"
+                                    }
+                                } else {
+                                    "Failed PIN attempt"
+                                }
+
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = event.failureType,
+                                        text = detailText,
                                         fontFamily = SoraFontFamily,
                                         fontSize = 14.sp,
                                         color = SuyaColors.White
@@ -177,7 +227,7 @@ fun IntruderLogsScreen(
                                     onClick = {
                                         scope.launch(Dispatchers.IO) {
                                             photoFile?.delete()
-                                            container.database.intruderEventDao().delete(event.id)
+                                            container.database.intruderEventDao().deleteForVault(event.id, realVaultId)
                                         }
                                     },
                                     size = 36

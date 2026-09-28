@@ -2,6 +2,7 @@ package com.suyaphot.app.feature.photos
 
 import android.graphics.Bitmap
 import android.net.Uri
+import com.suyaphot.app.core.crypto.Aead
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -46,6 +47,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -90,8 +92,9 @@ fun PhotosScreen(
     var isSearchVisible by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
 
-    val selectedMediaIds = remember { mutableStateListOf<String>() }
+    val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() } }
+    val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
 
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
@@ -150,6 +153,28 @@ fun PhotosScreen(
         }
     }
 
+    val filteredItems = remember(items, searchQuery, session) {
+        if (searchQuery.isBlank() || session !is VaultSession.Unlocked) {
+            items
+        } else {
+            val q = searchQuery.trim().lowercase()
+            items.filter { item ->
+                val entity = rawEntities.firstOrNull { it.id == item.id }
+                val name = try {
+                    if (entity != null) {
+                        val dec = Aead.decryptWithPrependedNonce(
+                            session.metaSubkey,
+                            entity.encryptedMetadata,
+                            entity.id.toByteArray(Charsets.UTF_8)
+                        )
+                        com.suyaphot.app.core.model.PrivateMediaMetadata.deserialize(dec).originalDisplayName.lowercase()
+                    } else ""
+                } catch (e: Exception) { "" }
+                name.contains(q) || item.id.lowercase().contains(q)
+            }
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -187,7 +212,7 @@ fun PhotosScreen(
                             contentDescription = "Select all",
                             onClick = {
                                 selectedMediaIds.clear()
-                                selectedMediaIds.addAll(items.map { it.id })
+                                filteredItems.forEach { selectedMediaIds[it.id] = Unit }
                             },
                             size = 38
                         )
@@ -226,7 +251,7 @@ fun PhotosScreen(
                     SuyaSearchField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
-                        placeholder = "Search filenames, folders..."
+                        placeholder = "Search filenames, media..."
                     )
                 }
             }
@@ -239,12 +264,12 @@ fun PhotosScreen(
             )
 
             // Media Grid or Empty State
-            if (items.isEmpty() && !isImporting) {
+            if (filteredItems.isEmpty() && !isImporting) {
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
-                    title = "No media in vault",
-                    subtitle = "Tap '+' to import private photos or videos from your gallery.",
-                    actionText = "Import Photos & Videos",
+                    title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
+                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to import private photos or videos from your gallery.",
+                    actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
                     onActionClick = {
                         pickerLauncher.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
@@ -254,17 +279,17 @@ fun PhotosScreen(
                 )
             } else {
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
+                    columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
                     modifier = Modifier.weight(1f)
                 ) {
                     items(
-                        items = items,
+                        items = filteredItems,
                         key = { it.id }
                     ) { item ->
-                        val isSelected = selectedMediaIds.contains(item.id)
+                        val isSelected = selectedMediaIds.containsKey(item.id)
                         MediaTile(
                             item = item,
                             isSelected = isSelected,
@@ -272,21 +297,21 @@ fun PhotosScreen(
                             onClick = {
                                 if (isInSelectionMode) {
                                     if (isSelected) selectedMediaIds.remove(item.id)
-                                    else selectedMediaIds.add(item.id)
+                                    else selectedMediaIds[item.id] = Unit
                                 } else {
                                     onMediaClick(item.id)
                                 }
                             },
                             onLongClick = {
-                                if (!selectedMediaIds.contains(item.id)) {
-                                    selectedMediaIds.add(item.id)
+                                if (!selectedMediaIds.containsKey(item.id)) {
+                                    selectedMediaIds[item.id] = Unit
                                 }
                             },
                             thumbLoader = { itemId ->
                                 val thumbFile = container.vaultFileStore.getThumbFile(vaultId, itemId)
                                 val subkey = (container.sessionManager.sessionState.value as? VaultSession.Unlocked)?.thumbSubkey
                                 if (subkey != null) {
-                                    container.thumbnailGenerator.decryptThumbnail(thumbFile, subkey)
+                                    container.thumbnailGenerator.decryptThumbnail(thumbFile, subkey, itemId)
                                 } else null
                             }
                         )
@@ -372,7 +397,7 @@ fun PhotosScreen(
             confirmText = "Move to Trash",
             onConfirm = {
                 scope.launch {
-                    val ids = selectedMediaIds.toList()
+                    val ids = selectedMediaIds.keys.toList()
                     selectedMediaIds.clear()
                     showDeleteConfirmDialog = false
                     withContext(Dispatchers.IO) {
@@ -399,7 +424,7 @@ fun PhotosScreen(
             confirmText = "Restore",
             onConfirm = {
                 scope.launch {
-                    val ids = selectedMediaIds.toList()
+                    val ids = selectedMediaIds.keys.toList()
                     selectedMediaIds.clear()
                     showRestoreConfirmDialog = false
                     withContext(Dispatchers.IO) {

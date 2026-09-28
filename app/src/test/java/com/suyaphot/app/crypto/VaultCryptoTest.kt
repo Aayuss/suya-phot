@@ -59,6 +59,37 @@ class VaultCryptoTest {
     }
 
     @Test
+    fun unknownPlaintextSizeRoundTripsAndAuthenticates() {
+        val mediaSubkey = vaultCrypto.deriveMediaSubkey(masterKey)
+        val input = ByteArray(1_234_567) { (it % 251).toByte() }
+        val encrypted = File(tempFolder.root, "unknown.sph")
+
+        val enc = vaultCrypto.encryptStream(
+            input = ByteArrayInputStream(input),
+            outputFile = encrypted,
+            mediaSubkey = mediaSubkey,
+            itemId = "unknown-size-item",
+            isVideo = false,
+            plaintextSize = -1L
+        )
+
+        val verify = vaultCrypto.verifyAndHash(
+            encrypted,
+            mediaSubkey,
+            "unknown-size-item"
+        )
+
+        assertEquals(input.size.toLong(), enc.plaintextSize)
+        assertEquals(input.size.toLong(), verify.plaintextSize)
+        assertArrayEquals(enc.sha256, verify.sha256)
+
+        val baos = ByteArrayOutputStream()
+        val dec = vaultCrypto.decryptTo(encrypted, mediaSubkey, "unknown-size-item", baos)
+        assertEquals(input.size.toLong(), dec.plaintextSize)
+        assertArrayEquals(input, baos.toByteArray())
+    }
+
+    @Test
     fun testTamperedEncryptedMediaFailsVerification() {
         val mediaSubkey = vaultCrypto.deriveMediaSubkey(masterKey)
         val itemId = "test-item-tamper"

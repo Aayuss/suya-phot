@@ -1,5 +1,7 @@
 package com.suyaphot.app.feature.lock
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -21,6 +24,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -31,11 +35,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.suyaphot.app.R
 import com.suyaphot.app.app.AppContainer
+import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.auth.AuthResult
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.PinDots
@@ -45,9 +53,11 @@ import com.suyaphot.app.ui.components.SuyaDialog
 import com.suyaphot.app.ui.components.SuyaTextField
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun LockScreen(
@@ -68,7 +78,18 @@ fun LockScreen(
     var showForgotPinDialog by remember { mutableStateOf(false) }
     var recoveryCodeInput by remember { mutableStateOf("") }
     var newPinInput by remember { mutableStateOf("") }
+    var confirmNewPinInput by remember { mutableStateOf("") }
     var recoveryError by remember { mutableStateOf<String?>(null) }
+
+    // Check if biometric is enrolled for real vault
+    val realVaultWithBiometric by produceState<com.suyaphot.app.core.database.entity.VaultEntity?>(initialValue = null) {
+        value = withContext(Dispatchers.IO) {
+            val v = container.database.vaultDao().getVaultByKind(VaultKind.REAL.code)
+            if (v?.biometricEnvelope != null && v.biometricIv != null) v else null
+        }
+    }
+
+    val isBiometricEnrolled = realVaultWithBiometric != null
 
     // Lockout countdown timer
     LaunchedEffect(lockoutTimestamp) {
@@ -80,6 +101,64 @@ fun LockScreen(
                 lockoutSecondsLeft = 0
             }
             delay(1000L)
+        }
+    }
+
+    fun launchBiometricPrompt() {
+        val vault = realVaultWithBiometric ?: return
+        val iv = vault.biometricIv ?: return
+        val activity = context as? FragmentActivity ?: return
+
+        try {
+            val decryptCipher = container.keyManager.createBiometricDecryptCipher(vault.id, iv)
+            val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                .setTitle("Unlock Suya Phot")
+                .setSubtitle("Use your fingerprint to unlock your secure vault")
+                .setNegativeButtonText("Use PIN")
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                .build()
+
+            val biometricPrompt = BiometricPrompt(
+                activity,
+                ContextCompat.getMainExecutor(activity),
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        val authCipher = result.cryptoObject?.cipher ?: return
+                        scope.launch {
+                            val authResult = container.pinAuthenticator.authenticateWithBiometric(authCipher)
+                            if (authResult is AuthResult.Success) {
+                                onUnlocked()
+                            } else {
+                                errorMessage = "Biometric authentication failed"
+                            }
+                        }
+                    }
+
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        if (errorCode != BiometricPrompt.ERROR_USER_CANCELED && errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON) {
+                            errorMessage = errString.toString()
+                        }
+                    }
+
+                    override fun onAuthenticationFailed() {
+                        errorMessage = "Fingerprint not recognized"
+                    }
+                }
+            )
+
+            biometricPrompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(decryptCipher))
+        } catch (e: Exception) {
+            errorMessage = "Biometric unlock unavailable"
+        }
+    }
+
+    // Launch biometric on screen entry if enabled and available
+    LaunchedEffect(isBiometricEnrolled) {
+        if (isBiometricEnrolled && lockoutSecondsLeft <= 0) {
+            val autoPrompt = container.preferences.biometricOnLaunch.first()
+            if (autoPrompt) {
+                launchBiometricPrompt()
+            }
         }
     }
 
@@ -194,7 +273,12 @@ fun LockScreen(
                         errorMessage = null
                     }
                 },
-                showBiometric = false // Biometric prompt is initiated cleanly or via settings
+                showBiometric = isBiometricEnrolled,
+                onBiometricClick = {
+                    if (lockoutSecondsLeft <= 0) {
+                        launchBiometricPrompt()
+                    }
+                }
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -218,19 +302,32 @@ fun LockScreen(
         SuyaDialog(
             onDismissRequest = {
                 showForgotPinDialog = false
+                recoveryCodeInput = ""
+                newPinInput = ""
+                confirmNewPinInput = ""
                 recoveryError = null
             },
             title = "Recovery Kit",
             confirmText = "Reset PIN",
             onConfirm = {
-                if (recoveryCodeInput.isEmpty() || newPinInput.length < 6) {
-                    recoveryError = "Enter your recovery code and a new 6-digit PIN"
+                val digits = newPinInput.filter(Char::isDigit)
+                if (recoveryCodeInput.trim().isEmpty()) {
+                    recoveryError = "Please enter your recovery code"
                     return@SuyaDialog
                 }
+                if (digits.length != 6) {
+                    recoveryError = "New PIN must be exactly 6 digits"
+                    return@SuyaDialog
+                }
+                if (newPinInput != confirmNewPinInput) {
+                    recoveryError = "PIN confirmation does not match"
+                    return@SuyaDialog
+                }
+
                 scope.launch {
                     val success = container.pinAuthenticator.recoverWithCode(
-                        recoveryCodeInput = recoveryCodeInput,
-                        newPinChars = newPinInput.toCharArray()
+                        recoveryCodeInput = recoveryCodeInput.trim(),
+                        newPinChars = digits.toCharArray()
                     )
                     if (success) {
                         showForgotPinDialog = false
@@ -243,22 +340,38 @@ fun LockScreen(
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Enter your 16-character recovery code to reset your vault PIN.",
+                    text = "Enter your 26-character recovery code to reset your vault PIN.",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted
                 )
                 SuyaTextField(
                     value = recoveryCodeInput,
-                    onValueChange = { recoveryCodeInput = it },
-                    placeholder = "7K9P-4X2B-W8MN-3C5R",
+                    onValueChange = { recoveryCodeInput = it.uppercase() },
+                    placeholder = "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX",
                     label = "Recovery Code"
                 )
                 SuyaTextField(
                     value = newPinInput,
-                    onValueChange = { if (it.length <= 6) newPinInput = it },
+                    onValueChange = { input ->
+                        val digits = input.filter(Char::isDigit)
+                        if (digits.length <= 6) newPinInput = digits
+                    },
                     placeholder = "Enter new 6-digit PIN",
-                    label = "New PIN"
+                    label = "New PIN",
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                )
+                SuyaTextField(
+                    value = confirmNewPinInput,
+                    onValueChange = { input ->
+                        val digits = input.filter(Char::isDigit)
+                        if (digits.length <= 6) confirmNewPinInput = digits
+                    },
+                    placeholder = "Confirm new 6-digit PIN",
+                    label = "Confirm PIN",
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
                 )
                 if (recoveryError != null) {
                     Text(

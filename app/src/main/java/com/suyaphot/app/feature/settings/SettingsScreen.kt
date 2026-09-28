@@ -33,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -135,6 +136,62 @@ fun SettingsScreen(
                     icon = Icons.Default.Delete,
                     onClick = onOpenTrash
                 )
+
+                // Grid Columns Setting
+                val gridColumns by container.preferences.gridColumns.collectAsState(initial = 3)
+                var showGridColumnsDialog by remember { mutableStateOf(false) }
+
+                SettingRowItem(
+                    title = "Gallery Grid Columns",
+                    subtitle = "$gridColumns columns (current)",
+                    icon = Icons.Default.GridView,
+                    onClick = { showGridColumnsDialog = true }
+                )
+
+                if (showGridColumnsDialog) {
+                    com.suyaphot.app.ui.components.SuyaDialog(
+                        onDismissRequest = { showGridColumnsDialog = false },
+                        title = "Grid Density",
+                        content = {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                listOf(2, 3, 4, 5).forEach { cols ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                scope.launch {
+                                                    container.preferences.setGridColumns(cols)
+                                                    showGridColumnsDialog = false
+                                                }
+                                            }
+                                            .padding(vertical = 8.dp)
+                                    ) {
+                                        androidx.compose.material3.RadioButton(
+                                            selected = gridColumns == cols,
+                                            onClick = {
+                                                scope.launch {
+                                                    container.preferences.setGridColumns(cols)
+                                                    showGridColumnsDialog = false
+                                                }
+                                            },
+                                            colors = androidx.compose.material3.RadioButtonDefaults.colors(selectedColor = SuyaColors.Accent)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "$cols columns",
+                                            fontFamily = SoraFontFamily,
+                                            fontSize = 14.sp,
+                                            color = SuyaColors.White
+                                        )
+                                    }
+                                }
+                            }
+                        },
+                        confirmText = "Close",
+                        onConfirm = { showGridColumnsDialog = false }
+                    )
+                }
 
                 // Lock Vault Now
                 SettingRowItem(

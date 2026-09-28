@@ -8,15 +8,13 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
 import com.suyaphot.app.core.crypto.Aead
-import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.util.SafeLog
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 
 /**
- * Generates and encrypts downsampled thumbnails for images and videos.
+ * Generates and encrypts downsampled thumbnails for images and videos with zero full-file buffering.
  */
 class ThumbnailGenerator(private val context: Context) {
 
@@ -26,29 +24,37 @@ class ThumbnailGenerator(private val context: Context) {
     }
 
     /**
-     * Generates a downsampled bitmap from an image stream, compresses it to JPEG,
-     * encrypts with [thumbSubkey] using AES-256-GCM, and writes to [outputThumbFile].
+     * Generates a downsampled bitmap using two-pass streaming decode (avoiding full-file heap allocations),
+     * compresses to JPEG, encrypts with [thumbSubkey] bound to [itemId] AAD, and atomically writes to [outputThumbFile].
      */
     fun generateAndEncryptImageThumbnail(
-        imageStream: InputStream,
+        imageUri: Uri,
+        itemId: String,
         thumbSubkey: ByteArray,
         outputThumbFile: File,
         orientation: Int = ExifInterface.ORIENTATION_NORMAL
     ): Boolean {
-        return try {
-            outputThumbFile.parentFile?.mkdirs()
+        outputThumbFile.parentFile?.mkdirs()
+        val partialThumbFile = File(outputThumbFile.parentFile, "${outputThumbFile.name}.partial")
 
-            val bytes = imageStream.readBytes()
+        return try {
+            // Pass 1: Decode bounds only
             val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOptions)
+            context.contentResolver.openInputStream(imageUri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, boundsOptions)
+            } ?: return false
 
             val sampleSize = calculateInSampleSize(boundsOptions, TARGET_THUMB_SIZE, TARGET_THUMB_SIZE)
+
+            // Pass 2: Decode downsampled bitmap
             val decodeOptions = BitmapFactory.Options().apply {
                 inSampleSize = sampleSize
                 inPreferredConfig = Bitmap.Config.RGB_565 // Memory efficient
             }
 
-            var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions) ?: return false
+            var bitmap = context.contentResolver.openInputStream(imageUri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, decodeOptions)
+            } ?: return false
 
             if (orientation != ExifInterface.ORIENTATION_NORMAL && orientation != ExifInterface.ORIENTATION_UNDEFINED) {
                 bitmap = applyExifRotation(bitmap, orientation)
@@ -62,37 +68,46 @@ class ThumbnailGenerator(private val context: Context) {
             val encryptedBytes = Aead.encryptWithPrependedNonce(
                 keyBytes = thumbSubkey,
                 plaintext = plaintextBytes,
-                aad = "thumbnail-v1".toByteArray(Charsets.UTF_8)
+                aad = "suya-phot:thumbnail:v1:$itemId".toByteArray(Charsets.UTF_8)
             )
 
-            FileOutputStream(outputThumbFile).use { fos ->
+            FileOutputStream(partialThumbFile).use { fos ->
                 fos.write(encryptedBytes)
                 fos.flush()
                 runCatching { fos.fd.sync() }
             }
+
+            if (!partialThumbFile.renameTo(outputThumbFile)) {
+                partialThumbFile.copyTo(outputThumbFile, overwrite = true)
+                partialThumbFile.delete()
+            }
             true
         } catch (e: Exception) {
             SafeLog.e("ThumbnailGenerator", "Error generating image thumbnail", e)
+            if (partialThumbFile.exists()) partialThumbFile.delete()
             false
         }
     }
 
     /**
      * Extracts a representative video frame using MediaMetadataRetriever,
-     * downsamples, encrypts with [thumbSubkey], and writes to [outputThumbFile].
+     * downsamples, encrypts with [thumbSubkey] bound to [itemId] AAD, and writes to [outputThumbFile].
      */
     fun generateAndEncryptVideoThumbnail(
         videoUri: Uri,
+        itemId: String,
         thumbSubkey: ByteArray,
         outputThumbFile: File
     ): Boolean {
         val retriever = MediaMetadataRetriever()
+        outputThumbFile.parentFile?.mkdirs()
+        val partialThumbFile = File(outputThumbFile.parentFile, "${outputThumbFile.name}.partial")
+
         return try {
-            outputThumbFile.parentFile?.mkdirs()
             retriever.setDataSource(context, videoUri)
 
             // Extract frame at 1 second
-            var frame = retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            val frame = retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: retriever.frameAtTime
 
             if (frame != null) {
@@ -111,13 +126,18 @@ class ThumbnailGenerator(private val context: Context) {
                 val encrypted = Aead.encryptWithPrependedNonce(
                     keyBytes = thumbSubkey,
                     plaintext = baos.toByteArray(),
-                    aad = "thumbnail-v1".toByteArray(Charsets.UTF_8)
+                    aad = "suya-phot:thumbnail:v1:$itemId".toByteArray(Charsets.UTF_8)
                 )
 
-                FileOutputStream(outputThumbFile).use { fos ->
+                FileOutputStream(partialThumbFile).use { fos ->
                     fos.write(encrypted)
                     fos.flush()
                     runCatching { fos.fd.sync() }
+                }
+
+                if (!partialThumbFile.renameTo(outputThumbFile)) {
+                    partialThumbFile.copyTo(outputThumbFile, overwrite = true)
+                    partialThumbFile.delete()
                 }
                 true
             } else {
@@ -125,6 +145,7 @@ class ThumbnailGenerator(private val context: Context) {
             }
         } catch (e: Exception) {
             SafeLog.e("ThumbnailGenerator", "Error generating video thumbnail", e)
+            if (partialThumbFile.exists()) partialThumbFile.delete()
             false
         } finally {
             try {
@@ -138,16 +159,27 @@ class ThumbnailGenerator(private val context: Context) {
      */
     fun decryptThumbnail(
         thumbFile: File,
-        thumbSubkey: ByteArray
+        thumbSubkey: ByteArray,
+        itemId: String? = null
     ): Bitmap? {
         if (!thumbFile.exists()) return null
         return try {
             val encryptedBytes = thumbFile.readBytes()
-            val plaintextBytes = Aead.decryptWithPrependedNonce(
-                keyBytes = thumbSubkey,
-                payload = encryptedBytes,
-                aad = "thumbnail-v1".toByteArray(Charsets.UTF_8)
-            )
+            val plaintextBytes = try {
+                val aad = if (itemId != null) "suya-phot:thumbnail:v1:$itemId".toByteArray(Charsets.UTF_8) else "thumbnail-v1".toByteArray(Charsets.UTF_8)
+                Aead.decryptWithPrependedNonce(
+                    keyBytes = thumbSubkey,
+                    payload = encryptedBytes,
+                    aad = aad
+                )
+            } catch (e: Exception) {
+                // Fallback to legacy AAD for older thumbnails
+                Aead.decryptWithPrependedNonce(
+                    keyBytes = thumbSubkey,
+                    payload = encryptedBytes,
+                    aad = "thumbnail-v1".toByteArray(Charsets.UTF_8)
+                )
+            }
             BitmapFactory.decodeByteArray(plaintextBytes, 0, plaintextBytes.size)
         } catch (e: Exception) {
             SafeLog.e("ThumbnailGenerator", "Failed decrypting thumbnail: ${thumbFile.name}", e)

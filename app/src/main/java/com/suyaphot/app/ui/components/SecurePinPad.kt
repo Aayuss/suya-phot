@@ -30,6 +30,9 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.suyaphot.app.ui.theme.SuyaColors
 import com.suyaphot.app.ui.theme.SuyaStyles
@@ -162,6 +165,10 @@ private fun PinKey(
         modifier = modifier
             .height(58.dp)
             .scale(scale)
+            .semantics {
+                this.contentDescription = contentDescription
+                this.role = Role.Button
+            }
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -195,6 +202,10 @@ private fun ActionKey(
         modifier = modifier
             .height(58.dp)
             .scale(scale)
+            .semantics {
+                this.contentDescription = contentDescription
+                this.role = Role.Button
+            }
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,

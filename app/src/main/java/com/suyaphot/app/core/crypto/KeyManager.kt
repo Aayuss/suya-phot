@@ -4,13 +4,12 @@ import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import java.io.File
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
-import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
@@ -20,14 +19,16 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * Manages cryptographic envelopes for PIN, Biometric, and Recovery unlocking.
  */
-class KeyManager(private val context: Context) {
+class KeyManager(
+    private val context: Context,
+    private val pepperProvider: PepperProvider
+) {
 
     companion object {
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        const val KEYSTORE_PEPPER_ALIAS = "suya_phot_hmac_pepper"
         const val KEYSTORE_BIOMETRIC_ALIAS_PREFIX = "suya_phot_biometric_"
 
-        const val PBKDF2_ITERATIONS = 100_000
+        const val PBKDF2_ITERATIONS = 150_000
         const val PIN_SALT_LEN = 16
         const val MASTER_KEY_LEN = 32
 
@@ -43,6 +44,7 @@ class KeyManager(private val context: Context) {
     ) {
         fun serialize(): ByteArray {
             val buf = ByteBuffer.allocate(4 + 4 + salt.size + 4 + 4 + nonce.size + 4 + wrappedKey.size)
+                .order(ByteOrder.BIG_ENDIAN)
             buf.putInt(version)
             buf.putInt(salt.size)
             buf.put(salt)
@@ -56,18 +58,32 @@ class KeyManager(private val context: Context) {
 
         companion object {
             fun deserialize(bytes: ByteArray): PinEnvelope {
-                val buf = ByteBuffer.wrap(bytes)
-                val version = buf.getInt()
-                val saltLen = buf.getInt()
+                require(bytes.size in 64..4096) { "Invalid PIN envelope size: ${bytes.size}" }
+                val buf = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+
+                val version = buf.int
+                require(version == 1) { "Unsupported PIN envelope version: $version" }
+
+                val saltLen = buf.int
+                require(saltLen in 16..64) { "Invalid salt length: $saltLen" }
                 val salt = ByteArray(saltLen)
                 buf.get(salt)
-                val iterations = buf.getInt()
-                val nonceLen = buf.getInt()
+
+                val iterations = buf.int
+                require(iterations in 50_000..10_000_000) { "Invalid PBKDF2 iteration count: $iterations" }
+
+                val nonceLen = buf.int
+                require(nonceLen == 12) { "Invalid nonce length: $nonceLen" }
                 val nonce = ByteArray(nonceLen)
                 buf.get(nonce)
-                val wrappedLen = buf.getInt()
+
+                val wrappedLen = buf.int
+                require(wrappedLen in 48..256) { "Invalid wrapped key length: $wrappedLen" }
                 val wrapped = ByteArray(wrappedLen)
                 buf.get(wrapped)
+
+                require(!buf.hasRemaining()) { "Unexpected trailing bytes in PIN envelope" }
+
                 return PinEnvelope(version, salt, iterations, nonce, wrapped)
             }
         }
@@ -81,6 +97,7 @@ class KeyManager(private val context: Context) {
     ) {
         fun serialize(): ByteArray {
             val buf = ByteBuffer.allocate(4 + 4 + salt.size + 4 + nonce.size + 4 + wrappedKey.size)
+                .order(ByteOrder.BIG_ENDIAN)
             buf.putInt(version)
             buf.putInt(salt.size)
             buf.put(salt)
@@ -93,17 +110,29 @@ class KeyManager(private val context: Context) {
 
         companion object {
             fun deserialize(bytes: ByteArray): RecoveryEnvelope {
-                val buf = ByteBuffer.wrap(bytes)
-                val version = buf.getInt()
-                val saltLen = buf.getInt()
+                require(bytes.size in 64..4096) { "Invalid recovery envelope size: ${bytes.size}" }
+                val buf = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+
+                val version = buf.int
+                require(version == 1) { "Unsupported recovery envelope version: $version" }
+
+                val saltLen = buf.int
+                require(saltLen in 16..64) { "Invalid salt length: $saltLen" }
                 val salt = ByteArray(saltLen)
                 buf.get(salt)
-                val nonceLen = buf.getInt()
+
+                val nonceLen = buf.int
+                require(nonceLen == 12) { "Invalid nonce length: $nonceLen" }
                 val nonce = ByteArray(nonceLen)
                 buf.get(nonce)
-                val wrappedLen = buf.getInt()
+
+                val wrappedLen = buf.int
+                require(wrappedLen in 48..256) { "Invalid wrapped key length: $wrappedLen" }
                 val wrapped = ByteArray(wrappedLen)
                 buf.get(wrapped)
+
+                require(!buf.hasRemaining()) { "Unexpected trailing bytes in recovery envelope" }
+
                 return RecoveryEnvelope(version, salt, nonce, wrapped)
             }
         }
@@ -131,7 +160,7 @@ class KeyManager(private val context: Context) {
             pbeSpec.clearPassword()
         }
 
-        // Apply hardware pepper if available
+        // Apply hardware pepper
         val peppered = applyKeystorePepper(pbkdf2Key)
 
         // Final HKDF expand into 256-bit AES key
@@ -143,38 +172,20 @@ class KeyManager(private val context: Context) {
     }
 
     private fun applyKeystorePepper(data: ByteArray): ByteArray {
-        return try {
-            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-            if (!keyStore.containsAlias(KEYSTORE_PEPPER_ALIAS)) {
-                val keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, ANDROID_KEYSTORE)
-                keyGen.init(
-                    KeyGenParameterSpec.Builder(
-                        KEYSTORE_PEPPER_ALIAS,
-                        KeyProperties.PURPOSE_SIGN
-                    ).build()
-                )
-                keyGen.generateKey()
-            }
-            val secretKey = keyStore.getKey(KEYSTORE_PEPPER_ALIAS, null) as SecretKey
-            val mac = Mac.getInstance("HmacSHA256")
-            mac.init(secretKey)
-            mac.doFinal(data)
-        } catch (e: Exception) {
-            // Fallback for non-Android environments (like standard JUnit JVM tests)
-            val fallbackKey = SecretKeySpec("suya-phot-local-pepper-fallback".toByteArray(Charsets.UTF_8), "HmacSHA256")
-            val mac = Mac.getInstance("HmacSHA256")
-            mac.init(fallbackKey)
-            mac.doFinal(data)
-        }
+        return pepperProvider.hmacSha256(data)
     }
 
     /**
      * Wraps a master key inside a PinEnvelope.
      */
-    fun createPinEnvelope(masterKey: ByteArray, pinChars: CharArray): PinEnvelope {
+    fun createPinEnvelope(
+        masterKey: ByteArray,
+        pinChars: CharArray,
+        iterations: Int = PBKDF2_ITERATIONS
+    ): PinEnvelope {
         val salt = ByteArray(PIN_SALT_LEN)
         SecureRandom().nextBytes(salt)
-        val kek = derivePinKek(pinChars, salt, PBKDF2_ITERATIONS)
+        val kek = derivePinKek(pinChars, salt, iterations)
         val nonce = Aead.generateNonce()
         val wrappedKey = try {
             Aead.encrypt(kek, nonce, aad = "pin-envelope-v1".toByteArray(Charsets.UTF_8), plaintext = masterKey)
@@ -184,7 +195,7 @@ class KeyManager(private val context: Context) {
         return PinEnvelope(
             version = 1,
             salt = salt,
-            iterations = PBKDF2_ITERATIONS,
+            iterations = iterations,
             nonce = nonce,
             wrappedKey = wrappedKey
         )
@@ -206,40 +217,53 @@ class KeyManager(private val context: Context) {
     }
 
     /**
-     * Generates a 128-bit high-entropy recovery secret formatted into 4 groups of 4 chars (e.g., "7K9P-4X2B-W8MN-3C5R").
+     * Generates a 128-bit high-entropy recovery secret formatted into 26 Base32 characters:
+     * e.g. "7K9P-4X2B-W8MN-3C5R-6H9Q-7X2A-B9".
      */
     fun generateRecoverySecret(): String {
         val bytes = ByteArray(16) // 128 bits
         SecureRandom().nextBytes(bytes)
-        val sb = StringBuilder()
+        return try {
+            val raw = encodeBase32(bytes)
+            raw.chunked(4).joinToString("-")
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    private fun encodeBase32(input: ByteArray): String {
+        val out = StringBuilder((input.size * 8 + 4) / 5)
         var buffer = 0
         var bitsLeft = 0
-        for (b in bytes) {
+        for (b in input) {
             buffer = (buffer shl 8) or (b.toInt() and 0xFF)
             bitsLeft += 8
             while (bitsLeft >= 5) {
                 val index = (buffer shr (bitsLeft - 5)) and 0x1F
-                sb.append(BASE32_ALPHABET[index])
+                out.append(BASE32_ALPHABET[index])
                 bitsLeft -= 5
             }
         }
         if (bitsLeft > 0) {
             val index = (buffer shl (5 - bitsLeft)) and 0x1F
-            sb.append(BASE32_ALPHABET[index])
+            out.append(BASE32_ALPHABET[index])
         }
-
-        val raw = sb.toString().take(16)
-        return raw.chunked(4).joinToString("-")
+        return out.toString()
     }
 
     /**
      * Normalizes a recovery secret input (removes dashes, spaces, uppercases).
+     * Enforces exactly 26 characters (full 128-bit entropy).
      */
     fun normalizeRecoverySecret(input: String): String {
-        return input.replace("-", "")
+        val normalized = input.replace("-", "")
             .replace(" ", "")
             .trim()
             .uppercase()
+        require(normalized.length == 26) {
+            "Recovery code must be exactly 26 characters (128-bit entropy), got ${normalized.length}"
+        }
+        return normalized
     }
 
     /**
@@ -276,7 +300,11 @@ class KeyManager(private val context: Context) {
      * Unwraps the master key from a RecoveryEnvelope using the user's recovery secret.
      */
     fun unwrapRecoveryEnvelope(envelope: RecoveryEnvelope, rawSecretInput: String): ByteArray? {
-        val normalized = normalizeRecoverySecret(rawSecretInput)
+        val normalized = try {
+            normalizeRecoverySecret(rawSecretInput)
+        } catch (e: Exception) {
+            return null
+        }
         val kek = deriveRecoveryKek(normalized, envelope.salt)
         return try {
             Aead.decrypt(kek, envelope.nonce, aad = "recovery-envelope-v1".toByteArray(Charsets.UTF_8), ciphertext = envelope.wrappedKey)

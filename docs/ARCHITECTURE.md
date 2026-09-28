@@ -26,8 +26,10 @@ com.suyaphot.app
 │   │   ├── HkdfSha256.kt
 │   │   ├── KeyManager.kt
 │   │   ├── VaultCrypto.kt
-│   │   └── SensitiveKeyHandle.kt
-│   ├── database                 // Room Database & DAOs
+│   │   ├── SensitiveKeyHandle.kt
+│   │   ├── PepperProvider.kt
+│   │   └── IntruderKeyProvider.kt
+│   ├── database                 // Room Database & DAOs (WAL mode, schema export enabled)
 │   │   ├── SuyaDatabase.kt
 │   │   ├── entity/              // VaultEntity, FolderEntity, MediaItemEntity, JobEntity, etc.
 │   │   └── dao/
@@ -37,19 +39,18 @@ com.suyaphot.app
 │   │   ├── ThumbnailGenerator.kt
 │   │   └── ExifHelper.kt
 │   ├── permissions              // Runtime permission handlers
-│   ├── shizuku                  // Optional Shizuku privilege connector
-│   └── util                     // SafeLog, FileStore, Digest
+│   └── util                     // SafeLog, VaultFileStore, Digest
 ├── domain
 │   ├── auth                     // Authentication, PIN verification, Biometric, Recovery
 │   │   ├── SessionManager.kt
-│   │   ├── PinAuthenticator.kt
-│   │   └── RecoveryManager.kt
-│   ├── importmedia              // Transactional import pipeline & job manager
+│   │   └── PinAuthenticator.kt
+│   ├── importmedia              // Transactional import pipeline & crash-safe recovery
 │   │   ├── ImportCoordinator.kt
+│   │   ├── ImportRecoveryManager.kt
 │   │   └── SourceDeletionCoordinator.kt
 │   ├── restore                  // MediaStore restoration pipeline
 │   │   └── RestoreCoordinator.kt
-│   └── folders                  // Folder tree, cycle prevention, moves
+│   └── folders                  // Folder tree, cycle prevention, transactional moves/deletes
 │       └── FolderManager.kt
 ├── feature
 │   ├── onboarding               // First-run setup, PIN creation, Recovery Kit
@@ -74,5 +75,20 @@ com.suyaphot.app
 
 - **ProcessLifecycleObserver**: Monitors foreground/background transitions.
 - **ElapsedRealtime**: Computes timeout durations without wakeful background timers.
-- **Memory Security**: Clears sensitive byte arrays in memory upon lock or background timeout.
+- **Memory Security**: Wipes sensitive byte arrays (`SensitiveKeyHandle`, master keys, intermediate byte arrays) upon lock or background timeout.
 - **Window Protection**: Toggles `FLAG_SECURE` to prevent screen capture and recent app thumbnail leakage.
+
+---
+
+## 4. Media Streaming & Memory Architecture
+
+- **Bounded Image Decoding**: 200MP images are sampled using two-pass `BitmapFactory` bounds calculation, clamped to 2560px max dimension and loaded into `Bitmap.Config.RGB_565`. Full files are never read into byte arrays via `readBytes()`.
+- **Ephemeral Video Playback**: Videos stream decrypted into an isolated `playback_cache` directory in private app cache. When the viewer is disposed or the vault locks, `DisposableEffect` releases ExoPlayer and unlinks the temporary file immediately.
+- **Encrypted Thumbnail Pipeline**: Fast grid tiles load from pre-generated AES-GCM encrypted thumbnails with dedicated disk and memory budgets.
+
+---
+
+## 5. Scope & Roadmap
+
+- **Shizuku Integration**: Deferred to post-v1 roadmap to maintain zero IPC attack surface in v1. V1 exclusively uses standard Android `MediaStore.createDeleteRequest`.
+- **Zero Cloud / Zero Telemetry**: Strict local-only operation with no network permissions or external SDKs.

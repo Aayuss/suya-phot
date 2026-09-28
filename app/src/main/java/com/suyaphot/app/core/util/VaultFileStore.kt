@@ -3,7 +3,9 @@ package com.suyaphot.app.core.util
 import android.content.Context
 import java.io.File
 import java.io.FileOutputStream
-import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.UUID
 
 /**
@@ -16,6 +18,9 @@ class VaultFileStore(private val context: Context) {
 
     private val shareCacheDir: File
         get() = File(context.cacheDir, "share_cache").apply { mkdirs() }
+
+    private val playbackCacheDir: File
+        get() = File(context.cacheDir, "playback_cache").apply { mkdirs() }
 
     fun getVaultDir(vaultId: String): File {
         return File(baseVaultDir, vaultId).apply { mkdirs() }
@@ -45,29 +50,42 @@ class VaultFileStore(private val context: Context) {
 
     /**
      * Atomically commits a partial file to the final destination using atomic rename.
+     * Never overwrites existing final ciphertext.
      */
     fun commitPartial(partialFile: File, finalFile: File): Boolean {
         require(partialFile.exists()) { "Partial file does not exist: ${partialFile.absolutePath}" }
+        check(!finalFile.exists()) { "Refusing to overwrite existing vault ciphertext: ${finalFile.absolutePath}" }
         finalFile.parentFile?.mkdirs()
 
-        if (partialFile.renameTo(finalFile)) {
-            return true
-        }
-
-        // Fallback: copy with fsync and delete
-        try {
-            partialFile.inputStream().use { input ->
-                FileOutputStream(finalFile).use { output ->
-                    input.copyTo(output)
-                    output.flush()
-                    output.fd.sync()
+        return try {
+            Files.move(
+                partialFile.toPath(),
+                finalFile.toPath(),
+                StandardCopyOption.ATOMIC_MOVE
+            )
+            true
+        } catch (e: AtomicMoveNotSupportedException) {
+            if (partialFile.renameTo(finalFile)) {
+                true
+            } else {
+                try {
+                    partialFile.inputStream().use { input ->
+                        FileOutputStream(finalFile).use { output ->
+                            input.copyTo(output)
+                            output.flush()
+                            output.fd.sync()
+                        }
+                    }
+                    partialFile.delete()
+                    true
+                } catch (ex: Exception) {
+                    SafeLog.e("VaultFileStore", "Failed to commit partial file to ${finalFile.name}", ex)
+                    false
                 }
             }
-            partialFile.delete()
-            return true
         } catch (e: Exception) {
-            SafeLog.e("VaultFileStore", "Failed to commit partial file to ${finalFile.name}", e)
-            return false
+            SafeLog.e("VaultFileStore", "Failed to move partial file to ${finalFile.name}", e)
+            false
         }
     }
 
@@ -98,6 +116,26 @@ class VaultFileStore(private val context: Context) {
     fun clearShareCache() {
         if (shareCacheDir.exists() && shareCacheDir.isDirectory) {
             shareCacheDir.listFiles()?.forEach { file ->
+                file.delete()
+            }
+        }
+    }
+
+    /**
+     * Creates a temporary file in dedicated playback cache.
+     */
+    fun createPlaybackTempFile(extension: String): File {
+        val ext = if (extension.startsWith(".")) extension else ".$extension"
+        val filename = "playback_${UUID.randomUUID()}$ext"
+        return File(playbackCacheDir, filename)
+    }
+
+    /**
+     * Clears all temporary video playback cache files.
+     */
+    fun clearPlaybackCache() {
+        if (playbackCacheDir.exists() && playbackCacheDir.isDirectory) {
+            playbackCacheDir.listFiles()?.forEach { file ->
                 file.delete()
             }
         }

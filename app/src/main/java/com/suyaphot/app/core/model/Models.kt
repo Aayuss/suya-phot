@@ -10,7 +10,8 @@ enum class VaultKind(val code: Int) {
     SECONDARY(1);
 
     companion object {
-        fun fromCode(code: Int): VaultKind = if (code == 1) SECONDARY else REAL
+        fun fromCode(code: Int): VaultKind =
+            entries.firstOrNull { it.code == code } ?: error("Unknown VaultKind code: $code")
     }
 }
 
@@ -19,7 +20,8 @@ enum class MediaType(val code: Int) {
     VIDEO(1);
 
     companion object {
-        fun fromCode(code: Int): MediaType = if (code == 1) VIDEO else IMAGE
+        fun fromCode(code: Int): MediaType =
+            entries.firstOrNull { it.code == code } ?: error("Unknown MediaType code: $code")
     }
 }
 
@@ -28,7 +30,8 @@ enum class JobType(val code: Int) {
     RESTORE(1);
 
     companion object {
-        fun fromCode(code: Int): JobType = if (code == 1) RESTORE else IMPORT
+        fun fromCode(code: Int): JobType =
+            entries.firstOrNull { it.code == code } ?: error("Unknown JobType code: $code")
     }
 }
 
@@ -45,7 +48,8 @@ enum class JobState(val code: Int) {
     FAILED(9);
 
     companion object {
-        fun fromCode(code: Int): JobState = entries.firstOrNull { it.code == code } ?: QUEUED
+        fun fromCode(code: Int): JobState =
+            entries.firstOrNull { it.code == code } ?: error("Unknown JobState code: $code")
     }
 }
 
@@ -69,6 +73,8 @@ data class PrivateMediaMetadata(
     fun serialize(): ByteArray {
         val baos = ByteArrayOutputStream()
         DataOutputStream(baos).use { out ->
+            out.writeInt(METADATA_MAGIC)
+            out.writeInt(METADATA_VERSION)
             out.writeUTF(originalDisplayName)
             out.writeBoolean(originalRelativePath != null)
             originalRelativePath?.let { out.writeUTF(it) }
@@ -97,8 +103,25 @@ data class PrivateMediaMetadata(
     }
 
     companion object {
+        private const val METADATA_MAGIC = 0x53504D31 // "SPM1"
+        private const val METADATA_VERSION = 1
+
         fun deserialize(bytes: ByteArray): PrivateMediaMetadata {
             DataInputStream(ByteArrayInputStream(bytes)).use { input ->
+                val isVersioned = if (bytes.size >= 8) {
+                    val magic = (bytes[0].toInt() and 0xFF shl 24) or
+                            (bytes[1].toInt() and 0xFF shl 16) or
+                            (bytes[2].toInt() and 0xFF shl 8) or
+                            (bytes[3].toInt() and 0xFF)
+                    magic == METADATA_MAGIC
+                } else false
+
+                if (isVersioned) {
+                    input.readInt() // skip magic
+                    val version = input.readInt()
+                    require(version == METADATA_VERSION) { "Unsupported metadata version: $version" }
+                }
+
                 val displayName = input.readUTF()
                 val relPath = if (input.readBoolean()) input.readUTF() else null
                 val mimeType = input.readUTF()
@@ -114,6 +137,7 @@ data class PrivateMediaMetadata(
                 val gps = input.readBoolean()
                 val ext = if (input.readBoolean()) input.readUTF() else null
                 val addCount = input.readInt()
+                require(addCount in 0..1000) { "Suspicious metadata additional count: $addCount" }
                 val map = mutableMapOf<String, String>()
                 for (i in 0 until addCount) {
                     map[input.readUTF()] = input.readUTF()

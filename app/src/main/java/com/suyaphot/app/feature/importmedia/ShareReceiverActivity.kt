@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
+import kotlinx.coroutines.Dispatchers
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -129,15 +130,22 @@ private fun ImportProgressView(
     val scope = rememberCoroutineScope()
     var statusText by remember { mutableStateOf("Preparing import...") }
     var isDone by remember { mutableStateOf(false) }
+    var pendingSuccesses by remember { mutableStateOf<List<com.suyaphot.app.domain.importmedia.ImportResult.Success>>(emptyList()) }
 
     val deleteRequestLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         isDone = true
-        statusText = if (result.resultCode == Activity.RESULT_OK) {
-            "Originals deleted from Gallery. Vault secured."
+        if (result.resultCode == Activity.RESULT_OK) {
+            statusText = "Originals deleted from Gallery. Vault secured."
+            scope.launch(Dispatchers.IO) {
+                val now = System.currentTimeMillis()
+                for (res in pendingSuccesses) {
+                    container.database.vaultJobDao().updateState(res.jobId, com.suyaphot.app.core.model.JobState.COMPLETED.code, now)
+                }
+            }
         } else {
-            "Imported safely. Originals kept in Gallery."
+            statusText = "Imported safely. Originals kept in Gallery."
         }
     }
 
@@ -152,8 +160,9 @@ private fun ImportProgressView(
                 }
             )
 
-            val successfulUris = results.filterIsInstance<com.suyaphot.app.domain.importmedia.ImportResult.Success>()
-                .map { it.uri }
+            val successfulResults = results.filterIsInstance<com.suyaphot.app.domain.importmedia.ImportResult.Success>()
+            val successfulUris = successfulResults.map { it.uri }
+            pendingSuccesses = successfulResults
 
             if (successfulUris.isNotEmpty()) {
                 statusText = "Requesting deletion of originals..."
@@ -161,6 +170,12 @@ private fun ImportProgressView(
                     is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
                         isDone = true
                         statusText = "Successfully imported ${successfulUris.size} items."
+                        scope.launch(Dispatchers.IO) {
+                            val now = System.currentTimeMillis()
+                            for (res in successfulResults) {
+                                container.database.vaultJobDao().updateState(res.jobId, com.suyaphot.app.core.model.JobState.COMPLETED.code, now)
+                            }
+                        }
                     }
                     is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
                         deleteRequestLauncher.launch(

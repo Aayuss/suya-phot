@@ -1,6 +1,6 @@
 package com.suyaphot.app.domain.importmedia
 
-import android.content.ContentResolver
+import android.app.RecoverableSecurityException
 import android.content.Context
 import android.content.IntentSender
 import android.net.Uri
@@ -28,6 +28,9 @@ class SourceDeletionCoordinator(private val context: Context) {
                 if (rows <= 0) {
                     remainingUris.add(uri)
                 }
+            } catch (rse: RecoverableSecurityException) {
+                // API 29 per-item user consent
+                return DeletionOutcome.RequiresUserConsent(rse.userAction.actionIntent.intentSender, listOf(uri))
             } catch (se: SecurityException) {
                 remainingUris.add(uri)
             } catch (e: Exception) {

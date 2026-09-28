@@ -144,7 +144,7 @@ fun MediaTile(
             Icon(
                 imageVector = Icons.Default.Star,
                 contentDescription = "Favorite",
-                tint = Color(0xFFFFD700),
+                tint = SuyaColors.Accent,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(6.dp)

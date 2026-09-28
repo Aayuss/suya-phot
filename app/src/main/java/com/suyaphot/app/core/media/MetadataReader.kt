@@ -4,7 +4,9 @@ import android.content.ContentResolver
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
+import android.webkit.MimeTypeMap
 import androidx.exifinterface.media.ExifInterface
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.PrivateMediaMetadata
@@ -12,7 +14,7 @@ import com.suyaphot.app.core.util.SafeLog
 import java.io.InputStream
 
 /**
- * Extracts comprehensive metadata from content URIs and media streams.
+ * Extracts comprehensive metadata from content URIs and media streams with fidelity.
  */
 class MetadataReader(private val context: Context) {
 
@@ -22,8 +24,14 @@ class MetadataReader(private val context: Context) {
         val metadata: PrivateMediaMetadata
     )
 
-    fun read(uri: Uri): ExtractedSourceMetadata {
+    fun read(rawUri: Uri): ExtractedSourceMetadata {
         val resolver = context.contentResolver
+        val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && rawUri.authority == MediaStore.AUTHORITY) {
+            runCatching { MediaStore.setRequireOriginal(rawUri) }.getOrDefault(rawUri)
+        } else {
+            rawUri
+        }
+
         var displayName: String? = null
         var relPath: String? = null
         var mimeType: String? = resolver.getType(uri)
@@ -37,14 +45,19 @@ class MetadataReader(private val context: Context) {
         var mediaStoreId: Long? = null
         var volume: String? = null
 
-        val projection = arrayOf(
+        val projection = mutableListOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.MIME_TYPE,
             MediaStore.MediaColumns.RELATIVE_PATH,
             MediaStore.MediaColumns.SIZE,
             MediaStore.MediaColumns.DATE_MODIFIED
-        )
+        ).apply {
+            add(MediaStore.MediaColumns.DATE_TAKEN)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(MediaStore.MediaColumns.VOLUME_NAME)
+            }
+        }.toTypedArray()
 
         try {
             resolver.query(uri, projection, null, null, null)?.use { cursor ->
@@ -68,6 +81,17 @@ class MetadataReader(private val context: Context) {
                     if (modCol != -1) {
                         val sec = cursor.getLong(modCol)
                         if (sec > 0) dateModified = sec * 1000L
+                    }
+
+                    val takenCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_TAKEN)
+                    if (takenCol != -1) {
+                        val ms = cursor.getLong(takenCol)
+                        if (ms > 0) dateTaken = ms
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val volCol = cursor.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
+                        if (volCol != -1) volume = cursor.getString(volCol)
                     }
                 }
             }
@@ -101,8 +125,7 @@ class MetadataReader(private val context: Context) {
 
                     val exifDate = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
                         ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
-                    if (exifDate != null && dateTaken == null) {
-                        // Keep raw EXIF date in additional
+                    if (exifDate != null) {
                         additional["ExifDate"] = exifDate
                     }
 
@@ -151,7 +174,7 @@ class MetadataReader(private val context: Context) {
             originalRelativePath = relPath,
             originalMimeType = finalMimeType,
             originalContentUri = uri.toString(),
-            dateTakenMs = dateTaken ?: dateModified ?: System.currentTimeMillis(),
+            dateTakenMs = dateTaken ?: dateModified,
             dateModifiedMs = dateModified,
             width = width,
             height = height,
@@ -173,6 +196,8 @@ class MetadataReader(private val context: Context) {
 
     private fun inferMimeTypeFromExtension(filename: String): String {
         val ext = filename.substringAfterLast('.', "").lowercase()
+        val mapped = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+        if (mapped != null) return mapped
         return when (ext) {
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"
@@ -184,7 +209,7 @@ class MetadataReader(private val context: Context) {
             "mkv" -> "video/x-matroska"
             "mov" -> "video/quicktime"
             "3gp" -> "video/3gpp"
-            else -> "image/jpeg"
+            else -> "application/octet-stream"
         }
     }
 }

@@ -28,7 +28,7 @@ sealed interface RestoreResult {
 }
 
 /**
- * Transactional MediaStore restoration pipeline.
+ * Transactional MediaStore restoration pipeline with vault isolation and verification.
  */
 class RestoreCoordinator(
     private val context: Context,
@@ -53,7 +53,8 @@ class RestoreCoordinator(
             return@withContext RestoreResult.Failure(itemId, "Vault is locked", vaultCopyIntact = true)
         }
 
-        val item = mediaItemDao.getItem(itemId)
+        // Section 19: Verify item belongs to current vault session
+        val item = mediaItemDao.getItemForVault(itemId, session.vaultId)
             ?: return@withContext RestoreResult.Failure(itemId, "Item not found in vault", vaultCopyIntact = false)
 
         val vaultFile = fileStore.getMediaFile(session.vaultId, itemId)
@@ -137,18 +138,29 @@ class RestoreCoordinator(
                 "Checksum mismatch during restoration (expected ${item.sha256Hex}, got $restoredSha256Hex)"
             }
 
-            // 4. Publish to MediaStore (IS_PENDING = 0)
+            // 4. Publish to MediaStore (IS_PENDING = 0) & verify publish succeeded (Section 20)
             val publishValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.IS_PENDING, 0)
             }
-            resolver.update(insertedUri, publishValues, null, null)
+            val updatedRows = resolver.update(insertedUri, publishValues, null, null)
+            check(updatedRows == 1) { "Failed to publish restored MediaStore item: update returned $updatedRows" }
 
-            // 5. If Move operation, delete vault copy now that restore is verified
+            // Verify the published public file can be read and has valid size
+            resolver.openFileDescriptor(insertedUri, "r")?.use { pfd ->
+                check(pfd.statSize > 0) { "Restored file size is zero" }
+            } ?: error("Failed to open restored public file after publish")
+
+            // 5. Two-phase removal on Move (Section 21)
             if (move) {
-                vaultFile.delete()
+                val mediaDeleted = !vaultFile.exists() || vaultFile.delete()
                 val thumbFile = fileStore.getThumbFile(session.vaultId, itemId)
-                if (thumbFile.exists()) thumbFile.delete()
-                mediaItemDao.delete(itemId)
+                val thumbDeleted = !thumbFile.exists() || thumbFile.delete()
+
+                if (!mediaDeleted) {
+                    return@withContext RestoreResult.Failure(itemId, "Failed to remove encrypted vault file from disk", vaultCopyIntact = true)
+                }
+
+                mediaItemDao.deleteForVault(itemId, session.vaultId)
             }
 
             SafeLog.d("RestoreCoordinator", "Successfully restored media $itemId to $insertedUri (move=$move)")
