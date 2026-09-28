@@ -2,7 +2,6 @@ package com.suyaphot.app.feature.photos
 
 import android.graphics.Bitmap
 import android.net.Uri
-import com.suyaphot.app.core.crypto.Aead
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -46,7 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,6 +60,8 @@ import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.core.database.entity.MediaItemEntity
 import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
+import com.suyaphot.app.core.model.ImportMode
+import com.suyaphot.app.domain.gallery.GalleryFilter
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
@@ -77,6 +78,9 @@ import com.suyaphot.app.ui.theme.SuyaColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemKey
 
 @Composable
 fun PhotosScreen(
@@ -95,6 +99,7 @@ fun PhotosScreen(
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
+    val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
 
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
@@ -113,6 +118,7 @@ fun PhotosScreen(
                 container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
+                    mode = ImportMode.COPY,
                     onItemComplete = { current, total, _ ->
                         importProgressText = "Importing $current of $total items..."
                     }
@@ -123,57 +129,31 @@ fun PhotosScreen(
         }
     }
 
-    // Media stream query depending on active filter
-    val mediaFlow = remember(vaultId, selectedFilter) {
-        when (selectedFilter) {
-            MediaFilter.ALL -> container.database.mediaItemDao().getAllActive(vaultId)
-            MediaFilter.PHOTOS -> container.database.mediaItemDao().getPhotosOnly(vaultId)
-            MediaFilter.VIDEOS -> container.database.mediaItemDao().getVideosOnly(vaultId)
-            MediaFilter.FAVORITES -> container.database.mediaItemDao().getFavorites(vaultId)
-        }
+    val galleryFilter = when (selectedFilter) {
+        MediaFilter.ALL -> GalleryFilter.ALL
+        MediaFilter.PHOTOS -> GalleryFilter.PHOTOS
+        MediaFilter.VIDEOS -> GalleryFilter.VIDEOS
+        MediaFilter.FAVORITES -> GalleryFilter.FAVORITES
     }
-    val rawEntities by mediaFlow.collectAsState(initial = emptyList())
-
-    val items = remember(rawEntities) {
-        rawEntities.map { entity ->
-            MediaItem(
-                id = entity.id,
-                vaultId = entity.vaultId,
-                folderId = entity.folderId,
-                type = MediaType.fromCode(entity.mediaTypeCode),
-                plaintextSize = entity.plaintextSize,
-                cipherSize = entity.cipherSize,
-                sha256Hex = entity.sha256Hex,
-                importedAt = entity.importedAt,
-                updatedAt = entity.updatedAt,
-                favorite = entity.favorite,
-                deletedAt = entity.deletedAt,
-                previousFolderId = entity.previousFolderId
-            )
-        }
+    val pagingFlow = remember(vaultId, galleryFilter, sortOrder) {
+        container.galleryRepository.paged(vaultId, galleryFilter, sortOrder)
     }
+    val pagedEntities = pagingFlow.collectAsLazyPagingItems()
+    var searchEntities by remember { mutableStateOf<List<MediaItemEntity>>(emptyList()) }
 
-    val filteredItems = remember(items, searchQuery, session) {
-        if (searchQuery.isBlank() || session !is VaultSession.Unlocked) {
-            items
+    LaunchedEffect(vaultId, session) {
+        val unlocked = session as? VaultSession.Unlocked ?: return@LaunchedEffect
+        container.vaultSearchIndex.rebuild(vaultId, unlocked.metaSubkey.copyOf(), container.database.mediaItemDao())
+    }
+    LaunchedEffect(searchQuery, galleryFilter, sortOrder) {
+        if (searchQuery.isBlank()) {
+            searchEntities = emptyList()
         } else {
-            val q = searchQuery.trim().lowercase()
-            items.filter { item ->
-                val entity = rawEntities.firstOrNull { it.id == item.id }
-                val name = try {
-                    if (entity != null) {
-                        val dec = Aead.decryptWithPrependedNonce(
-                            session.metaSubkey,
-                            entity.encryptedMetadata,
-                            entity.id.toByteArray(Charsets.UTF_8)
-                        )
-                        com.suyaphot.app.core.model.PrivateMediaMetadata.deserialize(dec).originalDisplayName.lowercase()
-                    } else ""
-                } catch (e: Exception) { "" }
-                name.contains(q) || item.id.lowercase().contains(q)
-            }
+            delay(250)
+            searchEntities = container.vaultSearchIndex.search(searchQuery, galleryFilter, sortOrder)
         }
     }
+    val isSearching = searchQuery.isNotBlank()
 
     Box(
         modifier = modifier
@@ -212,7 +192,11 @@ fun PhotosScreen(
                             contentDescription = "Select all",
                             onClick = {
                                 selectedMediaIds.clear()
-                                filteredItems.forEach { selectedMediaIds[it.id] = Unit }
+                                if (isSearching) {
+                                    searchEntities.forEach { selectedMediaIds[it.id] = Unit }
+                                } else {
+                                    pagedEntities.itemSnapshotList.items.forEach { selectedMediaIds[it.id] = Unit }
+                                }
                             },
                             size = 38
                         )
@@ -264,7 +248,7 @@ fun PhotosScreen(
             )
 
             // Media Grid or Empty State
-            if (filteredItems.isEmpty() && !isImporting) {
+            if (((isSearching && searchEntities.isEmpty()) || (!isSearching && pagedEntities.itemCount == 0)) && !isImporting) {
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
@@ -285,10 +269,33 @@ fun PhotosScreen(
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    items(
-                        items = filteredItems,
-                        key = { it.id }
-                    ) { item ->
+                    if (isSearching) {
+                        items(searchEntities, key = { it.id }) { entity ->
+                            val item = entity.toMediaItem()
+                            val isSelected = selectedMediaIds.containsKey(item.id)
+                            MediaTile(
+                                item = item,
+                                isSelected = isSelected,
+                                isInSelectionMode = isInSelectionMode,
+                                onClick = {
+                                    if (isInSelectionMode) {
+                                        if (isSelected) selectedMediaIds.remove(item.id) else selectedMediaIds[item.id] = Unit
+                                    } else onMediaClick(item.id)
+                                },
+                                onLongClick = { selectedMediaIds[item.id] = Unit },
+                                thumbLoader = { itemId ->
+                                    val thumbFile = container.vaultFileStore.getThumbFile(vaultId, itemId)
+                                    val subkey = (container.sessionManager.sessionState.value as? VaultSession.Unlocked)?.thumbSubkey
+                                    subkey?.let { container.thumbnailGenerator.decryptThumbnail(thumbFile, it, itemId) }
+                                }
+                            )
+                        }
+                    } else items(
+                        count = pagedEntities.itemCount,
+                        key = pagedEntities.itemKey { it.id }
+                    ) { index ->
+                        val entity = pagedEntities[index] ?: return@items
+                        val item = entity.toMediaItem()
                         val isSelected = selectedMediaIds.containsKey(item.id)
                         MediaTile(
                             item = item,
@@ -401,7 +408,7 @@ fun PhotosScreen(
                     selectedMediaIds.clear()
                     showDeleteConfirmDialog = false
                     withContext(Dispatchers.IO) {
-                        container.database.mediaItemDao().softDelete(ids, System.currentTimeMillis())
+                        container.database.mediaItemDao().softDeleteForVault(vaultId, ids, System.currentTimeMillis())
                     }
                 }
             }
@@ -437,3 +444,18 @@ fun PhotosScreen(
         )
     }
 }
+
+private fun MediaItemEntity.toMediaItem() = MediaItem(
+    id = id,
+    vaultId = vaultId,
+    folderId = folderId,
+    type = MediaType.fromCode(mediaTypeCode),
+    plaintextSize = plaintextSize,
+    cipherSize = cipherSize,
+    sha256Hex = sha256Hex,
+    importedAt = importedAt,
+    updatedAt = updatedAt,
+    favorite = favorite,
+    deletedAt = deletedAt,
+    previousFolderId = previousFolderId
+)

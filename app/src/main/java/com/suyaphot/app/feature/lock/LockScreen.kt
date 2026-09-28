@@ -24,7 +24,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -32,7 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -53,11 +52,9 @@ import com.suyaphot.app.ui.components.SuyaDialog
 import com.suyaphot.app.ui.components.SuyaTextField
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @Composable
 fun LockScreen(
@@ -82,11 +79,11 @@ fun LockScreen(
     var recoveryError by remember { mutableStateOf<String?>(null) }
 
     // Check if biometric is enrolled for real vault
-    val realVaultWithBiometric by produceState<com.suyaphot.app.core.database.entity.VaultEntity?>(initialValue = null) {
-        value = withContext(Dispatchers.IO) {
-            val v = container.database.vaultDao().getVaultByKind(VaultKind.REAL.code)
-            if (v?.biometricEnvelope != null && v.biometricIv != null) v else null
-        }
+    val realVault by container.database.vaultDao()
+        .observeVaultByKind(VaultKind.REAL.code)
+        .collectAsState(initial = null)
+    val realVaultWithBiometric = realVault?.takeIf {
+        it.biometricEnvelope != null && it.biometricIv != null
     }
 
     val isBiometricEnrolled = realVaultWithBiometric != null
@@ -246,7 +243,7 @@ fun LockScreen(
 
                                         // Trigger intruder selfie check
                                         val triggerThreshold = container.preferences.intruderTriggerCount.first()
-                                        if (container.preferences.intruderSelfieEnabled.first() && result.attempts >= triggerThreshold) {
+                                        if (container.preferences.intruderSelfieEnabled.first() && result.attempts == triggerThreshold) {
                                             container.intruderCaptureManager.captureIntruderPhoto(
                                                 lifecycleOwner = lifecycleOwner,
                                                 failureReason = "Failed PIN attempt #${result.attempts}"

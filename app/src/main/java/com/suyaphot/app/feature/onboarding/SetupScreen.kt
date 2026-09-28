@@ -24,8 +24,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
@@ -75,17 +77,27 @@ fun SetupScreen(
     val scope = rememberCoroutineScope()
     var currentStep by rememberSaveable { mutableStateOf(SetupStep.WELCOME) }
 
-    var initialPin by rememberSaveable { mutableStateOf("") }
-    var confirmPin by rememberSaveable { mutableStateOf("") }
+    var initialPin by remember { mutableStateOf("") }
+    var confirmPin by remember { mutableStateOf("") }
     var pinErrorMessage by remember { mutableStateOf<String?>(null) }
-    var shakeTrigger by remember { mutableStateOf(0) }
+    var shakeTrigger by remember { mutableIntStateOf(0) }
 
-    var generatedRecoveryCode by rememberSaveable { mutableStateOf("") }
-    var group1Input by rememberSaveable { mutableStateOf("") }
-    var group2Input by rememberSaveable { mutableStateOf("") }
+    var generatedRecoveryCode by remember { mutableStateOf("") }
+    var group1Input by remember { mutableStateOf("") }
+    var group2Input by remember { mutableStateOf("") }
     var recoveryErrorMessage by remember { mutableStateOf<String?>(null) }
 
     var createdVaultId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            initialPin = ""
+            confirmPin = ""
+            generatedRecoveryCode = ""
+            group1Input = ""
+            group2Input = ""
+        }
+    }
 
     // Check biometric support
     val canEnrollBiometrics = remember {
@@ -361,30 +373,35 @@ fun SetupScreen(
                                 scope.launch {
                                     val masterKey = container.keyManager.generateMasterKey()
                                     val pinChars = initialPin.toCharArray()
-                                    val pinEnvelope = container.keyManager.createPinEnvelope(masterKey, pinChars)
-                                    val normRecovery = container.keyManager.normalizeRecoverySecret(generatedRecoveryCode)
-                                    val recoveryEnvelope = container.keyManager.createRecoveryEnvelope(masterKey, normRecovery)
+                                    try {
+                                        val pinEnvelope = container.keyManager.createPinEnvelope(masterKey, pinChars)
+                                        val normRecovery = container.keyManager.normalizeRecoverySecret(generatedRecoveryCode)
+                                        val recoveryEnvelope = container.keyManager.createRecoveryEnvelope(masterKey, normRecovery)
 
-                                    val vaultId = UUID.randomUUID().toString()
-                                    createdVaultId = vaultId
-                                    val vaultEntity = VaultEntity(
-                                        id = vaultId,
-                                        kindCode = VaultKind.REAL.code,
-                                        createdAt = System.currentTimeMillis(),
-                                        schemaVersion = 1,
-                                        pinEnvelope = pinEnvelope.serialize(),
-                                        recoveryEnvelope = recoveryEnvelope.serialize(),
-                                        biometricEnvelope = null,
-                                        biometricIv = null
-                                    )
+                                        val vaultId = UUID.randomUUID().toString()
+                                        createdVaultId = vaultId
+                                        val vaultEntity = VaultEntity(
+                                            id = vaultId,
+                                            kindCode = VaultKind.REAL.code,
+                                            createdAt = System.currentTimeMillis(),
+                                            schemaVersion = 1,
+                                            pinEnvelope = pinEnvelope.serialize(),
+                                            recoveryEnvelope = recoveryEnvelope.serialize(),
+                                            biometricEnvelope = null,
+                                            biometricIv = null
+                                        )
 
-                                    withContext(Dispatchers.IO) {
-                                        container.database.vaultDao().insert(vaultEntity)
+                                        withContext(Dispatchers.IO) {
+                                            container.database.vaultDao().insert(vaultEntity)
+                                        }
+
+                                        // authenticateWithPin takes ownership of and clears this CharArray.
+                                        container.pinAuthenticator.authenticateWithPin(pinChars)
+                                        currentStep = SetupStep.COMPLETE
+                                    } finally {
+                                        masterKey.fill(0)
+                                        pinChars.fill('\u0000')
                                     }
-
-                                    // Unlock active session
-                                    container.pinAuthenticator.authenticateWithPin(pinChars)
-                                    currentStep = SetupStep.COMPLETE
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(0.9f)

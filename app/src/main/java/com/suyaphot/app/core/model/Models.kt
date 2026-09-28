@@ -53,6 +53,16 @@ enum class JobState(val code: Int) {
     }
 }
 
+enum class ImportMode(val code: Int) {
+    COPY(0),
+    MOVE(1);
+
+    companion object {
+        fun fromCode(code: Int): ImportMode = entries.firstOrNull { it.code == code }
+            ?: throw IllegalArgumentException("Unknown import mode")
+    }
+}
+
 data class PrivateMediaMetadata(
     val originalDisplayName: String,
     val originalRelativePath: String?,
@@ -107,11 +117,12 @@ data class PrivateMediaMetadata(
         private const val METADATA_VERSION = 1
 
         fun deserialize(bytes: ByteArray): PrivateMediaMetadata {
+            require(bytes.size in 1..1_048_576) { "Invalid metadata payload size" }
             DataInputStream(ByteArrayInputStream(bytes)).use { input ->
                 val isVersioned = if (bytes.size >= 8) {
-                    val magic = (bytes[0].toInt() and 0xFF shl 24) or
-                            (bytes[1].toInt() and 0xFF shl 16) or
-                            (bytes[2].toInt() and 0xFF shl 8) or
+                    val magic = ((bytes[0].toInt() and 0xFF) shl 24) or
+                            ((bytes[1].toInt() and 0xFF) shl 16) or
+                            ((bytes[2].toInt() and 0xFF) shl 8) or
                             (bytes[3].toInt() and 0xFF)
                     magic == METADATA_MAGIC
                 } else false
@@ -137,11 +148,15 @@ data class PrivateMediaMetadata(
                 val gps = input.readBoolean()
                 val ext = if (input.readBoolean()) input.readUTF() else null
                 val addCount = input.readInt()
-                require(addCount in 0..1000) { "Suspicious metadata additional count: $addCount" }
+                require(addCount in 0..100) { "Suspicious metadata additional count: $addCount" }
                 val map = mutableMapOf<String, String>()
                 for (i in 0 until addCount) {
-                    map[input.readUTF()] = input.readUTF()
+                    val key = input.readUTF()
+                    val value = input.readUTF()
+                    require(key.length <= 128 && value.length <= 4096) { "Metadata field exceeds limit" }
+                    map[key] = value
                 }
+                require(input.available() == 0) { "Trailing metadata bytes" }
                 return PrivateMediaMetadata(
                     originalDisplayName = displayName,
                     originalRelativePath = relPath,

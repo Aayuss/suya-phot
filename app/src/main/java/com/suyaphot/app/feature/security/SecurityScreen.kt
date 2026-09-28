@@ -1,5 +1,8 @@
 package com.suyaphot.app.feature.security
 
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
@@ -36,7 +39,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -56,6 +58,7 @@ import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.core.database.entity.VaultEntity
 import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.auth.VaultSession
+import com.suyaphot.app.domain.auth.ChangeSecondaryPinResult
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
@@ -84,23 +87,28 @@ fun SecurityScreen(
     val intruderThreshold by container.preferences.intruderTriggerCount.collectAsState(initial = 3)
 
     var showSecondaryPinDialog by remember { mutableStateOf(false) }
-    var secondaryPinInput by remember { mutableStateOf("") }
+    var currentSecondaryPinInput by remember { mutableStateOf("") }
+    var newSecondaryPinInput by remember { mutableStateOf("") }
+    var confirmSecondaryPinInput by remember { mutableStateOf("") }
     var secondaryPinError by remember { mutableStateOf<String?>(null) }
+    var showIntruderPermissionDialog by remember { mutableStateOf(false) }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        scope.launch { container.preferences.setIntruderSelfieEnabled(granted) }
+    }
 
     var isRunningIntegrityCheck by remember { mutableStateOf(false) }
     var integrityStatusMessage by remember { mutableStateOf<String?>(null) }
 
-    val realVault by produceState<VaultEntity?>(initialValue = null, key1 = session) {
-        value = withContext(Dispatchers.IO) {
-            container.database.vaultDao().getVaultByKind(VaultKind.REAL.code)
-        }
-    }
+    val realVault by container.database.vaultDao()
+        .observeVaultByKind(VaultKind.REAL.code)
+        .collectAsState(initial = null)
 
-    val secondaryVault by produceState<VaultEntity?>(initialValue = null, key1 = showSecondaryPinDialog) {
-        value = withContext(Dispatchers.IO) {
-            container.database.vaultDao().getVaultByKind(VaultKind.SECONDARY.code)
-        }
-    }
+    val secondaryVault by container.database.vaultDao()
+        .observeVaultByKind(VaultKind.SECONDARY.code)
+        .collectAsState(initial = null)
 
     val isBiometricEnrolled = realVault?.biometricEnvelope != null && realVault?.biometricIv != null
     val canEnrollBiometrics = remember {
@@ -128,7 +136,7 @@ fun SecurityScreen(
                 ) {
                     SecurityCard(
                         title = "Vault Encryption",
-                        subtitle = "AES-256-GCM hardware-backed streaming encryption",
+                        subtitle = "AES-256-GCM authenticated media encryption",
                         icon = Icons.Default.Lock,
                         statusText = "Active",
                         statusPositive = true
@@ -166,7 +174,7 @@ fun SecurityScreen(
                 // Section 1: Security Diagnostics
                 SecurityCard(
                     title = "Vault Encryption",
-                    subtitle = "AES-256-GCM hardware-backed streaming encryption",
+                    subtitle = "AES-256-GCM authenticated media encryption",
                     icon = Icons.Default.Lock,
                     statusText = "Active",
                     statusPositive = true
@@ -184,7 +192,7 @@ fun SecurityScreen(
                 if (canEnrollBiometrics) {
                     SecurityToggleRow(
                         title = "Fingerprint Unlock",
-                        subtitle = "Hardware-backed biometric unwrap via Android Keystore",
+                        subtitle = "Biometric unwrap via Android Keystore; hardware protection depends on the device",
                         icon = Icons.Default.Fingerprint,
                         checked = isBiometricEnrolled,
                         onCheckedChange = { enable ->
@@ -243,10 +251,13 @@ fun SecurityScreen(
                 // Intruder Selfie
                 SecurityToggleRow(
                     title = "Intruder Selfie",
-                    subtitle = "Silently captures front-camera photo after $intruderThreshold failed PIN attempts",
+                    subtitle = "Captures a front-camera photo after $intruderThreshold failed PIN attempts",
                     icon = Icons.Default.CameraAlt,
                     checked = intruderEnabled,
-                    onCheckedChange = { scope.launch { container.preferences.setIntruderSelfieEnabled(it) } }
+                    onCheckedChange = { enable ->
+                        if (enable) showIntruderPermissionDialog = true
+                        else scope.launch { container.preferences.setIntruderSelfieEnabled(false) }
+                    }
                 )
 
                 if (intruderEnabled) {
@@ -313,20 +324,26 @@ fun SecurityScreen(
                         text = "Run Vault Integrity Audit",
                         onClick = {
                             isRunningIntegrityCheck = true
-                            scope.launch(Dispatchers.IO) {
+                            scope.launch {
                                 val s = session as? VaultSession.Unlocked
                                 if (s != null) {
-                                    val all = container.database.mediaItemDao().getAllForIntegrityCheck(s.vaultId)
-                                    var passed = 0
-                                    var failed = 0
-                                    for (item in all) {
-                                        val file = container.vaultFileStore.getMediaFile(s.vaultId, item.id)
-                                        try {
-                                            val verify = container.vaultCrypto.verifyAndHash(file, s.mediaSubkey, item.id)
-                                            if (verify.plaintextSize == item.plaintextSize) passed++ else failed++
-                                        } catch (e: Exception) {
-                                            failed++
+                                    val (passed, failed) = withContext(Dispatchers.IO) {
+                                        val all = container.database.mediaItemDao().getAllForIntegrityCheck(s.vaultId)
+                                        var passedCount = 0
+                                        var failedCount = 0
+                                        for (item in all) {
+                                            val file = container.vaultFileStore.getMediaFile(s.vaultId, item.id)
+                                            try {
+                                                val verify = container.vaultCrypto.verifyAndHash(file, s.mediaSubkey, item.id)
+                                                val hash = verify.sha256.joinToString("") { "%02x".format(it) }
+                                                if (verify.plaintextSize == item.plaintextSize && hash.equals(item.sha256Hex, true)) {
+                                                    passedCount++
+                                                } else failedCount++
+                                            } catch (e: Exception) {
+                                                failedCount++
+                                            }
                                         }
+                                        passedCount to failedCount
                                     }
                                     integrityStatusMessage = "Audit finished: $passed verified, $failed corrupted"
                                 }
@@ -352,11 +369,38 @@ fun SecurityScreen(
     }
 
     // Secondary PIN Dialog
+    if (showIntruderPermissionDialog) {
+        SuyaDialog(
+            onDismissRequest = { showIntruderPermissionDialog = false },
+            title = "Intruder photo",
+            content = {
+                Text(
+                    "If enabled, Suya Phot can use the front camera after the configured number of failed PIN attempts. Android may show its normal camera privacy indicator when a photo is captured. Photos stay encrypted on this device.",
+                    color = SuyaColors.TextMuted,
+                    fontFamily = SoraFontFamily,
+                    fontSize = 13.sp
+                )
+            },
+            confirmText = "Enable",
+            onConfirm = {
+                showIntruderPermissionDialog = false
+                if (container.intruderCaptureManager.hasCameraPermission()) {
+                    scope.launch { container.preferences.setIntruderSelfieEnabled(true) }
+                } else {
+                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                }
+            }
+        )
+    }
+
+    // Secondary PIN Dialog
     if (showSecondaryPinDialog) {
         SuyaDialog(
             onDismissRequest = {
                 showSecondaryPinDialog = false
-                secondaryPinInput = ""
+                currentSecondaryPinInput = ""
+                newSecondaryPinInput = ""
+                confirmSecondaryPinInput = ""
                 secondaryPinError = null
             },
             title = if (secondaryVault != null) "Change Secondary PIN" else "Secondary Access PIN",
@@ -368,14 +412,38 @@ fun SecurityScreen(
                         fontSize = 13.sp,
                         color = SuyaColors.TextMuted
                     )
+                    if (secondaryVault != null) {
+                        SuyaTextField(
+                            value = currentSecondaryPinInput,
+                            onValueChange = {
+                                val digits = it.filter(Char::isDigit)
+                                if (digits.length <= 6) currentSecondaryPinInput = digits
+                            },
+                            placeholder = "Current 6-digit PIN",
+                            label = "Current secondary PIN",
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                        )
+                    }
                     SuyaTextField(
-                        value = secondaryPinInput,
+                        value = newSecondaryPinInput,
                         onValueChange = {
                             val digits = it.filter(Char::isDigit)
-                            if (digits.length <= 6) secondaryPinInput = digits
+                            if (digits.length <= 6) newSecondaryPinInput = digits
                         },
-                        placeholder = "Enter 6-digit secondary PIN",
-                        label = "Secondary PIN",
+                        placeholder = "New 6-digit PIN",
+                        label = if (secondaryVault != null) "New secondary PIN" else "Secondary PIN",
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                    )
+                    SuyaTextField(
+                        value = confirmSecondaryPinInput,
+                        onValueChange = {
+                            val digits = it.filter(Char::isDigit)
+                            if (digits.length <= 6) confirmSecondaryPinInput = digits
+                        },
+                        placeholder = "Confirm 6-digit PIN",
+                        label = "Confirm secondary PIN",
                         visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
                     )
@@ -391,49 +459,80 @@ fun SecurityScreen(
             },
             confirmText = "Save Secondary PIN",
             onConfirm = {
-                if (secondaryPinInput.length < 6) {
+                if (newSecondaryPinInput.length != 6) {
                     secondaryPinError = "Secondary PIN must be 6 digits"
+                    return@SuyaDialog
+                }
+                if (newSecondaryPinInput != confirmSecondaryPinInput) {
+                    secondaryPinError = "Secondary PINs do not match"
+                    return@SuyaDialog
+                }
+                if (secondaryVault != null && currentSecondaryPinInput.length != 6) {
+                    secondaryPinError = "Enter the current secondary PIN"
                     return@SuyaDialog
                 }
 
                 scope.launch {
-                    val pinChars = secondaryPinInput.toCharArray()
-                    val matchesReal = container.pinAuthenticator.isSameAsRealPin(pinChars)
+                    val newPinChars = newSecondaryPinInput.toCharArray()
+                    val matchesReal = container.pinAuthenticator.isSameAsRealPin(newPinChars)
                     if (matchesReal) {
                         secondaryPinError = "Secondary PIN must be different from your main PIN"
+                        newPinChars.fill('\u0000')
                         return@launch
                     }
 
-                    withContext(Dispatchers.IO) {
-                        val existing = container.database.vaultDao().getVaultByKind(VaultKind.SECONDARY.code)
-                        if (existing != null) {
-                            // Update existing secondary PIN envelope
-                            val secMasterKey = container.keyManager.generateMasterKey()
-                            val newEnvelope = container.keyManager.createPinEnvelope(secMasterKey, pinChars)
-                            container.database.vaultDao().updatePinEnvelope(existing.id, newEnvelope.serialize())
-                            secMasterKey.fill(0)
-                        } else {
+                    val existing = secondaryVault
+                    if (existing != null) {
+                        when (container.pinAuthenticator.changeSecondaryPin(
+                            currentSecondaryPinInput.toCharArray(),
+                            newPinChars
+                        )) {
+                            ChangeSecondaryPinResult.Success -> Unit
+                            ChangeSecondaryPinResult.IncorrectCurrentPin -> {
+                                secondaryPinError = "Current secondary PIN is incorrect"
+                                return@launch
+                            }
+                            ChangeSecondaryPinResult.SameAsRealPin -> {
+                                secondaryPinError = "Secondary PIN must be different from your main PIN"
+                                return@launch
+                            }
+                            ChangeSecondaryPinResult.InvalidNewPin -> {
+                                secondaryPinError = "Secondary PIN must be 6 digits"
+                                return@launch
+                            }
+                            is ChangeSecondaryPinResult.Error -> {
+                                secondaryPinError = "Could not update the secondary PIN"
+                                return@launch
+                            }
+                        }
+                    } else {
+                        withContext(Dispatchers.IO) {
                             // Create new secondary vault (nullable recovery envelope, Section 32)
                             val secMasterKey = container.keyManager.generateMasterKey()
-                            val pinEnvelope = container.keyManager.createPinEnvelope(secMasterKey, pinChars)
-                            val secVaultId = UUID.randomUUID().toString()
-                            val secVaultEntity = VaultEntity(
-                                id = secVaultId,
-                                kindCode = VaultKind.SECONDARY.code,
-                                createdAt = System.currentTimeMillis(),
-                                schemaVersion = 1,
-                                pinEnvelope = pinEnvelope.serialize(),
-                                recoveryEnvelope = null,
-                                biometricEnvelope = null,
-                                biometricIv = null
-                            )
-                            container.database.vaultDao().insert(secVaultEntity)
-                            secMasterKey.fill(0)
+                            try {
+                                val pinEnvelope = container.keyManager.createPinEnvelope(secMasterKey, newPinChars)
+                                val secVaultEntity = VaultEntity(
+                                    id = UUID.randomUUID().toString(),
+                                    kindCode = VaultKind.SECONDARY.code,
+                                    createdAt = System.currentTimeMillis(),
+                                    schemaVersion = 1,
+                                    pinEnvelope = pinEnvelope.serialize(),
+                                    recoveryEnvelope = null,
+                                    biometricEnvelope = null,
+                                    biometricIv = null
+                                )
+                                container.database.vaultDao().insert(secVaultEntity)
+                            } finally {
+                                secMasterKey.fill(0)
+                                newPinChars.fill('\u0000')
+                            }
                         }
                     }
 
                     showSecondaryPinDialog = false
-                    secondaryPinInput = ""
+                    currentSecondaryPinInput = ""
+                    newSecondaryPinInput = ""
+                    confirmSecondaryPinInput = ""
                 }
             }
         )

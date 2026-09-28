@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -18,6 +19,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.Image
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
 import com.suyaphot.app.domain.auth.VaultSession
@@ -85,14 +90,20 @@ fun MainAppHost(container: AppContainer) {
         val s = sessionState
         if (s is VaultSession.Unlocked) {
             container.importRecoveryManager.reconcileActiveJobs(s)
+            container.restoreRecoveryManager.reconcile(s)
+        } else {
+            container.vaultSearchIndex.clear()
+            withContext(Dispatchers.IO) {
+                container.vaultFileStore.clearEphemeralPlaintextCaches()
+            }
         }
     }
 
     // Check if initial vault setup exists
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
+        hasVaultConfigured = withContext(Dispatchers.IO) {
             val vaults = container.database.vaultDao().getAllVaults()
-            hasVaultConfigured = vaults.isNotEmpty()
+            vaults.isNotEmpty()
         }
     }
 
@@ -116,13 +127,27 @@ fun MainAppHost(container: AppContainer) {
     }
 
     // Vault is configured: check lock state
-    if (sessionState is VaultSession.Locked || hideSensitiveUi) {
+    if (sessionState is VaultSession.Locked) {
         LockScreen(
             container = container,
             onUnlocked = {
                 // Session unlocked, automatically advances
             }
         )
+        return
+    }
+
+    if (hideSensitiveUi) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.fillMaxSize().background(SuyaColors.Background)
+        ) {
+            Image(
+                painter = painterResource(com.suyaphot.app.R.drawable.ic_suya_logo),
+                contentDescription = "Suya Phot privacy cover",
+                modifier = Modifier.size(72.dp)
+            )
+        }
         return
     }
 

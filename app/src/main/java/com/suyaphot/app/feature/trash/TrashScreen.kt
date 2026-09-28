@@ -56,21 +56,12 @@ fun TrashScreen(
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
 
-    // Auto-purge items in trash older than 30 days upon opening TrashScreen (Section 60)
+    val retentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
+
+    // Auto-purge uses the configured retention and drains all expired batches safely.
     LaunchedEffect(vaultId) {
         if (vaultId.isNotEmpty()) {
-            withContext(Dispatchers.IO) {
-                val thirtyDaysAgo = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
-                val expired = container.database.mediaItemDao().getExpiredTrash(vaultId, thirtyDaysAgo)
-                if (expired.isNotEmpty()) {
-                    val expiredIds = expired.map { it.id }
-                    for (item in expired) {
-                        container.vaultFileStore.getMediaFile(vaultId, item.id).delete()
-                        container.vaultFileStore.getThumbFile(vaultId, item.id).delete()
-                    }
-                    container.database.mediaItemDao().deleteBatch(expiredIds)
-                }
-            }
+            container.trashCoordinator.purgeExpired(vaultId)
         }
     }
 
@@ -101,6 +92,7 @@ fun TrashScreen(
     val selectedIds = remember { mutableStateMapOf<String, Unit>() }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     var showEmptyTrashDialog by remember { mutableStateOf(false) }
+    var showDeleteSelectedDialog by remember { mutableStateOf(false) }
 
     Box(
         modifier = modifier
@@ -127,7 +119,11 @@ fun TrashScreen(
                 EmptyState(
                     icon = Icons.Default.Delete,
                     title = "Trash is empty",
-                    subtitle = "Items moved to Trash are automatically purged after 30 days.",
+                    subtitle = if (retentionDays == 0) {
+                        "Items remain here until you delete them permanently."
+                    } else {
+                        "Items are automatically purged after $retentionDays days."
+                    },
                     modifier = Modifier.weight(1f)
                 )
             } else {
@@ -176,31 +172,41 @@ fun TrashScreen(
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
                                     val toRestore = selectedIds.keys.toList()
-                                    selectedIds.clear()
-                                    container.database.mediaItemDao().restoreFromTrash(toRestore, System.currentTimeMillis())
+                                    container.trashCoordinator.restore(vaultId, toRestore)
+                                    withContext(Dispatchers.Main) { selectedIds.clear() }
                                 }
                             },
                             variant = ButtonVariant.Secondary
                         )
                         SuyaButton(
                             text = "Delete Forever",
-                            onClick = {
-                                scope.launch(Dispatchers.IO) {
-                                    val toDelete = selectedIds.keys.toList()
-                                    selectedIds.clear()
-                                    for (id in toDelete) {
-                                        container.vaultFileStore.getMediaFile(vaultId, id).delete()
-                                        container.vaultFileStore.getThumbFile(vaultId, id).delete()
-                                    }
-                                    container.database.mediaItemDao().deleteBatch(toDelete)
-                                }
-                            },
+                            onClick = { showDeleteSelectedDialog = true },
                             variant = ButtonVariant.Primary
                         )
                     }
                 }
             }
         }
+    }
+
+    if (showDeleteSelectedDialog) {
+        val count = selectedIds.size
+        SuyaDialog(
+            onDismissRequest = { showDeleteSelectedDialog = false },
+            title = "Delete $count item${if (count == 1) "" else "s"} forever?",
+            content = {
+                Text("This cannot be undone. Encrypted media will be removed from private storage.", color = SuyaColors.TextMuted)
+            },
+            confirmText = "Delete Forever",
+            onConfirm = {
+                val ids = selectedIds.keys.toList()
+                showDeleteSelectedDialog = false
+                scope.launch {
+                    container.trashCoordinator.permanentDelete(vaultId, ids)
+                    selectedIds.clear()
+                }
+            }
+        )
     }
 
     if (showEmptyTrashDialog) {
@@ -215,13 +221,9 @@ fun TrashScreen(
             },
             confirmText = "Empty Trash",
             onConfirm = {
-                scope.launch(Dispatchers.IO) {
+                scope.launch {
                     showEmptyTrashDialog = false
-                    for (item in items) {
-                        container.vaultFileStore.getMediaFile(vaultId, item.id).delete()
-                        container.vaultFileStore.getThumbFile(vaultId, item.id).delete()
-                    }
-                    container.database.mediaItemDao().deleteBatch(items.map { it.id })
+                    container.trashCoordinator.permanentDelete(vaultId, items.map { it.id })
                 }
             }
         )

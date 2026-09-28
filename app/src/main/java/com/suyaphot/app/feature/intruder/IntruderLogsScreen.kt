@@ -1,5 +1,6 @@
 package com.suyaphot.app.feature.intruder
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -26,9 +27,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,7 +53,7 @@ import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.io.File
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -135,6 +140,49 @@ fun IntruderLogsScreen(
                     modifier = Modifier.weight(1f)
                 ) {
                     items(events, key = { it.id }) { event ->
+                        val photoFile = event.encryptedImageRelativePath?.let {
+                            container.vaultFileStore.getSecurityFile(realVaultId, event.id)
+                        }
+                        var bitmap by remember(event.id) { mutableStateOf<Bitmap?>(null) }
+                        var detailText by remember(event.id) { mutableStateOf("Failed PIN attempt") }
+
+                        LaunchedEffect(event.id, event.encryptedImageRelativePath, event.encryptedDetails) {
+                            val loaded = withContext(Dispatchers.IO) {
+                                val key = container.intruderKeyProvider.getOrCreateKey()
+                                val aad = "suya-phot:intruder:v1:${event.id}".toByteArray(Charsets.UTF_8)
+                                val loadedBitmap = if (photoFile?.exists() == true) {
+                                    runCatching {
+                                        val encrypted = photoFile.readBytes()
+                                        val decrypted = try {
+                                            Aead.decryptWithPrependedNonce(key, encrypted, aad)
+                                        } finally {
+                                            encrypted.fill(0)
+                                        }
+                                        try {
+                                            BitmapFactory.decodeByteArray(decrypted, 0, decrypted.size)
+                                        } finally {
+                                            decrypted.fill(0)
+                                        }
+                                    }.getOrNull()
+                                } else {
+                                    null
+                                }
+                                val loadedDetails = event.encryptedDetails?.let { encryptedDetails ->
+                                    runCatching {
+                                        val decrypted = Aead.decryptWithPrependedNonce(key, encryptedDetails, aad)
+                                        try {
+                                            String(decrypted, Charsets.UTF_8)
+                                        } finally {
+                                            decrypted.fill(0)
+                                        }
+                                    }.getOrNull()
+                                } ?: "Failed PIN attempt"
+                                loadedBitmap to loadedDetails
+                            }
+                            bitmap = loaded.first
+                            detailText = loaded.second
+                        }
+
                         Surface(
                             shape = RoundedCornerShape(16.dp),
                             color = SuyaColors.Fill06,
@@ -145,39 +193,14 @@ fun IntruderLogsScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(14.dp)
                             ) {
-                                val photoFile = event.encryptedImageRelativePath?.let {
-                                    container.vaultFileStore.getSecurityFile(realVaultId, event.id)
-                                }
-
-                                if (photoFile != null && photoFile.exists()) {
-                                    val key = container.intruderKeyProvider.getOrCreateKey()
-                                    val aad = "suya-phot:intruder:v1:${event.id}".toByteArray(Charsets.UTF_8)
-                                    val bitmap = try {
-                                        val dec = Aead.decryptWithPrependedNonce(key.encoded, photoFile.readBytes(), aad)
-                                        BitmapFactory.decodeByteArray(dec, 0, dec.size)
-                                    } catch (e: Exception) {
-                                        null
-                                    }
-
-                                    if (bitmap != null) {
-                                        Image(
-                                            bitmap = bitmap.asImageBitmap(),
-                                            contentDescription = "Intruder photo",
-                                            modifier = Modifier
-                                                .size(56.dp)
-                                                .clip(RoundedCornerShape(10.dp))
-                                        )
-                                    } else {
-                                        Surface(
-                                            shape = RoundedCornerShape(10.dp),
-                                            color = SuyaColors.Fill07,
-                                            modifier = Modifier.size(56.dp)
-                                        ) {
-                                            Box(contentAlignment = Alignment.Center) {
-                                                Icon(Icons.Default.CameraAlt, contentDescription = null, tint = SuyaColors.TextMuted)
-                                            }
-                                        }
-                                    }
+                                if (bitmap != null) {
+                                    Image(
+                                        bitmap = checkNotNull(bitmap).asImageBitmap(),
+                                        contentDescription = "Intruder photo",
+                                        modifier = Modifier
+                                            .size(56.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                    )
                                 } else {
                                     Surface(
                                         shape = RoundedCornerShape(10.dp),
@@ -191,20 +214,6 @@ fun IntruderLogsScreen(
                                 }
 
                                 Spacer(modifier = Modifier.width(14.dp))
-
-                                val detailText = if (event.encryptedDetails != null) {
-                                    try {
-                                        val key = container.intruderKeyProvider.getOrCreateKey()
-                                        val aad = "suya-phot:intruder:v1:${event.id}".toByteArray(Charsets.UTF_8)
-                                        val dec = Aead.decryptWithPrependedNonce(key.encoded, event.encryptedDetails, aad)
-                                        String(dec, Charsets.UTF_8)
-                                    } catch (e: Exception) {
-                                        "Failed PIN attempt"
-                                    }
-                                } else {
-                                    "Failed PIN attempt"
-                                }
-
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = detailText,

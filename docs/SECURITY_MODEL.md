@@ -11,7 +11,7 @@
 
 ### Out of Scope / Fundamental Limits:
 - Compromised/rooted operating systems with kernel-level memory inspection while the vault is actively unlocked.
-- Hardware-level physical tampering beyond Android Keystore hardware protection.
+- Hardware-level physical tampering. Keystore hardware backing is device-dependent and must be checked at runtime; it is not assumed as a universal guarantee.
 - Wear-leveling forensic overwrite guarantees on flash memory (plain flash overwrites do not guarantee physical erasure).
 
 ---
@@ -29,7 +29,7 @@ Using domain separation info strings:
 ### 2.2 PIN Wrapping (PBKDF2-HMAC-SHA256 + Keystore Pepper)
 1. User enters numeric PIN (minimum 4 digits, recommended 6+).
 2. Generate 16-byte random salt.
-3. PBKDF2-HMAC-SHA256 with 100,000+ calibrated iterations derives an intermediate key.
+3. PBKDF2-HMAC-SHA256 with a fixed, envelope-recorded work factor derives an intermediate key.
 4. Intermediate key is combined with an Android Keystore HMAC pepper (hardware-backed key alias `suya_phot_pepper_key`).
 5. Resulting KEK wraps the `VaultMasterKey` using AES-256-GCM.
 6. Stored envelope: `{version, salt, iterations, nonce, wrappedMasterKey}` (Version 1).

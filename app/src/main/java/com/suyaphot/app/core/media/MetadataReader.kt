@@ -4,14 +4,18 @@ import android.content.ContentResolver
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.os.Build
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.exifinterface.media.ExifInterface
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.util.SafeLog
-import java.io.InputStream
+import java.text.SimpleDateFormat
+import java.util.Locale
+
+data class ResolvedMediaSource(val sourceUri: Uri, val readUri: Uri)
+
+class UnsupportedMediaException : IllegalArgumentException("Only image and video media are supported")
 
 /**
  * Extracts comprehensive metadata from content URIs and media streams with fidelity.
@@ -24,13 +28,20 @@ class MetadataReader(private val context: Context) {
         val metadata: PrivateMediaMetadata
     )
 
-    fun read(rawUri: Uri): ExtractedSourceMetadata {
-        val resolver = context.contentResolver
-        val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && rawUri.authority == MediaStore.AUTHORITY) {
+    fun resolve(rawUri: Uri): ResolvedMediaSource {
+        val readUri = if (rawUri.authority == MediaStore.AUTHORITY) {
             runCatching { MediaStore.setRequireOriginal(rawUri) }.getOrDefault(rawUri)
         } else {
             rawUri
         }
+        return ResolvedMediaSource(rawUri, readUri)
+    }
+
+    fun read(rawUri: Uri): ExtractedSourceMetadata = read(resolve(rawUri))
+
+    fun read(source: ResolvedMediaSource): ExtractedSourceMetadata {
+        val resolver = context.contentResolver
+        val uri = source.readUri
 
         var displayName: String? = null
         var relPath: String? = null
@@ -54,9 +65,7 @@ class MetadataReader(private val context: Context) {
             MediaStore.MediaColumns.DATE_MODIFIED
         ).apply {
             add(MediaStore.MediaColumns.DATE_TAKEN)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                add(MediaStore.MediaColumns.VOLUME_NAME)
-            }
+            add(MediaStore.MediaColumns.VOLUME_NAME)
         }.toTypedArray()
 
         try {
@@ -89,20 +98,23 @@ class MetadataReader(private val context: Context) {
                         if (ms > 0) dateTaken = ms
                     }
 
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        val volCol = cursor.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
-                        if (volCol != -1) volume = cursor.getString(volCol)
-                    }
+                    val volCol = cursor.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
+                    if (volCol != -1) volume = cursor.getString(volCol)
                 }
             }
         } catch (e: Exception) {
-            SafeLog.w("MetadataReader", "Failed querying MediaColumns for uri: $uri", e)
+            SafeLog.w("MetadataReader", "Source metadata query failed")
         }
 
         // Fallback for displayName
         val finalDisplayName = displayName ?: uri.lastPathSegment ?: "media_${System.currentTimeMillis()}"
         val finalMimeType = mimeType ?: inferMimeTypeFromExtension(finalDisplayName)
-        val isVideo = finalMimeType.startsWith("video/")
+        val mediaType = when {
+            finalMimeType.startsWith("image/") -> MediaType.IMAGE
+            finalMimeType.startsWith("video/") -> MediaType.VIDEO
+            else -> throw UnsupportedMediaException()
+        }
+        val isVideo = mediaType == MediaType.VIDEO
 
         // Determine actual size if query returned -1
         if (size <= 0) {
@@ -127,6 +139,11 @@ class MetadataReader(private val context: Context) {
                         ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
                     if (exifDate != null) {
                         additional["ExifDate"] = exifDate
+                        if (dateTaken == null) {
+                            dateTaken = runCatching {
+                                SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).parse(exifDate)?.time
+                            }.getOrNull()
+                        }
                     }
 
                     exif.getAttribute(ExifInterface.TAG_MAKE)?.let { additional["CameraMake"] = it }
@@ -151,8 +168,8 @@ class MetadataReader(private val context: Context) {
             }
         } else {
             // Video attributes via MediaMetadataRetriever
+            val retriever = MediaMetadataRetriever()
             try {
-                val retriever = MediaMetadataRetriever()
                 retriever.setDataSource(context, uri)
                 duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
                 width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
@@ -161,9 +178,10 @@ class MetadataReader(private val context: Context) {
                 retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)?.let {
                     additional["VideoDate"] = it
                 }
-                retriever.release()
             } catch (e: Exception) {
                 SafeLog.w("MetadataReader", "Error reading video metadata", e)
+            } finally {
+                runCatching { retriever.release() }
             }
         }
 
@@ -188,7 +206,7 @@ class MetadataReader(private val context: Context) {
         )
 
         return ExtractedSourceMetadata(
-            mediaType = if (isVideo) MediaType.VIDEO else MediaType.IMAGE,
+            mediaType = mediaType,
             size = size,
             metadata = metadata
         )

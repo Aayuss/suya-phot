@@ -64,6 +64,7 @@ import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.core.model.Folder
 import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
+import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderDeletePolicy
 import com.suyaphot.app.domain.folders.FolderManager
@@ -85,9 +86,9 @@ import kotlinx.coroutines.withContext
 @Composable
 fun FoldersScreen(
     container: AppContainer,
+    modifier: Modifier = Modifier,
     onMediaClick: (itemId: String) -> Unit = {},
-    onFolderOpened: (folderId: String) -> Unit = {},
-    modifier: Modifier = Modifier
+    onFolderOpened: (folderId: String) -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val session = container.sessionManager.sessionState.collectAsState().value
@@ -137,6 +138,7 @@ fun FoldersScreen(
                 container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = currentParentId,
+                    mode = ImportMode.COPY,
                     onItemComplete = { current, total, _ ->
                         importProgressText = "Importing $current of $total items..."
                     }
@@ -750,7 +752,11 @@ fun FoldersScreen(
                     selectedMediaIds.clear()
                     showTrashConfirmDialog = false
                     withContext(Dispatchers.IO) {
-                        container.database.mediaItemDao().softDelete(ids, System.currentTimeMillis())
+                        container.database.mediaItemDao().softDeleteForVault(
+                            vaultId,
+                            ids,
+                            System.currentTimeMillis()
+                        )
                     }
                 }
             }

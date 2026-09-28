@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.io.Closeable
+import java.util.concurrent.atomic.AtomicLong
 
 sealed interface VaultSession {
     data object Locked : VaultSession
@@ -44,6 +46,20 @@ enum class LockReason {
     ScreenOff
 }
 
+class OperationKeyLease internal constructor(
+    val vaultId: String,
+    val kind: VaultKind,
+    val mediaSubkey: ByteArray,
+    val metaSubkey: ByteArray,
+    val thumbSubkey: ByteArray
+) : Closeable {
+    override fun close() {
+        mediaSubkey.fill(0)
+        metaSubkey.fill(0)
+        thumbSubkey.fill(0)
+    }
+}
+
 /**
  * Coordinates in-memory vault session lifecycle, auto-lock timeouts, and key cleanup.
  */
@@ -59,6 +75,7 @@ class SessionManager(
     val hideSensitiveUi: StateFlow<Boolean> = _hideSensitiveUi.asStateFlow()
 
     private var backgroundedAt: Long? = null
+    private val lifecycleGeneration = AtomicLong(0L)
 
     val isUnlocked: Boolean
         get() = _sessionState.value is VaultSession.Unlocked
@@ -68,6 +85,19 @@ class SessionManager(
 
     val currentVaultKind: VaultKind?
         get() = (_sessionState.value as? VaultSession.Unlocked)?.kind
+
+    /** Returns operation-owned key copies that remain valid even if the UI session locks. */
+    @Synchronized
+    fun acquireOperationKeyLease(): OperationKeyLease? {
+        val current = _sessionState.value as? VaultSession.Unlocked ?: return null
+        return OperationKeyLease(
+            vaultId = current.vaultId,
+            kind = current.kind,
+            mediaSubkey = current.mediaSubkey.copyOf(),
+            metaSubkey = current.metaSubkey.copyOf(),
+            thumbSubkey = current.thumbSubkey.copyOf()
+        )
+    }
 
     /**
      * Authenticates and establishes an active unlocked vault session.
@@ -94,7 +124,7 @@ class SessionManager(
             unlockedAt = SystemClock.elapsedRealtime()
         )
         _hideSensitiveUi.value = false
-        SafeLog.d("SessionManager", "Vault unlocked: $vaultId (kind=$kind)")
+        SafeLog.d("SessionManager", "Vault session unlocked")
     }
 
     /**
@@ -115,18 +145,20 @@ class SessionManager(
     }
 
     override fun onStop(owner: LifecycleOwner) {
+        val generation = lifecycleGeneration.incrementAndGet()
         backgroundedAt = SystemClock.elapsedRealtime()
         _hideSensitiveUi.value = true
 
         scope.launch {
             val timeoutMs = preferences.autoLockTimeoutMs.first()
-            if (timeoutMs == 0L) {
+            if (lifecycleGeneration.get() == generation && timeoutMs == 0L) {
                 lock(LockReason.Background)
             }
         }
     }
 
     override fun onStart(owner: LifecycleOwner) {
+        val generation = lifecycleGeneration.incrementAndGet()
         val bg = backgroundedAt
         backgroundedAt = null
 
@@ -134,6 +166,7 @@ class SessionManager(
             scope.launch {
                 val timeoutMs = preferences.autoLockTimeoutMs.first()
                 val awayTime = SystemClock.elapsedRealtime() - bg
+                if (lifecycleGeneration.get() != generation) return@launch
                 if (awayTime >= timeoutMs && timeoutMs > 0L) {
                     lock(LockReason.Timeout)
                 } else {

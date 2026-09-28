@@ -5,6 +5,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
@@ -18,6 +19,8 @@ import javax.crypto.spec.SecretKeySpec
  * Handles binary media encryption and decryption in the SUPH v1 format.
  */
 class VaultCrypto {
+
+    class VaultIntegrityException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
     companion object {
         val MAGIC_BYTES = byteArrayOf('S'.code.toByte(), 'U'.code.toByte(), 'P'.code.toByte(), 'H'.code.toByte())
@@ -132,20 +135,24 @@ class VaultCrypto {
             FileOutputStream(outputFile).use { fos ->
                 fos.write(headerBytes)
                 val buffer = ByteArray(BUFFER_SIZE)
-                var read: Int
-                while (input.read(buffer).also { read = it } != -1) {
-                    sha256Digest.update(buffer, 0, read)
-                    val encrypted = cipher.update(buffer, 0, read)
-                    if (encrypted != null && encrypted.isNotEmpty()) {
-                        fos.write(encrypted)
-                    }
-                    totalRead += read
+                try {
+                    var read: Int
+                    while (input.read(buffer).also { read = it } != -1) {
+                        sha256Digest.update(buffer, 0, read)
+                        val encrypted = cipher.update(buffer, 0, read)
+                        if (encrypted != null && encrypted.isNotEmpty()) {
+                            fos.write(encrypted)
+                        }
+                        totalRead += read
 
-                    val now = System.currentTimeMillis()
-                    if (now - lastProgressTime >= 150) {
-                        lastProgressTime = now
-                        onProgress?.invoke(totalRead, plaintextSize)
+                        val now = System.currentTimeMillis()
+                        if (now - lastProgressTime >= 150) {
+                            lastProgressTime = now
+                            onProgress?.invoke(totalRead, plaintextSize)
+                        }
                     }
+                } finally {
+                    buffer.fill(0)
                 }
 
                 val finalBytes = cipher.doFinal()
@@ -295,22 +302,30 @@ class VaultCrypto {
                     if (read < 0) break
                     val plain = cipher.update(inputBuffer, 0, read)
                     if (plain != null && plain.isNotEmpty()) {
-                        outputStream.write(plain)
-                        sha256Digest.update(plain)
-                        plainBytesWritten += plain.size
-                        val now = System.currentTimeMillis()
-                        if (now - lastProgressTime >= 150) {
-                            lastProgressTime = now
-                            onProgress?.invoke(plainBytesWritten, expectedPlaintextSize)
+                        try {
+                            outputStream.write(plain)
+                            sha256Digest.update(plain)
+                            plainBytesWritten += plain.size
+                            val now = System.currentTimeMillis()
+                            if (now - lastProgressTime >= 150) {
+                                lastProgressTime = now
+                                onProgress?.invoke(plainBytesWritten, expectedPlaintextSize)
+                            }
+                        } finally {
+                            plain.fill(0)
                         }
                     }
                 }
 
                 val finalPlain = cipher.doFinal()
                 if (finalPlain != null && finalPlain.isNotEmpty()) {
-                    outputStream.write(finalPlain)
-                    sha256Digest.update(finalPlain)
-                    plainBytesWritten += finalPlain.size
+                    try {
+                        outputStream.write(finalPlain)
+                        sha256Digest.update(finalPlain)
+                        plainBytesWritten += finalPlain.size
+                    } finally {
+                        finalPlain.fill(0)
+                    }
                 }
                 outputStream.flush()
 
@@ -331,8 +346,34 @@ class VaultCrypto {
     }
 
     /**
+     * Fully authenticates a vault item into a private temporary file. Callers must not expose or
+     * consume [destinationTemp] until this method returns successfully.
+     */
+    fun decryptVerifiedToFile(
+        sourceEncryptedFile: File,
+        mediaSubkey: ByteArray,
+        itemId: String,
+        destinationTemp: File,
+        onProgress: ((Long, Long) -> Unit)? = null
+    ): VerificationResult {
+        destinationTemp.parentFile?.mkdirs()
+        return try {
+            FileOutputStream(destinationTemp).use { output ->
+                decryptTo(sourceEncryptedFile, mediaSubkey, itemId, output, onProgress).also {
+                    output.flush()
+                    output.fd.sync()
+                }
+            }
+        } catch (t: Throwable) {
+            runCatching { destinationTemp.delete() }
+            throw VaultIntegrityException("Vault item could not be authenticated", t)
+        }
+    }
+
+    /**
      * Opens a streaming InputStream that decrypts on the fly for viewing media or generating thumbnails.
      */
+    @Deprecated("Partial consumers may observe plaintext before GCM authentication; use decryptVerifiedToFile")
     fun openDecryptedStream(
         sourceEncryptedFile: File,
         mediaSubkey: ByteArray,

@@ -10,6 +10,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import com.suyaphot.app.core.crypto.VaultCrypto
+import java.io.ByteArrayInputStream
+import java.io.File
 
 class KeyManagerTest {
 
@@ -84,6 +87,42 @@ class KeyManagerTest {
         )
         val differentPepperUnwrapped = otherKeyManager.unwrapPinEnvelope(deserialized, "123456".toCharArray())
         assertNull(differentPepperUnwrapped)
+    }
+
+    @Test
+    fun secondaryPinRotationRewrapsSameMasterKeyAndPreservesMedia() {
+        val vaultCrypto = VaultCrypto()
+        val masterKey = keyManager.generateMasterKey()
+        val originalPin = "123456".toCharArray()
+        val newPin = "654321".toCharArray()
+        val originalEnvelope = keyManager.createPinEnvelope(masterKey, originalPin, iterations = 100_000)
+        val mediaKey = vaultCrypto.deriveMediaSubkey(masterKey)
+        val fixture = ByteArray(4096) { (it % 251).toByte() }
+        val encrypted = File.createTempFile("secondary-pin-", ".sph")
+        try {
+            val before = vaultCrypto.encryptStream(
+                ByteArrayInputStream(fixture), encrypted, mediaKey, "item-1", false, fixture.size.toLong()
+            )
+            val unwrappedExisting = keyManager.unwrapPinEnvelope(originalEnvelope, originalPin)!!
+            val replacement = keyManager.createPinEnvelope(unwrappedExisting, newPin, iterations = 100_000)
+            unwrappedExisting.fill(0)
+
+            assertNull(keyManager.unwrapPinEnvelope(replacement, originalPin))
+            val afterMaster = keyManager.unwrapPinEnvelope(replacement, newPin)!!
+            assertArrayEquals(masterKey, afterMaster)
+            val afterMediaKey = vaultCrypto.deriveMediaSubkey(afterMaster)
+            val after = vaultCrypto.verifyAndHash(encrypted, afterMediaKey, "item-1")
+            assertArrayEquals(before.sha256, after.sha256)
+            assertEquals(before.plaintextSize, after.plaintextSize)
+            afterMaster.fill(0)
+            afterMediaKey.fill(0)
+        } finally {
+            mediaKey.fill(0)
+            masterKey.fill(0)
+            originalPin.fill('\u0000')
+            newPin.fill('\u0000')
+            encrypted.delete()
+        }
     }
 
     @Test(expected = IllegalArgumentException::class)

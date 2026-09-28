@@ -22,28 +22,48 @@ class VaultFileStore(private val context: Context) {
     private val playbackCacheDir: File
         get() = File(context.cacheDir, "playback_cache").apply { mkdirs() }
 
+    private val viewerCacheDir: File
+        get() = File(context.cacheDir, "viewer_cache").apply { mkdirs() }
+
+    private val intruderCaptureTempDir: File
+        get() = File(context.cacheDir, "intruder_capture_tmp").apply { mkdirs() }
+
+    private fun requireInternalId(value: String, label: String) {
+        require(value.matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "Invalid $label" }
+    }
+
+    private fun safeExtension(extension: String): String {
+        val normalized = extension.removePrefix(".").lowercase()
+        return normalized.takeIf { it.matches(Regex("[a-z0-9]{1,10}")) }?.let { ".$it" } ?: ".bin"
+    }
+
     fun getVaultDir(vaultId: String): File {
+        requireInternalId(vaultId, "vault id")
         return File(baseVaultDir, vaultId).apply { mkdirs() }
     }
 
     fun getPartialFile(vaultId: String, jobId: String): File {
+        requireInternalId(jobId, "job id")
         val dir = File(getVaultDir(vaultId), "partial").apply { mkdirs() }
         return File(dir, "$jobId.partial")
     }
 
     fun getMediaFile(vaultId: String, itemId: String): File {
+        requireInternalId(itemId, "item id")
         val prefix = if (itemId.length >= 2) itemId.substring(0, 2) else "xx"
         val dir = File(File(getVaultDir(vaultId), "media"), prefix).apply { mkdirs() }
         return File(dir, "$itemId.sph")
     }
 
     fun getThumbFile(vaultId: String, itemId: String): File {
+        requireInternalId(itemId, "item id")
         val prefix = if (itemId.length >= 2) itemId.substring(0, 2) else "xx"
         val dir = File(File(getVaultDir(vaultId), "thumbs"), prefix).apply { mkdirs() }
         return File(dir, "$itemId.sth")
     }
 
     fun getSecurityFile(vaultId: String, eventId: String): File {
+        requireInternalId(eventId, "event id")
         val dir = File(getVaultDir(vaultId), "security").apply { mkdirs() }
         return File(dir, "$eventId.sph")
     }
@@ -68,23 +88,30 @@ class VaultFileStore(private val context: Context) {
             if (partialFile.renameTo(finalFile)) {
                 true
             } else {
+                val copyTemp = File(finalFile.parentFile, "${finalFile.name}.copying")
                 try {
+                    check(!copyTemp.exists()) { "Ciphertext copy staging path already exists" }
                     partialFile.inputStream().use { input ->
-                        FileOutputStream(finalFile).use { output ->
+                        FileOutputStream(copyTemp).use { output ->
                             input.copyTo(output)
                             output.flush()
                             output.fd.sync()
                         }
                     }
-                    partialFile.delete()
+                    check(copyTemp.length() == partialFile.length()) { "Ciphertext staging size mismatch" }
+                    check(copyTemp.renameTo(finalFile)) { "Could not commit copied ciphertext" }
+                    if (!partialFile.delete()) {
+                        SafeLog.w("VaultFileStore", "Committed ciphertext but stale partial remains")
+                    }
                     true
                 } catch (ex: Exception) {
-                    SafeLog.e("VaultFileStore", "Failed to commit partial file to ${finalFile.name}", ex)
+                    runCatching { copyTemp.delete() }
+                    SafeLog.e("VaultFileStore", "Failed to commit ciphertext staging file")
                     false
                 }
             }
         } catch (e: Exception) {
-            SafeLog.e("VaultFileStore", "Failed to move partial file to ${finalFile.name}", e)
+            SafeLog.e("VaultFileStore", "Failed to move ciphertext staging file")
             false
         }
     }
@@ -105,7 +132,7 @@ class VaultFileStore(private val context: Context) {
      * Creates a temporary decrypted file in private cache for outgoing sharing via FileProvider.
      */
     fun createShareTempFile(extension: String): File {
-        val ext = if (extension.startsWith(".")) extension else ".$extension"
+        val ext = safeExtension(extension)
         val filename = "share_${UUID.randomUUID()}$ext"
         return File(shareCacheDir, filename)
     }
@@ -125,7 +152,7 @@ class VaultFileStore(private val context: Context) {
      * Creates a temporary file in dedicated playback cache.
      */
     fun createPlaybackTempFile(extension: String): File {
-        val ext = if (extension.startsWith(".")) extension else ".$extension"
+        val ext = safeExtension(extension)
         val filename = "playback_${UUID.randomUUID()}$ext"
         return File(playbackCacheDir, filename)
     }
@@ -138,6 +165,20 @@ class VaultFileStore(private val context: Context) {
             playbackCacheDir.listFiles()?.forEach { file ->
                 file.delete()
             }
+        }
+    }
+
+    fun createViewerTempFile(itemId: String, extension: String): File {
+        requireInternalId(itemId, "item id")
+        return File(viewerCacheDir, "viewer_${itemId}_${UUID.randomUUID()}${safeExtension(extension)}")
+    }
+
+    fun createIntruderCaptureTempFile(): File =
+        File(intruderCaptureTempDir, "capture_${UUID.randomUUID()}.jpg")
+
+    fun clearEphemeralPlaintextCaches() {
+        listOf(shareCacheDir, playbackCacheDir, viewerCacheDir, intruderCaptureTempDir).forEach { dir ->
+            dir.listFiles()?.forEach { file -> file.delete() }
         }
     }
 

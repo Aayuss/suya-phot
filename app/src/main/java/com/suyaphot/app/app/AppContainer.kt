@@ -16,12 +16,15 @@ import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.PinAuthenticator
 import com.suyaphot.app.domain.auth.SessionManager
 import com.suyaphot.app.domain.folders.FolderManager
+import com.suyaphot.app.domain.gallery.GalleryRepository
+import com.suyaphot.app.domain.gallery.VaultSearchIndex
 import com.suyaphot.app.domain.importmedia.ImportCoordinator
 import com.suyaphot.app.domain.importmedia.ImportRecoveryManager
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.domain.restore.RestoreCoordinator
+import com.suyaphot.app.domain.restore.RestoreRecoveryManager
+import com.suyaphot.app.domain.trash.TrashCoordinator
 import com.suyaphot.app.feature.intruder.IntruderCaptureManager
-import com.suyaphot.app.feature.shizuku.ShizukuManager
 
 /**
  * Lightweight, zero-overhead manual dependency container.
@@ -38,6 +41,8 @@ class AppContainer(val context: Context) {
     val metadataReader: MetadataReader by lazy { MetadataReader(context) }
     val thumbnailGenerator: ThumbnailGenerator by lazy { ThumbnailGenerator(context) }
     val conflictResolver: ConflictResolver by lazy { ConflictResolver(context.contentResolver) }
+    val galleryRepository: GalleryRepository by lazy { GalleryRepository(database.mediaItemDao()) }
+    val vaultSearchIndex: VaultSearchIndex by lazy { VaultSearchIndex() }
 
     val sessionManager: SessionManager by lazy { SessionManager(preferences) }
     val pinAuthenticator: PinAuthenticator by lazy {
@@ -67,8 +72,7 @@ class AppContainer(val context: Context) {
     val importRecoveryManager: ImportRecoveryManager by lazy {
         ImportRecoveryManager(
             database = database,
-            fileStore = vaultFileStore,
-            vaultCrypto = vaultCrypto
+            fileStore = vaultFileStore
         )
     }
 
@@ -80,11 +84,20 @@ class AppContainer(val context: Context) {
         RestoreCoordinator(
             context = context,
             sessionManager = sessionManager,
+            database = database,
             mediaItemDao = database.mediaItemDao(),
             vaultCrypto = vaultCrypto,
             fileStore = vaultFileStore,
             conflictResolver = conflictResolver
         )
+    }
+
+    val restoreRecoveryManager: RestoreRecoveryManager by lazy {
+        RestoreRecoveryManager(context, database, vaultFileStore)
+    }
+
+    val trashCoordinator: TrashCoordinator by lazy {
+        TrashCoordinator(database, vaultFileStore, preferences)
     }
 
     val folderManager: FolderManager by lazy {
@@ -104,9 +117,5 @@ class AppContainer(val context: Context) {
             vaultDao = database.vaultDao(),
             intruderKeyProvider = intruderKeyProvider
         )
-    }
-
-    val shizukuManager: ShizukuManager by lazy {
-        ShizukuManager(context)
     }
 }

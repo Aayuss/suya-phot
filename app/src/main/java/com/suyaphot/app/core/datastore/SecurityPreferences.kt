@@ -27,7 +27,6 @@ class SecurityPreferences(private val context: Context) {
         private val KEY_TRASH_RETENTION_DAYS = intPreferencesKey("trash_retention_days")
         private val KEY_GRID_COLUMNS = intPreferencesKey("grid_columns")
         private val KEY_SORT_ORDER = stringPreferencesKey("sort_order")
-        private val KEY_SHIZUKU_ENABLED = booleanPreferencesKey("shizuku_enabled")
         private val KEY_BIOMETRIC_ON_LAUNCH = booleanPreferencesKey("biometric_on_launch")
 
         // Rate limiting state
@@ -55,9 +54,6 @@ class SecurityPreferences(private val context: Context) {
     // Sort order: "DATE_TAKEN_DESC", "DATE_TAKEN_ASC", "IMPORTED_DESC", "NAME_ASC"
     val sortOrder: Flow<String> = context.dataStore.data.map { it[KEY_SORT_ORDER] ?: "DATE_TAKEN_DESC" }
 
-    // Shizuku optional enhancement
-    val shizukuEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_SHIZUKU_ENABLED] ?: false }
-
     // Prompt biometric immediately on lock screen
     val biometricOnLaunch: Flow<Boolean> = context.dataStore.data.map { it[KEY_BIOMETRIC_ON_LAUNCH] ?: true }
 
@@ -66,6 +62,7 @@ class SecurityPreferences(private val context: Context) {
     val lockoutUntilTimestamp: Flow<Long> = context.dataStore.data.map { it[KEY_LOCKOUT_UNTIL_TIMESTAMP] ?: 0L }
 
     suspend fun setAutoLockTimeoutMs(timeoutMs: Long) {
+        require(timeoutMs in setOf(0L, 30_000L, 60_000L, 300_000L)) { "Unsupported auto-lock timeout" }
         context.dataStore.edit { it[KEY_AUTO_LOCK_TIMEOUT_MS] = timeoutMs }
     }
 
@@ -82,23 +79,25 @@ class SecurityPreferences(private val context: Context) {
     }
 
     suspend fun setIntruderTriggerCount(count: Int) {
+        require(count in 1..10) { "Intruder threshold must be between 1 and 10" }
         context.dataStore.edit { it[KEY_INTRUDER_TRIGGER_COUNT] = count }
     }
 
     suspend fun setTrashRetentionDays(days: Int) {
+        require(days in setOf(0, 7, 30, 90)) { "Unsupported trash retention" }
         context.dataStore.edit { it[KEY_TRASH_RETENTION_DAYS] = days }
     }
 
     suspend fun setGridColumns(columns: Int) {
+        require(columns in 2..5) { "Grid columns must be between 2 and 5" }
         context.dataStore.edit { it[KEY_GRID_COLUMNS] = columns }
     }
 
     suspend fun setSortOrder(order: String) {
+        require(order in setOf("DATE_TAKEN_DESC", "DATE_TAKEN_ASC", "IMPORTED_DESC", "IMPORTED_ASC", "SIZE_DESC", "SIZE_ASC")) {
+            "Unsupported gallery sort"
+        }
         context.dataStore.edit { it[KEY_SORT_ORDER] = order }
-    }
-
-    suspend fun setShizukuEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[KEY_SHIZUKU_ENABLED] = enabled }
     }
 
     suspend fun setBiometricOnLaunch(enabled: Boolean) {
