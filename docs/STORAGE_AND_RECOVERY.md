@@ -17,7 +17,6 @@ vault/
     security/
       <uuid>.sph         // Intruder photos (encrypted)
     partial/             // Temporary partial files during active streaming encryption
-    quarantine/          // Damaged/corrupted files identified during audits
 ```
 
 - Plaintext original filenames never appear in the filesystem.
@@ -45,7 +44,7 @@ Importing an item (e.g. from Samsung Gallery share or in-app picker) follows thi
    - If user denies deletion, encrypted vault item is safely retained, and UI reports original still exists.
    - Source is NEVER deleted if any previous step fails.
 9. **CRASH RECOVERY**:
-   - On every unlocked session start, `ImportRecoveryManager` reconciles unfinished jobs. Partially written `.partial` files are safely pruned, verified uncommitted items are restored or finalized, and source deletion requests are reprompted.
+   - On every unlocked session start, `ImportRecoveryManager` reconciles unfinished import jobs. Partial files are pruned; ciphertext that reached its final path without a matching database row is removed because the public source has not yet been deleted. Jobs awaiting source deletion remain explicit rather than being reported as deleted.
 
 ---
 
@@ -64,13 +63,14 @@ Importing an item (e.g. from Samsung Gallery share or in-app picker) follows thi
 
 ## 4. Recovery System
 
-- **Path A (Biometric Reset)**: If fingerprint is configured, user authenticates with biometric (`BiometricPrompt` with `CryptoObject`) to unwrap the `VaultMasterKey` and re-wrap with a new PIN without re-encrypting media.
-- **Path B (Recovery Kit)**:
+- **Recovery Kit**:
   - 128-bit high-entropy secret (16 bytes random) generated at setup.
   - Formatted into 26 Base32 characters grouped as `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX`.
   - Normalization strips hyphens and spaces, converting to uppercase and enforcing exact 26 characters.
   - Derives recovery KEK using HKDF-SHA256 (`suya-phot-recovery-kek`), unwraps the master key, and allows resetting the PIN.
-  - Recovery code rotation creates a fresh envelope and invalidates the previous code.
+  - A valid recovery code re-wraps the same master key under a new PIN, without re-encrypting media.
+
+Biometric PIN reset and recovery-code rotation are not exposed as completed product flows in this revision.
 
 ---
 

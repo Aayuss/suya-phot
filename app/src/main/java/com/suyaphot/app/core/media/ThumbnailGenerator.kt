@@ -3,7 +3,6 @@ package com.suyaphot.app.core.media
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
@@ -57,7 +56,7 @@ class ThumbnailGenerator(private val context: Context) {
             } ?: return false
 
             if (orientation != ExifInterface.ORIENTATION_NORMAL && orientation != ExifInterface.ORIENTATION_UNDEFINED) {
-                bitmap = applyExifRotation(bitmap, orientation)
+                bitmap = applyExifOrientation(bitmap, orientation)
             }
 
             val baos = ByteArrayOutputStream()
@@ -65,21 +64,24 @@ class ThumbnailGenerator(private val context: Context) {
             bitmap.recycle()
 
             val plaintextBytes = baos.toByteArray()
-            val encryptedBytes = Aead.encryptWithPrependedNonce(
-                keyBytes = thumbSubkey,
-                plaintext = plaintextBytes,
-                aad = "suya-phot:thumbnail:v1:$itemId".toByteArray(Charsets.UTF_8)
-            )
-
-            FileOutputStream(partialThumbFile).use { fos ->
-                fos.write(encryptedBytes)
-                fos.flush()
-                runCatching { fos.fd.sync() }
+            val encryptedBytes = try {
+                Aead.encryptWithPrependedNonce(
+                    keyBytes = thumbSubkey,
+                    plaintext = plaintextBytes,
+                    aad = "suya-phot:thumbnail:v1:$itemId".toByteArray(Charsets.UTF_8)
+                )
+            } finally {
+                plaintextBytes.fill(0)
             }
-
-            if (!partialThumbFile.renameTo(outputThumbFile)) {
-                partialThumbFile.copyTo(outputThumbFile, overwrite = true)
-                partialThumbFile.delete()
+            try {
+                FileOutputStream(partialThumbFile).use { fos ->
+                    fos.write(encryptedBytes)
+                    fos.flush()
+                    runCatching { fos.fd.sync() }
+                }
+                commitDerivative(partialThumbFile, outputThumbFile)
+            } finally {
+                encryptedBytes.fill(0)
             }
             true
         } catch (e: Exception) {
@@ -123,21 +125,25 @@ class ThumbnailGenerator(private val context: Context) {
                 scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)
                 scaled.recycle()
 
-                val encrypted = Aead.encryptWithPrependedNonce(
-                    keyBytes = thumbSubkey,
-                    plaintext = baos.toByteArray(),
-                    aad = "suya-phot:thumbnail:v1:$itemId".toByteArray(Charsets.UTF_8)
-                )
-
-                FileOutputStream(partialThumbFile).use { fos ->
-                    fos.write(encrypted)
-                    fos.flush()
-                    runCatching { fos.fd.sync() }
+                val plaintext = baos.toByteArray()
+                val encrypted = try {
+                    Aead.encryptWithPrependedNonce(
+                        keyBytes = thumbSubkey,
+                        plaintext = plaintext,
+                        aad = "suya-phot:thumbnail:v1:$itemId".toByteArray(Charsets.UTF_8)
+                    )
+                } finally {
+                    plaintext.fill(0)
                 }
-
-                if (!partialThumbFile.renameTo(outputThumbFile)) {
-                    partialThumbFile.copyTo(outputThumbFile, overwrite = true)
-                    partialThumbFile.delete()
+                try {
+                    FileOutputStream(partialThumbFile).use { fos ->
+                        fos.write(encrypted)
+                        fos.flush()
+                        runCatching { fos.fd.sync() }
+                    }
+                    commitDerivative(partialThumbFile, outputThumbFile)
+                } finally {
+                    encrypted.fill(0)
                 }
                 true
             } else {
@@ -180,9 +186,14 @@ class ThumbnailGenerator(private val context: Context) {
                     aad = "thumbnail-v1".toByteArray(Charsets.UTF_8)
                 )
             }
-            BitmapFactory.decodeByteArray(plaintextBytes, 0, plaintextBytes.size)
+            try {
+                BitmapFactory.decodeByteArray(plaintextBytes, 0, plaintextBytes.size)
+            } finally {
+                plaintextBytes.fill(0)
+                encryptedBytes.fill(0)
+            }
         } catch (e: Exception) {
-            SafeLog.e("ThumbnailGenerator", "Failed decrypting thumbnail: ${thumbFile.name}", e)
+            SafeLog.e("ThumbnailGenerator", "Thumbnail decryption failed")
             null
         }
     }
@@ -200,20 +211,21 @@ class ThumbnailGenerator(private val context: Context) {
         return inSampleSize.coerceAtLeast(1)
     }
 
-    private fun applyExifRotation(bitmap: Bitmap, orientation: Int): Bitmap {
-        val matrix = Matrix()
-        when (orientation) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
-            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
-            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
-            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
-            else -> return bitmap
+    private fun commitDerivative(partial: File, final: File) {
+        check(!final.exists()) { "Refusing to overwrite encrypted derivative" }
+        if (partial.renameTo(final)) return
+        val copying = File(final.parentFile, "${final.name}.copying")
+        try {
+            FileOutputStream(copying).use { output ->
+                partial.inputStream().use { it.copyTo(output) }
+                output.flush()
+                output.fd.sync()
+            }
+            check(copying.length() == partial.length()) { "Derivative staging size mismatch" }
+            check(copying.renameTo(final)) { "Could not commit encrypted derivative" }
+            partial.delete()
+        } finally {
+            copying.delete()
         }
-        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-        if (rotated != bitmap) {
-            bitmap.recycle()
-        }
-        return rotated
     }
 }

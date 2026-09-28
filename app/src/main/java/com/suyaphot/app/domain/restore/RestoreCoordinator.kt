@@ -10,7 +10,9 @@ import android.provider.MediaStore
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.VaultCrypto
 import com.suyaphot.app.core.database.dao.MediaItemDao
+import com.suyaphot.app.core.database.SuyaDatabase
 import com.suyaphot.app.core.database.entity.MediaItemEntity
+import com.suyaphot.app.core.database.entity.RestoreJobEntity
 import com.suyaphot.app.core.media.ConflictResolver
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.PrivateMediaMetadata
@@ -21,10 +23,19 @@ import com.suyaphot.app.domain.auth.VaultSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
+import java.security.MessageDigest
+import java.util.UUID
 
 sealed interface RestoreResult {
     data class Success(val mediaId: String, val publicUri: Uri) : RestoreResult
+    data class SuccessWithCleanupPending(val mediaId: String, val publicUri: Uri) : RestoreResult
     data class Failure(val mediaId: String, val reason: String, val vaultCopyIntact: Boolean = true) : RestoreResult
+}
+
+enum class RestorePhase(val code: Int) {
+    CREATED(0), PUBLIC_PENDING_CREATED(1), WRITING(2), PLAINTEXT_VERIFIED(3),
+    PUBLIC_PUBLISHED(4), VAULT_MEDIA_REMOVED(5), DB_FINALIZED(6), COMPLETED(7),
+    FAILED_BEFORE_PUBLISH(8), CLEANUP_PENDING(9)
 }
 
 /**
@@ -33,6 +44,7 @@ sealed interface RestoreResult {
 class RestoreCoordinator(
     private val context: Context,
     private val sessionManager: SessionManager,
+    private val database: SuyaDatabase,
     private val mediaItemDao: MediaItemDao,
     private val vaultCrypto: VaultCrypto,
     private val fileStore: VaultFileStore,
@@ -42,16 +54,36 @@ class RestoreCoordinator(
     private fun bytesToHex(bytes: ByteArray): String =
         bytes.joinToString("") { "%02x".format(it) }
 
+    private fun safeRelativePath(candidate: String?, fallback: String): String {
+        val segments = candidate
+            ?.replace('\\', '/')
+            ?.trimStart('/')
+            ?.split('/')
+            ?.filter { it.isNotBlank() && it != "." && it != ".." && it.none(Char::isISOControl) }
+            .orEmpty()
+        return if (segments.isEmpty()) fallback else segments.joinToString("/", postfix = "/")
+    }
+
+    private fun safeDisplayName(candidate: String, itemId: String): String = candidate
+        .substringAfterLast('/')
+        .substringAfterLast('\\')
+        .filterNot(Char::isISOControl)
+        .trim()
+        .take(180)
+        .ifBlank { "restored_$itemId" }
+
     suspend fun restoreItem(
         itemId: String,
         move: Boolean,
         customRelativePath: String? = null,
         onProgress: ((current: Long, total: Long) -> Unit)? = null
     ): RestoreResult = withContext(Dispatchers.IO) {
-        val session = sessionManager.sessionState.value
-        if (session !is VaultSession.Unlocked) {
+        if (sessionManager.sessionState.value !is VaultSession.Unlocked) {
             return@withContext RestoreResult.Failure(itemId, "Vault is locked", vaultCopyIntact = true)
         }
+        val session = sessionManager.acquireOperationKeyLease()
+            ?: return@withContext RestoreResult.Failure(itemId, "Vault is locked", vaultCopyIntact = true)
+        try {
 
         // Section 19: Verify item belongs to current vault session
         val item = mediaItemDao.getItemForVault(itemId, session.vaultId)
@@ -62,6 +94,12 @@ class RestoreCoordinator(
             return@withContext RestoreResult.Failure(itemId, "Encrypted vault file missing on disk", vaultCopyIntact = false)
         }
 
+        val jobId = UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        database.restoreJobDao().insert(
+            RestoreJobEntity(jobId, session.vaultId, itemId, RestorePhase.CREATED.code, null, move, now, now, null)
+        )
+
         // 1. Decrypt metadata
         val metadata = try {
             val decryptedBytes = Aead.decryptWithPrependedNonce(
@@ -69,7 +107,11 @@ class RestoreCoordinator(
                 payload = item.encryptedMetadata,
                 aad = itemId.toByteArray(Charsets.UTF_8)
             )
-            PrivateMediaMetadata.deserialize(decryptedBytes)
+            try {
+                PrivateMediaMetadata.deserialize(decryptedBytes)
+            } finally {
+                decryptedBytes.fill(0)
+            }
         } catch (e: Exception) {
             return@withContext RestoreResult.Failure(itemId, "Failed decrypting metadata: ${e.message}", vaultCopyIntact = true)
         }
@@ -82,19 +124,22 @@ class RestoreCoordinator(
         }
 
         val defaultFolder = if (isVideo) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
-        val restoreRelPath = customRelativePath
-            ?: metadata.originalRelativePath
-            ?: "$defaultFolder/Suya Phot Restored/"
+        val fallbackPath = "$defaultFolder/Suya Phot Restored/"
+        val restoreRelPath = safeRelativePath(customRelativePath ?: metadata.originalRelativePath, fallbackPath)
+        val restoredDisplayName = safeDisplayName(metadata.originalDisplayName, itemId)
+        val safeMimeType = metadata.originalMimeType.takeIf {
+            if (isVideo) it.startsWith("video/") else it.startsWith("image/")
+        } ?: if (isVideo) "video/mp4" else "image/jpeg"
 
         val safeDisplayName = conflictResolver.resolveName(
-            desiredName = metadata.originalDisplayName,
+            desiredName = restoredDisplayName,
             targetRelativePath = restoreRelPath,
             collectionUri = collectionUri
         )
 
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, safeDisplayName)
-            put(MediaStore.MediaColumns.MIME_TYPE, metadata.originalMimeType)
+            put(MediaStore.MediaColumns.MIME_TYPE, safeMimeType)
             put(MediaStore.MediaColumns.RELATIVE_PATH, restoreRelPath)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
             metadata.dateTakenMs?.let {
@@ -114,7 +159,23 @@ class RestoreCoordinator(
             null
         } ?: return@withContext RestoreResult.Failure(itemId, "Could not insert MediaStore pending record", vaultCopyIntact = true)
 
+        val destinationBytes = insertedUri.toString().toByteArray(Charsets.UTF_8)
+        val encryptedDestination = try {
+            Aead.encryptWithPrependedNonce(
+                session.metaSubkey,
+                destinationBytes,
+                "restore:$jobId:v1".toByteArray(Charsets.UTF_8)
+            )
+        } finally {
+            destinationBytes.fill(0)
+        }
+        database.restoreJobDao().updatePhase(
+            jobId, RestorePhase.PUBLIC_PENDING_CREATED.code, encryptedDestination, System.currentTimeMillis()
+        )
+
+        var publicPublished = false
         try {
+            database.restoreJobDao().updatePhase(jobId, RestorePhase.WRITING.code, null, System.currentTimeMillis())
             // 2. Stream-decrypt into destination MediaStore file descriptor
             val verify = resolver.openFileDescriptor(insertedUri, "w").use { pfd ->
                 checkNotNull(pfd) { "Failed opening destination file descriptor for $insertedUri" }
@@ -137,6 +198,7 @@ class RestoreCoordinator(
             check(restoredSha256Hex.equals(item.sha256Hex, ignoreCase = true)) {
                 "Checksum mismatch during restoration (expected ${item.sha256Hex}, got $restoredSha256Hex)"
             }
+            database.restoreJobDao().updatePhase(jobId, RestorePhase.PLAINTEXT_VERIFIED.code, null, System.currentTimeMillis())
 
             // 4. Publish to MediaStore (IS_PENDING = 0) & verify publish succeeded (Section 20)
             val publishValues = ContentValues().apply {
@@ -144,33 +206,80 @@ class RestoreCoordinator(
             }
             val updatedRows = resolver.update(insertedUri, publishValues, null, null)
             check(updatedRows == 1) { "Failed to publish restored MediaStore item: update returned $updatedRows" }
+            publicPublished = true
+            database.restoreJobDao().updatePhase(jobId, RestorePhase.PUBLIC_PUBLISHED.code, null, System.currentTimeMillis())
 
-            // Verify the published public file can be read and has valid size
+            // Re-open and hash the public copy before any private deletion.
             resolver.openFileDescriptor(insertedUri, "r")?.use { pfd ->
-                check(pfd.statSize > 0) { "Restored file size is zero" }
+                if (pfd.statSize >= 0L) {
+                    check(pfd.statSize == item.plaintextSize) { "Published size mismatch" }
+                }
             } ?: error("Failed to open restored public file after publish")
+            val publicDigest = MessageDigest.getInstance("SHA-256")
+            resolver.openInputStream(insertedUri).use { input ->
+                checkNotNull(input) { "Failed to reopen restored public file" }
+                val buffer = ByteArray(256 * 1024)
+                try {
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        publicDigest.update(buffer, 0, read)
+                    }
+                } finally {
+                    buffer.fill(0)
+                }
+            }
+            check(bytesToHex(publicDigest.digest()).equals(item.sha256Hex, ignoreCase = true)) {
+                "Published checksum mismatch"
+            }
 
             // 5. Two-phase removal on Move (Section 21)
             if (move) {
                 val mediaDeleted = !vaultFile.exists() || vaultFile.delete()
                 val thumbFile = fileStore.getThumbFile(session.vaultId, itemId)
-                val thumbDeleted = !thumbFile.exists() || thumbFile.delete()
+                if (thumbFile.exists() && !thumbFile.delete()) {
+                    SafeLog.w("RestoreCoordinator", "Thumbnail cleanup pending for restored media")
+                }
 
                 if (!mediaDeleted) {
-                    return@withContext RestoreResult.Failure(itemId, "Failed to remove encrypted vault file from disk", vaultCopyIntact = true)
+                    database.restoreJobDao().updatePhase(
+                        jobId, RestorePhase.CLEANUP_PENDING.code, null, System.currentTimeMillis(), "PRIVATE_MEDIA_DELETE_FAILED"
+                    )
+                    return@withContext RestoreResult.SuccessWithCleanupPending(itemId, insertedUri)
                 }
+
+                database.restoreJobDao().updatePhase(jobId, RestorePhase.VAULT_MEDIA_REMOVED.code, null, System.currentTimeMillis())
 
                 mediaItemDao.deleteForVault(itemId, session.vaultId)
             }
 
-            SafeLog.d("RestoreCoordinator", "Successfully restored media $itemId to $insertedUri (move=$move)")
+            database.restoreJobDao().updatePhase(jobId, RestorePhase.DB_FINALIZED.code, null, System.currentTimeMillis())
+            database.restoreJobDao().updatePhase(jobId, RestorePhase.COMPLETED.code, null, System.currentTimeMillis())
+
+            SafeLog.d("RestoreCoordinator", "Media restore completed (move=$move)")
             RestoreResult.Success(itemId, insertedUri)
         } catch (e: Exception) {
-            SafeLog.e("RestoreCoordinator", "Restoration failed for $itemId", e)
-            try {
-                resolver.delete(insertedUri, null, null)
-            } catch (ignored: Exception) {}
-            RestoreResult.Failure(itemId, e.message ?: "Restoration failed", vaultCopyIntact = true)
+            SafeLog.e("RestoreCoordinator", "Media restore failed")
+            if (!publicPublished) {
+                database.restoreJobDao().updatePhase(
+                    jobId, RestorePhase.FAILED_BEFORE_PUBLISH.code, null, System.currentTimeMillis(), "RESTORE_FAILED_BEFORE_PUBLISH"
+                )
+                runCatching { resolver.delete(insertedUri, null, null) }
+                RestoreResult.Failure(
+                    mediaId = itemId,
+                    reason = "RESTORE_FAILED_BEFORE_PUBLISH",
+                    vaultCopyIntact = vaultFile.exists()
+                )
+            } else {
+                // The verified public item is now the safety anchor. Never delete it here.
+                database.restoreJobDao().updatePhase(
+                    jobId, RestorePhase.CLEANUP_PENDING.code, null, System.currentTimeMillis(), "PRIVATE_CLEANUP_PENDING"
+                )
+                RestoreResult.SuccessWithCleanupPending(itemId, insertedUri)
+            }
+        }
+        } finally {
+            session.close()
         }
     }
 }

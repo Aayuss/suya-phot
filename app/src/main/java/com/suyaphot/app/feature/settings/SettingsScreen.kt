@@ -23,11 +23,12 @@ import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -46,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.suyaphot.app.R
+import com.suyaphot.app.BuildConfig
 import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.domain.auth.LockReason
 import com.suyaphot.app.domain.auth.VaultSession
@@ -69,10 +71,17 @@ fun SettingsScreen(
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
 
     var storageBytes by remember { mutableLongStateOf(0L) }
+    val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
+    val retentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
+    val autoLockMs by container.preferences.autoLockTimeoutMs.collectAsState(initial = 0L)
+    val lockOnScreenOff by container.preferences.lockOnScreenOff.collectAsState(initial = true)
+    var showSortDialog by remember { mutableStateOf(false) }
+    var showRetentionDialog by remember { mutableStateOf(false) }
+    var showAutoLockDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(vaultId) {
-        withContext(Dispatchers.IO) {
-            storageBytes = container.vaultFileStore.getVaultStorageBytes(vaultId)
+        storageBytes = withContext(Dispatchers.IO) {
+            container.vaultFileStore.getVaultStorageBytes(vaultId)
         }
     }
 
@@ -119,8 +128,9 @@ fun SettingsScreen(
                             text = "Clean Temporary Cache",
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
-                                    container.vaultFileStore.clearShareCache()
-                                    storageBytes = container.vaultFileStore.getVaultStorageBytes(vaultId)
+                                    container.vaultFileStore.clearEphemeralPlaintextCaches()
+                                    val refreshed = container.vaultFileStore.getVaultStorageBytes(vaultId)
+                                    withContext(Dispatchers.Main) { storageBytes = refreshed }
                                 }
                             },
                             variant = ButtonVariant.Secondary,
@@ -136,6 +146,69 @@ fun SettingsScreen(
                     icon = Icons.Default.Delete,
                     onClick = onOpenTrash
                 )
+
+                SettingRowItem(
+                    title = "Gallery Sort",
+                    subtitle = sortOrder.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() },
+                    icon = Icons.AutoMirrored.Filled.Sort,
+                    onClick = { showSortDialog = true }
+                )
+
+                SettingRowItem(
+                    title = "Trash Retention",
+                    subtitle = if (retentionDays == 0) "Never auto-delete" else "$retentionDays days",
+                    icon = Icons.Default.CleaningServices,
+                    onClick = { showRetentionDialog = true }
+                )
+
+                SettingRowItem(
+                    title = "Auto-lock",
+                    subtitle = when (autoLockMs) { 0L -> "Immediately"; 30_000L -> "30 seconds"; 60_000L -> "1 minute"; else -> "5 minutes" },
+                    icon = Icons.Default.Lock,
+                    onClick = { showAutoLockDialog = true }
+                )
+
+                SettingToggleRow(
+                    title = "Lock on screen off",
+                    subtitle = "Immediately lock when the display turns off",
+                    checked = lockOnScreenOff,
+                    onCheckedChange = { scope.launch { container.preferences.setLockOnScreenOff(it) } }
+                )
+
+                if (showSortDialog) {
+                    ChoiceDialog(
+                        title = "Gallery Sort",
+                        choices = listOf(
+                            "DATE_TAKEN_DESC" to "Date taken (newest)",
+                            "DATE_TAKEN_ASC" to "Date taken (oldest)",
+                            "IMPORTED_DESC" to "Imported (newest)",
+                            "IMPORTED_ASC" to "Imported (oldest)",
+                            "SIZE_DESC" to "Size (largest)",
+                            "SIZE_ASC" to "Size (smallest)"
+                        ),
+                        selected = sortOrder,
+                        onDismiss = { showSortDialog = false },
+                        onSelect = { scope.launch { container.preferences.setSortOrder(it) }; showSortDialog = false }
+                    )
+                }
+                if (showRetentionDialog) {
+                    ChoiceDialog(
+                        title = "Trash Retention",
+                        choices = listOf("0" to "Never", "7" to "7 days", "30" to "30 days", "90" to "90 days"),
+                        selected = retentionDays.toString(),
+                        onDismiss = { showRetentionDialog = false },
+                        onSelect = { scope.launch { container.preferences.setTrashRetentionDays(it.toInt()) }; showRetentionDialog = false }
+                    )
+                }
+                if (showAutoLockDialog) {
+                    ChoiceDialog(
+                        title = "Auto-lock",
+                        choices = listOf("0" to "Immediately", "30000" to "30 seconds", "60000" to "1 minute", "300000" to "5 minutes"),
+                        selected = autoLockMs.toString(),
+                        onDismiss = { showAutoLockDialog = false },
+                        onSelect = { scope.launch { container.preferences.setAutoLockTimeoutMs(it.toLong()) }; showAutoLockDialog = false }
+                    )
+                }
 
                 // Grid Columns Setting
                 val gridColumns by container.preferences.gridColumns.collectAsState(initial = 3)
@@ -223,7 +296,7 @@ fun SettingsScreen(
                         )
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(text = "Suya Phot", fontFamily = SoraFontFamily, fontWeight = FontWeight.Medium, fontSize = 16.sp, color = SuyaColors.White)
-                        Text(text = "Version 1.0.0 (Release)", fontFamily = SoraFontFamily, fontSize = 12.sp, color = SuyaColors.TextMuted)
+                        Text(text = "Version ${BuildConfig.VERSION_NAME}", fontFamily = SoraFontFamily, fontSize = 12.sp, color = SuyaColors.TextMuted)
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
                             text = "Local-first privacy vault. Zero telemetry, no cloud upload, no tracking, battery efficient.",
@@ -237,6 +310,53 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(28.dp))
             }
+        }
+    }
+}
+
+@Composable
+private fun ChoiceDialog(
+    title: String,
+    choices: List<Pair<String, String>>,
+    selected: String,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit
+) {
+    com.suyaphot.app.ui.components.SuyaDialog(
+        onDismissRequest = onDismiss,
+        title = title,
+        content = {
+            Column {
+                choices.forEach { (value, label) ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().clickable { onSelect(value) }.padding(vertical = 6.dp)
+                    ) {
+                        androidx.compose.material3.RadioButton(selected = selected == value, onClick = { onSelect(value) })
+                        Text(label, color = SuyaColors.White, fontFamily = SoraFontFamily)
+                    }
+                }
+            }
+        },
+        confirmText = "Close",
+        onConfirm = onDismiss
+    )
+}
+
+@Composable
+private fun SettingToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Surface(shape = RoundedCornerShape(20.dp), color = SuyaColors.Fill06, modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, fontFamily = SoraFontFamily, color = SuyaColors.White, fontSize = 15.sp)
+                Text(subtitle, fontFamily = SoraFontFamily, color = SuyaColors.TextMuted, fontSize = 12.sp)
+            }
+            Switch(checked = checked, onCheckedChange = onCheckedChange)
         }
     }
 }

@@ -2,21 +2,19 @@
 
 ## 1. Test Categories
 
-### 1.1 Unit Tests (`src/test`)
+### 1.1 Implemented Unit Tests (`src/test`)
 - **Crypto & Key Derivation**: HKDF RFC test vectors, AES-GCM encryption/decryption, tamper detection (modified ciphertext or tag), PBKDF2 iterations.
 - **Folder Algorithms**: Ancestor validation, cycle detection (moving folder into itself or descendant).
-- **Import/Restore Verification**: SHA-256 computation, stream verification, filename conflict resolution.
-- **Auth & Session Management**: Rate limiting, elapsed realtime lock calculation, biometric unwrap, recovery code validation.
-- **Decoy Isolation**: Verification that decoy and real master keys and namespaces have zero cross-leakage.
+- **Stream Verification**: SUPH round-trip, tamper rejection, and SHA-256 verification.
+- **Auth**: Rate-limiter calculation and secondary-PIN rewrap preserving the existing master key and encrypted fixture.
 
-### 1.2 Instrumented Room & Android Tests (`src/androidTest`)
-- **Database CRUD**: Transactional folder moves, cascaded soft-deletes, job status updates.
-- **FileStore Operations**: Atomic partial write, rename, sync, and safe cleanup.
-- **Share Receiver Activity**: Verification of intent filter handling for `ACTION_SEND` and `ACTION_SEND_MULTIPLE`.
+### 1.2 Implemented Instrumented Tests (`src/androidTest`)
+- **Room Migration**: Opens a version-1 database through the explicit 1-to-2 migration and validates the schema.
+- **Android Keystore**: Encrypt/decrypt round-trip with the production intruder-key provider and verifies the key is non-exportable.
 
 ---
 
-## 2. QA Scenario Execution Matrix (from Master Spec)
+## 2. Manual QA Scenario Matrix (not claimed as executed by the automated suite)
 
 - **D001–D012**: JPEG photo lifecycle (Import, Picker, Root, Nested 5, Cancel, Crash recovery, Deny delete, Restore Copy, Restore Move, Vault Move, Trash/Restore, Permanent Delete).
 - **D013–D024**: PNG screenshot lifecycle.

@@ -119,15 +119,18 @@ class FolderManager(
             plaintext = cleanName.toByteArray(Charsets.UTF_8),
             aad = folderId.toByteArray(Charsets.UTF_8)
         )
-        folderDao.renameFolder(folderId, encryptedName, System.currentTimeMillis())
+        check(folderDao.renameFolderForVault(session.vaultId, folderId, encryptedName, System.currentTimeMillis()) == 1)
     }
 
     /**
      * Checks if moving [folderId] under [newParentId] would cause a cycle.
      */
     suspend fun canMoveFolder(folderId: String, newParentId: String?): Boolean = withContext(Dispatchers.IO) {
+        val vaultId = (sessionManager?.sessionState?.value as? VaultSession.Unlocked)?.vaultId
+        if (vaultId != null && folderDao.getFolderForVault(folderId, vaultId) == null) return@withContext false
         if (newParentId == null) return@withContext true
         if (folderId == newParentId) return@withContext false
+        if (vaultId != null && folderDao.getFolderForVault(newParentId, vaultId) == null) return@withContext false
 
         var cursor: String? = newParentId
         val visited = mutableSetOf<String>()
@@ -135,7 +138,7 @@ class FolderManager(
         while (cursor != null) {
             if (!visited.add(cursor)) return@withContext false // Cycle loop guard
             if (cursor == folderId) return@withContext false
-            cursor = folderDao.getParentId(cursor)
+            cursor = if (vaultId != null) folderDao.getParentIdForVault(vaultId, cursor) else folderDao.getParentId(cursor)
         }
         true
     }
@@ -145,8 +148,8 @@ class FolderManager(
      */
     suspend fun moveFolder(folderId: String, newParentId: String?): Boolean = withContext(Dispatchers.IO) {
         if (!canMoveFolder(folderId, newParentId)) return@withContext false
-        folderDao.moveFolder(folderId, newParentId, System.currentTimeMillis())
-        true
+        val session = getCurrentSession()
+        folderDao.moveFolderForVault(session.vaultId, folderId, newParentId, System.currentTimeMillis()) == 1
     }
 
     /**
@@ -187,24 +190,20 @@ class FolderManager(
                 }
 
                 FolderDeletePolicy.DELETE_CONTENTS_TO_TRASH -> {
-                    mDao.trashFolderContents(
-                        vaultId = session.vaultId,
-                        folderId = folderId,
-                        now = now
-                    )
-                    folderDao.reparentChildren(
-                        vaultId = session.vaultId,
-                        oldParentId = folderId,
-                        newParentId = parentId,
-                        now = now
-                    )
+                    val subtree = mutableListOf<String>()
+                    suspend fun collect(parent: String) {
+                        subtree += parent
+                        folderDao.getSubFoldersSync(session.vaultId, parent).forEach { collect(it.id) }
+                    }
+                    collect(folderId)
+                    subtree.forEach { id -> mDao.trashFolderContents(session.vaultId, id, now) }
+                    subtree.asReversed().forEach { id -> folderDao.deleteForVault(id, session.vaultId) }
                 }
             }
 
-            folderDao.deleteForVault(
-                folderId = folderId,
-                vaultId = session.vaultId
-            )
+            if (policy == FolderDeletePolicy.MOVE_CONTENTS_TO_PARENT) {
+                folderDao.deleteForVault(folderId = folderId, vaultId = session.vaultId)
+            }
         }
     }
 
@@ -212,8 +211,15 @@ class FolderManager(
      * Moves media items between folders without re-encryption.
      */
     suspend fun moveMediaToFolder(mediaIds: List<String>, targetFolderId: String?) = withContext(Dispatchers.IO) {
+        val session = getCurrentSession()
         val mDao = checkNotNull(mediaItemDao) { "MediaItemDao is required" }
-        mDao.moveItemsToFolder(mediaIds, targetFolderId, System.currentTimeMillis())
+        if (targetFolderId != null) {
+            requireNotNull(folderDao.getFolderForVault(targetFolderId, session.vaultId)) {
+                "Target folder does not exist in current vault"
+            }
+        }
+        val updated = mDao.moveItemsToFolderForVault(session.vaultId, mediaIds, targetFolderId, System.currentTimeMillis())
+        require(updated == mediaIds.distinct().size) { "Some selected media did not belong to the active vault" }
     }
 
     /**

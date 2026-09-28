@@ -31,20 +31,17 @@ class FakeFolderDao : FolderDao {
         folders[folder.id] = folder
     }
 
-    override suspend fun delete(folderId: String) {
-        folders.remove(folderId)
-    }
-
     override suspend fun deleteForVault(folderId: String, vaultId: String) {
         folders.remove(folderId)
     }
-
-    override suspend fun getFolder(folderId: String): FolderEntity? = folders[folderId]
 
     override suspend fun getFolderForVault(folderId: String, vaultId: String): FolderEntity? =
         folders[folderId]?.takeIf { it.vaultId == vaultId }
 
     override suspend fun getParentId(folderId: String): String? = folders[folderId]?.parentId
+
+    override suspend fun getParentIdForVault(vaultId: String, folderId: String): String? =
+        folders[folderId]?.takeIf { it.vaultId == vaultId }?.parentId
 
     override fun getFoldersForVault(vaultId: String): Flow<List<FolderEntity>> =
         flowOf(folders.values.filter { it.vaultId == vaultId })
@@ -58,13 +55,12 @@ class FakeFolderDao : FolderDao {
     override suspend fun getSubFoldersSync(vaultId: String, parentId: String?): List<FolderEntity> =
         folders.values.filter { it.vaultId == vaultId && it.parentId == parentId }
 
-    override suspend fun getChildFolderIds(parentId: String): List<String> =
-        folders.values.filter { it.parentId == parentId }.map { it.id }
-
     override suspend fun countFolders(vaultId: String): Int = folders.size
 
-    override suspend fun moveFolder(folderId: String, newParentId: String?, now: Long) {
-        folders[folderId]?.let { folders[folderId] = it.copy(parentId = newParentId, updatedAt = now) }
+    override suspend fun moveFolderForVault(vaultId: String, folderId: String, newParentId: String?, now: Long): Int {
+        val folder = folders[folderId]?.takeIf { it.vaultId == vaultId } ?: return 0
+        folders[folderId] = folder.copy(parentId = newParentId, updatedAt = now)
+        return 1
     }
 
     override suspend fun reparentChildren(vaultId: String, oldParentId: String, newParentId: String?, now: Long) {
@@ -75,11 +71,10 @@ class FakeFolderDao : FolderDao {
         }
     }
 
-    override suspend fun renameFolder(folderId: String, nameBytes: ByteArray, now: Long) {
-        folders[folderId]?.let { folders[folderId] = it.copy(encryptedName = nameBytes, updatedAt = now) }
+    override suspend fun renameFolderForVault(vaultId: String, folderId: String, nameBytes: ByteArray, now: Long): Int {
+        val folder = folders[folderId]?.takeIf { it.vaultId == vaultId } ?: return 0
+        folders[folderId] = folder.copy(encryptedName = nameBytes, updatedAt = now)
+        return 1
     }
 
-    override suspend fun setCover(folderId: String, mediaId: String?) {
-        folders[folderId]?.let { folders[folderId] = it.copy(coverMediaId = mediaId) }
-    }
 }

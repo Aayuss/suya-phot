@@ -61,11 +61,13 @@ class KeyManager(
                 require(bytes.size in 64..4096) { "Invalid PIN envelope size: ${bytes.size}" }
                 val buf = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
 
+                require(buf.remaining() >= 8) { "Truncated PIN envelope header" }
                 val version = buf.int
                 require(version == 1) { "Unsupported PIN envelope version: $version" }
 
                 val saltLen = buf.int
                 require(saltLen in 16..64) { "Invalid salt length: $saltLen" }
+                require(buf.remaining() >= saltLen + 8) { "Truncated PIN envelope salt" }
                 val salt = ByteArray(saltLen)
                 buf.get(salt)
 
@@ -74,11 +76,13 @@ class KeyManager(
 
                 val nonceLen = buf.int
                 require(nonceLen == 12) { "Invalid nonce length: $nonceLen" }
+                require(buf.remaining() >= nonceLen + 4) { "Truncated PIN envelope nonce" }
                 val nonce = ByteArray(nonceLen)
                 buf.get(nonce)
 
                 val wrappedLen = buf.int
                 require(wrappedLen in 48..256) { "Invalid wrapped key length: $wrappedLen" }
+                require(buf.remaining() == wrappedLen) { "Truncated or trailing PIN envelope bytes" }
                 val wrapped = ByteArray(wrappedLen)
                 buf.get(wrapped)
 
@@ -113,21 +117,25 @@ class KeyManager(
                 require(bytes.size in 64..4096) { "Invalid recovery envelope size: ${bytes.size}" }
                 val buf = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
 
+                require(buf.remaining() >= 8) { "Truncated recovery envelope header" }
                 val version = buf.int
                 require(version == 1) { "Unsupported recovery envelope version: $version" }
 
                 val saltLen = buf.int
                 require(saltLen in 16..64) { "Invalid salt length: $saltLen" }
+                require(buf.remaining() >= saltLen + 4) { "Truncated recovery envelope salt" }
                 val salt = ByteArray(saltLen)
                 buf.get(salt)
 
                 val nonceLen = buf.int
                 require(nonceLen == 12) { "Invalid nonce length: $nonceLen" }
+                require(buf.remaining() >= nonceLen + 4) { "Truncated recovery envelope nonce" }
                 val nonce = ByteArray(nonceLen)
                 buf.get(nonce)
 
                 val wrappedLen = buf.int
                 require(wrappedLen in 48..256) { "Invalid wrapped key length: $wrappedLen" }
+                require(buf.remaining() == wrappedLen) { "Truncated or trailing recovery envelope bytes" }
                 val wrapped = ByteArray(wrappedLen)
                 buf.get(wrapped)
 
@@ -272,7 +280,11 @@ class KeyManager(
     fun deriveRecoveryKek(normalizedSecret: String, salt: ByteArray): ByteArray {
         val secretBytes = normalizedSecret.toByteArray(Charsets.UTF_8)
         val info = "suya-phot-recovery-kek".toByteArray(Charsets.UTF_8)
-        return HkdfSha256.derive(secretBytes, salt = salt, info = info, length = 32)
+        return try {
+            HkdfSha256.derive(secretBytes, salt = salt, info = info, length = 32)
+        } finally {
+            secretBytes.fill(0)
+        }
     }
 
     /**

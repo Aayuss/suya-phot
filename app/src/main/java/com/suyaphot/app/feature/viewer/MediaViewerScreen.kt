@@ -40,6 +40,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -69,7 +70,9 @@ import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.database.entity.MediaItemEntity
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.PrivateMediaMetadata
+import com.suyaphot.app.core.media.applyExifOrientation
 import com.suyaphot.app.domain.auth.VaultSession
+import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.ui.components.SuyaDialog
 import com.suyaphot.app.ui.components.SuyaIconButton
 import com.suyaphot.app.ui.theme.SoraFontFamily
@@ -92,7 +95,8 @@ fun MediaViewerScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val session = container.sessionManager.sessionState.value as? VaultSession.Unlocked
+    val sessionState by container.sessionManager.sessionState.collectAsState()
+    val session = sessionState as? VaultSession.Unlocked
 
     var mediaEntity by remember { mutableStateOf<MediaItemEntity?>(null) }
     var metadata by remember { mutableStateOf<PrivateMediaMetadata?>(null) }
@@ -113,50 +117,72 @@ fun MediaViewerScreen(
     var offset by remember { mutableStateOf(Offset.Zero) }
 
     // Load media data and decrypt on demand
-    LaunchedEffect(itemId) {
-        withContext(Dispatchers.IO) {
-            val entity = container.database.mediaItemDao().getItem(itemId)
-            mediaEntity = entity
-            if (entity != null && session != null) {
+    LaunchedEffect(itemId, session?.vaultId) {
+        val load = withContext(Dispatchers.IO) {
+            val activeSession = session ?: return@withContext ViewerLoad()
+            val entity = container.database.mediaItemDao().getItemForVault(itemId, activeSession.vaultId)
+                ?: return@withContext ViewerLoad()
+            val decodedMetadata = runCatching {
+                val bytes = Aead.decryptWithPrependedNonce(
+                    activeSession.metaSubkey,
+                    entity.encryptedMetadata,
+                    itemId.toByteArray(Charsets.UTF_8)
+                )
                 try {
-                    val decMetaBytes = Aead.decryptWithPrependedNonce(
-                        session.metaSubkey,
-                        entity.encryptedMetadata,
-                        itemId.toByteArray(Charsets.UTF_8)
+                    PrivateMediaMetadata.deserialize(bytes)
+                } finally {
+                    bytes.fill(0)
+                }
+            }.getOrNull()
+
+            val vaultFile = container.vaultFileStore.getMediaFile(activeSession.vaultId, itemId)
+            if (entity.mediaTypeCode == MediaType.IMAGE.code) {
+                val extension = decodedMetadata?.originalFileExtension ?: "img"
+                val verified = container.vaultFileStore.createViewerTempFile(itemId, extension)
+                try {
+                    val verification = container.vaultCrypto.decryptVerifiedToFile(
+                        vaultFile, activeSession.mediaSubkey, itemId, verified
                     )
-                    metadata = PrivateMediaMetadata.deserialize(decMetaBytes)
-                } catch (ignored: Exception) {}
-
-                val vaultFile = container.vaultFileStore.getMediaFile(session.vaultId, itemId)
-                if (entity.mediaTypeCode == MediaType.IMAGE.code) {
-                    val stream1 = container.vaultCrypto.openDecryptedStream(vaultFile, session.mediaSubkey, itemId)
-                    val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeStream(stream1, null, boundsOpts)
-                    stream1.close()
-
-                    val reqSize = 2560
-                    val maxDim = maxOf(boundsOpts.outWidth, boundsOpts.outHeight)
-                    val sampleSize = if (maxDim > reqSize) (maxDim / reqSize).coerceAtLeast(1) else 1
-
-                    val stream2 = container.vaultCrypto.openDecryptedStream(vaultFile, session.mediaSubkey, itemId)
-                    val decodeOpts = BitmapFactory.Options().apply {
-                        inSampleSize = sampleSize
-                        inPreferredConfig = Bitmap.Config.RGB_565
+                    check(verification.sha256.toHex().equals(entity.sha256Hex, ignoreCase = true))
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(verified.absolutePath, bounds)
+                    val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+                    val sample = if (maxDim > 2560) (maxDim / 2560).coerceAtLeast(1) else 1
+                    val decoded = BitmapFactory.decodeFile(
+                        verified.absolutePath,
+                        BitmapFactory.Options().apply {
+                            inSampleSize = sample
+                            inPreferredConfig = Bitmap.Config.RGB_565
+                        }
+                    )
+                    val bitmap = decoded?.let {
+                        applyExifOrientation(it, decodedMetadata?.orientation ?: 1)
                     }
-                    fullBitmap = BitmapFactory.decodeStream(stream2, null, decodeOpts)
-                    stream2.close()
-                } else {
-                    // Video: decrypt to temporary file in dedicated playback_cache
-                    val ext = metadata?.originalFileExtension ?: "mp4"
-                    val temp = container.vaultFileStore.createPlaybackTempFile(ext)
-                    FileOutputStream(temp).use { fos ->
-                        container.vaultCrypto.decryptTo(vaultFile, session.mediaSubkey, itemId, fos)
-                    }
-                    tempPlaybackFile = temp
+                    ViewerLoad(entity, decodedMetadata, bitmap = bitmap)
+                } finally {
+                    verified.delete()
+                }
+            } else {
+                val temp = container.vaultFileStore.createPlaybackTempFile(
+                    decodedMetadata?.originalFileExtension ?: "mp4"
+                )
+                try {
+                    val verification = container.vaultCrypto.decryptVerifiedToFile(
+                        vaultFile, activeSession.mediaSubkey, itemId, temp
+                    )
+                    check(verification.sha256.toHex().equals(entity.sha256Hex, ignoreCase = true))
+                    ViewerLoad(entity, decodedMetadata, playbackFile = temp)
+                } catch (t: Throwable) {
+                    temp.delete()
+                    throw t
                 }
             }
-            isLoading = false
         }
+        mediaEntity = load.entity
+        metadata = load.metadata
+        fullBitmap = load.bitmap
+        tempPlaybackFile = load.playbackFile
+        isLoading = false
     }
 
     // Release temporary playback file and ExoPlayer upon exit or lock
@@ -297,9 +323,19 @@ fun MediaViewerScreen(
                             onClick = {
                                 val current = mediaEntity ?: return@SuyaIconButton
                                 val newFav = !current.favorite
-                                scope.launch(Dispatchers.IO) {
-                                    container.database.mediaItemDao().updateFavorite(current.id, newFav, System.currentTimeMillis())
-                                    mediaEntity = current.copy(favorite = newFav)
+                                scope.launch {
+                                    val activeVaultId = session?.vaultId ?: return@launch
+                                    val updated = withContext(Dispatchers.IO) {
+                                        container.database.mediaItemDao().updateFavoriteForVault(
+                                            activeVaultId,
+                                            current.id,
+                                            newFav,
+                                            System.currentTimeMillis()
+                                        )
+                                    }
+                                    if (updated == 1) {
+                                        mediaEntity = current.copy(favorite = newFav)
+                                    }
                                 }
                             }
                         )
@@ -428,8 +464,11 @@ fun MediaViewerScreen(
             onConfirm = {
                 scope.launch {
                     showRestoreDialog = false
-                    container.restoreCoordinator.restoreItem(itemId, move = true)
-                    onBack()
+                    when (container.restoreCoordinator.restoreItem(itemId, move = true)) {
+                        is RestoreResult.Success,
+                        is RestoreResult.SuccessWithCleanupPending -> onBack()
+                        is RestoreResult.Failure -> Unit
+                    }
                 }
             }
         )
@@ -450,15 +489,31 @@ fun MediaViewerScreen(
             },
             confirmText = "Move to Trash",
             onConfirm = {
-                scope.launch(Dispatchers.IO) {
-                    showTrashDialog = false
-                    container.database.mediaItemDao().softDelete(listOf(itemId), System.currentTimeMillis())
-                    withContext(Dispatchers.Main) { onBack() }
+                showTrashDialog = false
+                scope.launch {
+                    val activeVaultId = session?.vaultId ?: return@launch
+                    withContext(Dispatchers.IO) {
+                        container.database.mediaItemDao().softDeleteForVault(
+                            activeVaultId,
+                            listOf(itemId),
+                            System.currentTimeMillis()
+                        )
+                    }
+                    onBack()
                 }
             }
         )
     }
 }
+
+private data class ViewerLoad(
+    val entity: MediaItemEntity? = null,
+    val metadata: PrivateMediaMetadata? = null,
+    val bitmap: Bitmap? = null,
+    val playbackFile: File? = null
+)
+
+private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
 @Composable
 private fun DetailRow(label: String, value: String) {

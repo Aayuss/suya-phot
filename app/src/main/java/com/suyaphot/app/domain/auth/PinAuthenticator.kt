@@ -18,6 +18,14 @@ sealed interface AuthResult {
     data class Error(val message: String) : AuthResult
 }
 
+sealed interface ChangeSecondaryPinResult {
+    data object Success : ChangeSecondaryPinResult
+    data object IncorrectCurrentPin : ChangeSecondaryPinResult
+    data object SameAsRealPin : ChangeSecondaryPinResult
+    data object InvalidNewPin : ChangeSecondaryPinResult
+    data class Error(val safeCode: String) : ChangeSecondaryPinResult
+}
+
 /**
  * Handles PIN, Biometric, and Recovery authentication logic and rate limiting.
  */
@@ -28,6 +36,9 @@ class PinAuthenticator(
     private val sessionManager: SessionManager,
     private val preferences: SecurityPreferences
 ) {
+
+    @Volatile
+    private var monotonicLockoutDeadlineMs: Long = 0L
 
     companion object {
         fun calculateLockoutMs(attempts: Int): Long {
@@ -45,14 +56,53 @@ class PinAuthenticator(
      * Checks if a candidate PIN matches the real vault PIN (Section 29).
      */
     suspend fun isSameAsRealPin(candidate: CharArray): Boolean {
-        val real = vaultDao.getVaultByKind(VaultKind.REAL.code) ?: return false
-        val envelope = KeyManager.PinEnvelope.deserialize(real.pinEnvelope)
-        val key = keyManager.unwrapPinEnvelope(envelope, candidate.copyOf())
-        return if (key != null) {
-            key.fill(0)
-            true
-        } else {
-            false
+        val candidateCopy = candidate.copyOf()
+        return try {
+            val real = vaultDao.getVaultByKind(VaultKind.REAL.code) ?: return false
+            val envelope = runCatching { KeyManager.PinEnvelope.deserialize(real.pinEnvelope) }.getOrNull()
+                ?: return false
+            val key = keyManager.unwrapPinEnvelope(envelope, candidateCopy)
+            key?.fill(0)
+            key != null
+        } finally {
+            candidateCopy.fill('\u0000')
+        }
+    }
+
+    suspend fun changeSecondaryPin(
+        currentPin: CharArray,
+        newPin: CharArray
+    ): ChangeSecondaryPinResult {
+        val currentCopy = currentPin.copyOf()
+        val newCopy = newPin.copyOf()
+        try {
+            if (newCopy.size != 6 || newCopy.any { !it.isDigit() }) {
+                return ChangeSecondaryPinResult.InvalidNewPin
+            }
+            if (isSameAsRealPin(newCopy)) {
+                return ChangeSecondaryPinResult.SameAsRealPin
+            }
+            val secondary = vaultDao.getVaultByKind(VaultKind.SECONDARY.code)
+                ?: return ChangeSecondaryPinResult.Error("SECONDARY_NOT_FOUND")
+            val envelope = runCatching { KeyManager.PinEnvelope.deserialize(secondary.pinEnvelope) }.getOrNull()
+                ?: return ChangeSecondaryPinResult.Error("SECONDARY_ENVELOPE_INVALID")
+            val existingMasterKey = keyManager.unwrapPinEnvelope(envelope, currentCopy)
+                ?: return ChangeSecondaryPinResult.IncorrectCurrentPin
+            try {
+                val replacement = keyManager.createPinEnvelope(existingMasterKey, newCopy)
+                vaultDao.updatePinEnvelope(secondary.id, replacement.serialize())
+                return ChangeSecondaryPinResult.Success
+            } catch (e: Exception) {
+                SafeLog.e("PinAuthenticator", "Secondary PIN rewrap failed", e)
+                return ChangeSecondaryPinResult.Error("SECONDARY_PIN_UPDATE_FAILED")
+            } finally {
+                existingMasterKey.fill(0)
+            }
+        } finally {
+            currentCopy.fill('\u0000')
+            newCopy.fill('\u0000')
+            currentPin.fill('\u0000')
+            newPin.fill('\u0000')
         }
     }
 
@@ -62,8 +112,15 @@ class PinAuthenticator(
      */
     suspend fun authenticateWithPin(pinChars: CharArray): AuthResult {
         val now = System.currentTimeMillis()
+        val elapsedNow = SystemClock.elapsedRealtime()
+        val monotonicRemaining = (monotonicLockoutDeadlineMs - elapsedNow).coerceAtLeast(0L)
+        if (monotonicRemaining > 0L) {
+            pinChars.fill('\u0000')
+            return AuthResult.LockedOut(monotonicRemaining)
+        }
         val lockoutUntil = preferences.lockoutUntilTimestamp.first()
         if (now < lockoutUntil) {
+            pinChars.fill('\u0000')
             return AuthResult.LockedOut(lockoutUntil - now)
         }
 
@@ -75,12 +132,23 @@ class PinAuthenticator(
         val realVault = allVaults.firstOrNull { it.kindCode == VaultKind.REAL.code }
         val secondaryVault = allVaults.firstOrNull { it.kindCode == VaultKind.SECONDARY.code }
 
-        val realEnvelope = realVault?.let { KeyManager.PinEnvelope.deserialize(it.pinEnvelope) }
-        val secondaryEnvelope = secondaryVault?.let { KeyManager.PinEnvelope.deserialize(it.pinEnvelope) }
+        val realEnvelope = realVault?.let { runCatching { KeyManager.PinEnvelope.deserialize(it.pinEnvelope) }.getOrNull() }
+        val secondaryEnvelope = secondaryVault?.let { runCatching { KeyManager.PinEnvelope.deserialize(it.pinEnvelope) }.getOrNull() }
 
         // Both unwrap attempts run to mitigate timing discrepancy
-        val realResult = realEnvelope?.let { keyManager.unwrapPinEnvelope(it, pinChars.copyOf()) }
-        val secondaryResult = secondaryEnvelope?.let { keyManager.unwrapPinEnvelope(it, pinChars.copyOf()) }
+        val realPinCopy = pinChars.copyOf()
+        val secondaryPinCopy = pinChars.copyOf()
+        val realResult = try {
+            realEnvelope?.let { keyManager.unwrapPinEnvelope(it, realPinCopy) }
+        } finally {
+            realPinCopy.fill('\u0000')
+        }
+        val secondaryResult = try {
+            secondaryEnvelope?.let { keyManager.unwrapPinEnvelope(it, secondaryPinCopy) }
+        } finally {
+            secondaryPinCopy.fill('\u0000')
+            pinChars.fill('\u0000')
+        }
 
         return when {
             realResult != null -> {
@@ -98,6 +166,7 @@ class PinAuthenticator(
                 val currentAttempts = preferences.failedAttempts.first() + 1
                 val lockoutDuration = calculateLockoutMs(currentAttempts)
                 val newLockoutUntil = if (lockoutDuration > 0) now + lockoutDuration else 0L
+                monotonicLockoutDeadlineMs = if (lockoutDuration > 0) elapsedNow + lockoutDuration else 0L
                 preferences.recordFailedAttempt(newLockoutUntil)
                 SafeLog.d("PinAuthenticator", "Authentication failed. Attempt count: $currentAttempts")
                 AuthResult.IncorrectPin(currentAttempts, lockoutDuration)
@@ -132,7 +201,8 @@ class PinAuthenticator(
     suspend fun recoverWithCode(recoveryCodeInput: String, newPinChars: CharArray): Boolean {
         val realVault = vaultDao.getVaultByKind(VaultKind.REAL.code) ?: return false
         val recoveryEnvelopeBytes = realVault.recoveryEnvelope ?: return false
-        val envelope = KeyManager.RecoveryEnvelope.deserialize(recoveryEnvelopeBytes)
+        val envelope = runCatching { KeyManager.RecoveryEnvelope.deserialize(recoveryEnvelopeBytes) }.getOrNull()
+            ?: return false
         val masterKey = keyManager.unwrapRecoveryEnvelope(envelope, recoveryCodeInput) ?: return false
 
         try {

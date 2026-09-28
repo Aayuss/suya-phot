@@ -116,7 +116,10 @@ data class MediaItemEntity(
     val updatedAt: Long,
     val favorite: Boolean,
     val deletedAt: Long?,
-    val previousFolderId: String?
+    val previousFolderId: String?,
+    val dateTakenMs: Long? = null,
+    val encryptedPreviewRelativePath: String? = null,
+    val cleanupStateCode: Int = 0
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -133,6 +136,30 @@ data class MediaItemEntity(
         return result
     }
 }
+
+@Entity(
+    tableName = "restore_jobs",
+    foreignKeys = [
+        ForeignKey(
+            entity = VaultEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["vaultId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index("vaultId"), Index("mediaId"), Index("phaseCode")]
+)
+data class RestoreJobEntity(
+    @PrimaryKey val id: String,
+    val vaultId: String,
+    val mediaId: String,
+    val phaseCode: Int,
+    val encryptedDestinationUri: ByteArray?,
+    val move: Boolean,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val safeErrorCode: String?
+)
 
 @Entity(
     tableName = "jobs",

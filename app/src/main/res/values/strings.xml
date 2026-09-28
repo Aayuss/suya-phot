@@ -1,6 +1,4 @@
 <resources>
     <string name="app_name">Suya Phot</string>
     <string name="share_receiver_label">Move to Suya Phot</string>
-    <string name="notification_channel_name">Vault Operations</string>
-    <string name="notification_channel_desc">Shows progress of private media imports and restores</string>
 </resources>

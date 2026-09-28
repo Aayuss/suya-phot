@@ -26,6 +26,16 @@ object Aead {
         plaintext: ByteArray
     ): ByteArray {
         val key: SecretKey = SecretKeySpec(keyBytes, "AES")
+        return encrypt(key, nonce, aad, plaintext)
+    }
+
+    fun encrypt(
+        key: SecretKey,
+        nonce: ByteArray,
+        aad: ByteArray,
+        plaintext: ByteArray
+    ): ByteArray {
+        require(nonce.size == NONCE_LENGTH_BYTES) { "AES-GCM nonce must be 12 bytes" }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, nonce)
         cipher.init(Cipher.ENCRYPT_MODE, key, spec)
@@ -42,6 +52,16 @@ object Aead {
         ciphertext: ByteArray
     ): ByteArray {
         val key: SecretKey = SecretKeySpec(keyBytes, "AES")
+        return decrypt(key, nonce, aad, ciphertext)
+    }
+
+    fun decrypt(
+        key: SecretKey,
+        nonce: ByteArray,
+        aad: ByteArray,
+        ciphertext: ByteArray
+    ): ByteArray {
+        require(nonce.size == NONCE_LENGTH_BYTES) { "AES-GCM nonce must be 12 bytes" }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, nonce)
         cipher.init(Cipher.DECRYPT_MODE, key, spec)
@@ -62,10 +82,31 @@ object Aead {
     ): ByteArray {
         val nonce = generateNonce()
         val ciphertext = encrypt(keyBytes, nonce, aad, plaintext)
-        val result = ByteArray(nonce.size + ciphertext.size)
-        System.arraycopy(nonce, 0, result, 0, nonce.size)
-        System.arraycopy(ciphertext, 0, result, nonce.size, ciphertext.size)
-        return result
+        return try {
+            val result = ByteArray(nonce.size + ciphertext.size)
+            System.arraycopy(nonce, 0, result, 0, nonce.size)
+            System.arraycopy(ciphertext, 0, result, nonce.size, ciphertext.size)
+            result
+        } finally {
+            ciphertext.fill(0)
+        }
+    }
+
+    fun encryptWithPrependedNonce(
+        key: SecretKey,
+        plaintext: ByteArray,
+        aad: ByteArray = ByteArray(0)
+    ): ByteArray {
+        val nonce = generateNonce()
+        val ciphertext = encrypt(key, nonce, aad, plaintext)
+        return try {
+            ByteArray(nonce.size + ciphertext.size).also { result ->
+                nonce.copyInto(result)
+                ciphertext.copyInto(result, destinationOffset = nonce.size)
+            }
+        } finally {
+            ciphertext.fill(0)
+        }
     }
 
     /**
@@ -82,5 +123,16 @@ object Aead {
         System.arraycopy(payload, 0, nonce, 0, NONCE_LENGTH_BYTES)
         System.arraycopy(payload, NONCE_LENGTH_BYTES, ciphertext, 0, ciphertext.size)
         return decrypt(keyBytes, nonce, aad, ciphertext)
+    }
+
+    fun decryptWithPrependedNonce(
+        key: SecretKey,
+        payload: ByteArray,
+        aad: ByteArray = ByteArray(0)
+    ): ByteArray {
+        require(payload.size >= NONCE_LENGTH_BYTES + 16) { "Payload is too short to be valid AEAD ciphertext" }
+        val nonce = payload.copyOfRange(0, NONCE_LENGTH_BYTES)
+        val ciphertext = payload.copyOfRange(NONCE_LENGTH_BYTES, payload.size)
+        return decrypt(key, nonce, aad, ciphertext)
     }
 }

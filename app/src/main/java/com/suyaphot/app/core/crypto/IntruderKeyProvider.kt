@@ -5,7 +5,6 @@ import android.security.keystore.KeyProperties
 import java.security.KeyStore
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
-import javax.crypto.spec.SecretKeySpec
 
 interface IntruderKeyProvider {
     fun getOrCreateKey(): SecretKey
@@ -42,13 +41,5 @@ class AndroidKeystoreIntruderKeyProvider : IntruderKeyProvider {
         )
 
         return generator.generateKey()
-    }
-}
-
-class FakeIntruderKeyProvider(
-    private val keyBytes: ByteArray = ByteArray(32) { (it + 42).toByte() }
-) : IntruderKeyProvider {
-    override fun getOrCreateKey(): SecretKey {
-        return SecretKeySpec(keyBytes, "AES")
     }
 }

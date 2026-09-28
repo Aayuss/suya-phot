@@ -20,8 +20,10 @@ import com.suyaphot.app.core.util.VaultFileStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 
 /**
@@ -35,6 +37,7 @@ class IntruderCaptureManager(
     private val vaultDao: VaultDao,
     private val intruderKeyProvider: IntruderKeyProvider
 ) {
+    private val operationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun hasCameraPermission(): Boolean {
         return ContextCompat.checkSelfPermission(
@@ -77,7 +80,7 @@ class IntruderCaptureManager(
                     cameraProvider.unbindAll()
                     cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, imageCapture)
 
-                    val tempFile = File(context.cacheDir, "temp_intruder_${UUID.randomUUID()}.jpg")
+                    val tempFile = fileStore.createIntruderCaptureTempFile()
                     val outputOptions = ImageCapture.OutputFileOptions.Builder(tempFile).build()
 
                     imageCapture.takePicture(
@@ -85,7 +88,8 @@ class IntruderCaptureManager(
                         ContextCompat.getMainExecutor(context),
                         object : ImageCapture.OnImageSavedCallback {
                             override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                                CoroutineScope(Dispatchers.IO).launch {
+                                cameraProvider.unbindAll()
+                                operationScope.launch {
                                     try {
                                         encryptAndSaveIntruder(tempFile, failureReason)
                                     } catch (t: Throwable) {
@@ -110,9 +114,8 @@ class IntruderCaptureManager(
         }
     }
 
-    private suspend fun getRealVaultId(): String {
-        return vaultDao.getVaultByKind(VaultKind.REAL.code)?.id ?: "default_real_vault"
-    }
+    private suspend fun getRealVaultId(): String? =
+        vaultDao.getVaultByKind(VaultKind.REAL.code)?.id
 
     private suspend fun encryptAndSaveIntruder(tempFile: File, failureReason: String) = withContext(Dispatchers.IO) {
         try {
@@ -124,21 +127,38 @@ class IntruderCaptureManager(
             val aad = "suya-phot:intruder:v1:$eventId".toByteArray(Charsets.UTF_8)
 
             val encryptedImageBytes = Aead.encryptWithPrependedNonce(
-                keyBytes = key.encoded,
+                key = key,
                 plaintext = rawBytes,
                 aad = aad
             )
 
             val encryptedDetails = Aead.encryptWithPrependedNonce(
-                keyBytes = key.encoded,
+                key = key,
                 plaintext = failureReason.toByteArray(Charsets.UTF_8),
                 aad = aad
             )
 
-            val realVaultId = getRealVaultId()
+            val realVaultId = getRealVaultId() ?: run {
+                rawBytes.fill(0)
+                SafeLog.w("IntruderCaptureManager", "Real vault unavailable; intruder event not recorded")
+                return@withContext
+            }
             val destFile = fileStore.getSecurityFile(realVaultId, eventId)
             destFile.parentFile?.mkdirs()
-            destFile.writeBytes(encryptedImageBytes)
+            val staging = File(destFile.parentFile, "${destFile.name}.writing")
+            try {
+                check(!destFile.exists()) { "Intruder event ciphertext already exists" }
+                FileOutputStream(staging).use { output ->
+                    output.write(encryptedImageBytes)
+                    output.flush()
+                    output.fd.sync()
+                }
+                check(staging.renameTo(destFile)) { "Could not commit intruder ciphertext" }
+            } finally {
+                rawBytes.fill(0)
+                encryptedImageBytes.fill(0)
+                staging.delete()
+            }
 
             val event = IntruderEventEntity(
                 id = eventId,
@@ -149,19 +169,21 @@ class IntruderCaptureManager(
                 encryptedDetails = encryptedDetails
             )
             intruderEventDao.insert(event)
-            SafeLog.d("IntruderCaptureManager", "Intruder photo saved: $eventId")
+            SafeLog.d("IntruderCaptureManager", "Intruder photo saved")
         } catch (e: Exception) {
             SafeLog.e("IntruderCaptureManager", "Error encrypting intruder photo", e)
+        } finally {
+            runCatching { tempFile.delete() }
         }
     }
 
     private suspend fun logEventWithoutPhoto(reason: String) = withContext(Dispatchers.IO) {
         val eventId = UUID.randomUUID().toString()
-        val realVaultId = getRealVaultId()
+        val realVaultId = getRealVaultId() ?: return@withContext
         val key = intruderKeyProvider.getOrCreateKey()
         val aad = "suya-phot:intruder:v1:$eventId".toByteArray(Charsets.UTF_8)
         val encryptedDetails = Aead.encryptWithPrependedNonce(
-            keyBytes = key.encoded,
+            key = key,
             plaintext = reason.toByteArray(Charsets.UTF_8),
             aad = aad
         )

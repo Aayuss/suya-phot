@@ -1,8 +1,3 @@
 <resources>
     <color name="suya_bg">#131314</color>
-    <color name="suya_surface">#222222</color>
-    <color name="suya_accent">#E55F11</color>
-    <color name="suya_white">#FFFFFF</color>
-    <color name="suya_positive">#3FD05E</color>
-    <color name="suya_negative">#FF6B5A</color>
 </resources>

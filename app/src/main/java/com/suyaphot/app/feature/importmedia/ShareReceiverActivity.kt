@@ -30,6 +30,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -44,6 +45,7 @@ import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import com.suyaphot.app.ui.theme.SuyaTheme
+import com.suyaphot.app.core.model.ImportMode
 import kotlinx.coroutines.launch
 
 class ShareReceiverActivity : ComponentActivity() {
@@ -86,7 +88,13 @@ class ShareReceiverActivity : ComponentActivity() {
 
     private fun extractUrisFromIntent(intent: Intent?): List<Uri> {
         if (intent == null) return emptyList()
+        val mime = intent.type ?: return emptyList()
+        if (!mime.startsWith("image/") && !mime.startsWith("video/")) return emptyList()
         val out = LinkedHashSet<Uri>()
+
+        fun addIfValid(uri: Uri?) {
+            if (uri?.scheme == "content" && out.size < 500) out.add(uri)
+        }
 
         if (intent.action == Intent.ACTION_SEND) {
             val streamUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -95,11 +103,11 @@ class ShareReceiverActivity : ComponentActivity() {
                 @Suppress("DEPRECATION")
                 intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
             }
-            streamUri?.let { out.add(it) }
+            addIfValid(streamUri)
 
             intent.clipData?.let { clip ->
                 for (i in 0 until clip.itemCount) {
-                    clip.getItemAt(i).uri?.let { out.add(it) }
+                    addIfValid(clip.getItemAt(i).uri)
                 }
             }
         } else if (intent.action == Intent.ACTION_SEND_MULTIPLE) {
@@ -109,11 +117,11 @@ class ShareReceiverActivity : ComponentActivity() {
                 @Suppress("DEPRECATION")
                 intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
             }
-            streamUris?.let { out.addAll(it) }
+            streamUris?.forEach(::addIfValid)
 
             intent.clipData?.let { clip ->
                 for (i in 0 until clip.itemCount) {
-                    clip.getItemAt(i).uri?.let { out.add(it) }
+                    addIfValid(clip.getItemAt(i).uri)
                 }
             }
         }
@@ -131,22 +139,39 @@ private fun ImportProgressView(
     var statusText by remember { mutableStateOf("Preparing import...") }
     var isDone by remember { mutableStateOf(false) }
     var pendingSuccesses by remember { mutableStateOf<List<com.suyaphot.app.domain.importmedia.ImportResult.Success>>(emptyList()) }
+    var consentSuccesses by remember { mutableStateOf<List<com.suyaphot.app.domain.importmedia.ImportResult.Success>>(emptyList()) }
+    var deletionTrigger by remember { mutableIntStateOf(0) }
+
+    fun markJobsTerminal(
+        results: List<com.suyaphot.app.domain.importmedia.ImportResult.Success>,
+        disposition: String? = null
+    ) {
+        scope.launch(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            for (res in results) {
+                container.database.vaultJobDao().updateState(
+                    res.jobId,
+                    com.suyaphot.app.core.model.JobState.COMPLETED.code,
+                    now,
+                    disposition
+                )
+            }
+        }
+    }
 
     val deleteRequestLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        isDone = true
         if (result.resultCode == Activity.RESULT_OK) {
-            statusText = "Originals deleted from Gallery. Vault secured."
-            scope.launch(Dispatchers.IO) {
-                val now = System.currentTimeMillis()
-                for (res in pendingSuccesses) {
-                    container.database.vaultJobDao().updateState(res.jobId, com.suyaphot.app.core.model.JobState.COMPLETED.code, now)
-                }
-            }
+            markJobsTerminal(consentSuccesses, "SOURCE_DELETE_APPROVED")
         } else {
-            statusText = "Imported safely. Originals kept in Gallery."
+            markJobsTerminal(consentSuccesses, "ORIGINAL_RETAINED_BY_USER")
         }
+        pendingSuccesses = pendingSuccesses.filterNot { pending ->
+            consentSuccesses.any { it.jobId == pending.jobId }
+        }
+        consentSuccesses = emptyList()
+        deletionTrigger++
     }
 
     LaunchedEffect(Unit) {
@@ -155,6 +180,7 @@ private fun ImportProgressView(
             val results = container.importCoordinator.importBatch(
                 uris = uris,
                 folderId = null,
+                mode = ImportMode.MOVE,
                 onItemComplete = { current, total, _ ->
                     statusText = "Encrypting $current of $total items..."
                 }
@@ -165,31 +191,46 @@ private fun ImportProgressView(
             pendingSuccesses = successfulResults
 
             if (successfulUris.isNotEmpty()) {
-                statusText = "Requesting deletion of originals..."
-                when (val outcome = container.sourceDeletionCoordinator.deleteSources(successfulUris)) {
-                    is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
-                        isDone = true
-                        statusText = "Successfully imported ${successfulUris.size} items."
-                        scope.launch(Dispatchers.IO) {
-                            val now = System.currentTimeMillis()
-                            for (res in successfulResults) {
-                                container.database.vaultJobDao().updateState(res.jobId, com.suyaphot.app.core.model.JobState.COMPLETED.code, now)
-                            }
-                        }
-                    }
-                    is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
-                        deleteRequestLauncher.launch(
-                            IntentSenderRequest.Builder(outcome.intentSender).build()
-                        )
-                    }
-                    is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.Failed -> {
-                        isDone = true
-                        statusText = "Imported to vault. Originals remain in gallery."
-                    }
-                }
+                deletionTrigger++
             } else {
                 isDone = true
                 statusText = "No new items imported."
+            }
+        }
+    }
+
+    LaunchedEffect(deletionTrigger) {
+        if (deletionTrigger == 0 || pendingSuccesses.isEmpty()) {
+            if (deletionTrigger > 0) {
+                isDone = true
+                statusText = "Move complete. Any originals Android retained are shown accurately above."
+            }
+            return@LaunchedEffect
+        }
+        statusText = "Requesting deletion of originals..."
+        val current = pendingSuccesses
+        when (val outcome = container.sourceDeletionCoordinator.deleteSources(current.map { it.uri })) {
+            is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
+                val completed = current.filter { it.uri in outcome.deletedUris }
+                markJobsTerminal(completed, "SOURCE_DELETED")
+                pendingSuccesses = current.filterNot { it.uri in outcome.deletedUris }
+                deletionTrigger++
+            }
+            is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
+                val directlyDeleted = current.filter { it.uri in outcome.deletedUris }
+                markJobsTerminal(directlyDeleted, "SOURCE_DELETED")
+                pendingSuccesses = current.filterNot { it.uri in outcome.deletedUris }
+                consentSuccesses = pendingSuccesses.filter { it.uri in outcome.uris }
+                deleteRequestLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
+            }
+            is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.Failed -> {
+                val directlyDeleted = current.filter { it.uri in outcome.deletedUris }
+                markJobsTerminal(directlyDeleted, "SOURCE_DELETED")
+                val retained = current.filter { it.uri in outcome.uris }
+                markJobsTerminal(retained, "SOURCE_DELETE_FAILED_VAULT_SAFE")
+                pendingSuccesses = emptyList()
+                isDone = true
+                statusText = "Imported safely. Some originals remain in Gallery."
             }
         }
     }
