@@ -132,11 +132,15 @@ data class ViewerWindow(
                     val idx = all.indexOf(aroundId).coerceAtLeast(0)
                     ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total, 0)
                 } else {
-                    val rowNumRows = dao.viewerIds(SimpleSQLiteQuery(
-                        "SELECT CAST(row_num AS TEXT) FROM (SELECT id, (ROW_NUMBER() OVER (ORDER BY $orderSql)) - 1 AS row_num FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql) WHERE id = ?",
-                        arrayOf(vaultId, aroundId)
-                    ))
-                    val rowNum = rowNumRows.firstOrNull()?.toIntOrNull() ?: 0
+                    val target = dao.getItemForVault(aroundId, vaultId)
+                    val rowNum = if (target != null) {
+                        val (predicate, _, args) = buildKeysetQuery(collection.sort, target, isNext = false, vaultId = vaultId, limit = 0)
+                        val countArgs = args.copyOfRange(0, args.size - 1)
+                        dao.rawCount(SimpleSQLiteQuery(
+                            "SELECT COUNT(*) FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql AND $predicate",
+                            countArgs
+                        ))
+                    } else 0
                     val offset = (rowNum - windowSize / 2).coerceIn(0, (total - windowSize).coerceAtLeast(0))
                     val slice = dao.viewerIds(SimpleSQLiteQuery(
                         "SELECT id FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql ORDER BY $orderSql LIMIT ? OFFSET ?",
