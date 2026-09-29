@@ -5,9 +5,9 @@
 Suya Phot is a local-first, highly secured Android private photo and video vault designed for Samsung Galaxy S23 Ultra and modern Android devices.
 
 The architecture emphasizes:
-- **Local-first encrypted storage**: All media and sensitive metadata are encrypted on-device with AES-256-GCM using hardware-peppered PBKDF2/Keystore envelopes.
+- **Local-first encrypted storage**: All media and sensitive metadata are encrypted on-device with AES-256-GCM using Android Keystore-peppered PBKDF2/Keystore envelopes.
 - **Fail-safe transactional pipelines**: Import, restore, and backup operations are guarded by state machines that never delete or overwrite existing vaults or source files before durable encryption and hash verification succeed.
-- **Biometric & Decoy support**: Hardware-backed biometric unwrap and isolated decoy/secondary vault namespaces.
+- **Biometric & Decoy support**: Android Keystore-backed biometric unwrap and isolated decoy/secondary vault namespaces.
 - **Performance & Battery efficiency**: Continuous keyset pagination, zero background services, on-demand operations, streaming crypto, bounded memory caching, and Jetpack Compose UI matching the Ember design system.
 
 ---

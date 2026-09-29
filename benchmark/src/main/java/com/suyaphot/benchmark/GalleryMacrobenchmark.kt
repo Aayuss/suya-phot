@@ -27,7 +27,14 @@ class GalleryMacrobenchmark {
                 device.findObject(By.desc("Digit $digit"))?.click()
                 Thread.sleep(100)
             }
-            device.wait(Until.hasObject(By.res("photos_grid")), 5_000)
+        }
+        check(
+            device.wait(
+                Until.hasObject(By.res("photos_grid")),
+                10_000
+            )
+        ) {
+            "Benchmark fixture did not reach gallery"
         }
     }
 
@@ -47,11 +54,11 @@ class GalleryMacrobenchmark {
         startActivityAndWait()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         ensureVaultUnlocked(device)
-        val grid = device.findObject(By.res("photos_grid"))
-        if (grid != null) {
-            grid.setGestureMargin(device.displayWidth / 5)
-            repeat(5) { grid.fling(Direction.DOWN) }
+        val grid = checkNotNull(device.findObject(By.res("photos_grid"))) {
+            "Benchmark photos_grid element not found"
         }
+        grid.setGestureMargin(device.displayWidth / 5)
+        repeat(5) { grid.fling(Direction.DOWN) }
     }
 
     @Test fun viewerSwipe() = rule.measureRepeated(
@@ -63,15 +70,16 @@ class GalleryMacrobenchmark {
         startActivityAndWait()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         ensureVaultUnlocked(device)
-        val item = device.findObject(By.desc("Media item"))
-        if (item != null) {
-            item.click()
-            if (device.wait(Until.hasObject(By.desc("Back")), 10_000)) {
-                device.swipe(
-                    device.displayWidth * 4 / 5, device.displayHeight / 2,
-                    device.displayWidth / 5, device.displayHeight / 2, 30
-                )
-            }
+        val item = checkNotNull(device.findObject(By.desc("Media item"))) {
+            "Benchmark media item element not found"
         }
+        item.click()
+        check(device.wait(Until.hasObject(By.desc("Back")), 10_000)) {
+            "Benchmark viewer did not open"
+        }
+        device.swipe(
+            device.displayWidth * 4 / 5, device.displayHeight / 2,
+            device.displayWidth / 5, device.displayHeight / 2, 30
+        )
     }
 }

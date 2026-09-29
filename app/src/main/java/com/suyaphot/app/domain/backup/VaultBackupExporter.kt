@@ -5,6 +5,8 @@ import com.suyaphot.app.core.crypto.HkdfSha256
 import com.suyaphot.app.core.crypto.KeyManager
 import com.suyaphot.app.core.crypto.VaultCrypto
 import com.suyaphot.app.core.database.SuyaDatabase
+import com.suyaphot.app.core.database.entity.FolderLockEntity
+import com.suyaphot.app.core.media.DerivativeCryptoVerifier
 import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
@@ -49,6 +51,42 @@ class VaultBackupExporter(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun verifyPortableFolderRecovery(
+        lock: FolderLockEntity,
+        metaSubkey: ByteArray
+    ) {
+        val encrypted = lock.recoveryEnvelope
+            ?: throw BackupException(
+                BackupError.FOLDER_LOCK_RECOVERY_NOT_READY,
+                "Protected folder lock ${lock.id} lacks portable recovery information."
+            )
+
+        val token = try {
+            Aead.decryptWithPrependedNonce(
+                keyBytes = metaSubkey,
+                payload = encrypted,
+                aad = FolderLockCryptoFormat.recoveryAad(lock.id)
+            )
+        } catch (e: Exception) {
+            throw BackupException(
+                BackupError.FOLDER_LOCK_RECOVERY_CORRUPT,
+                "Protected folder lock ${lock.id} has corrupt recovery envelope: ${e.message}",
+                cause = e
+            )
+        }
+
+        try {
+            if (token.size != 32) {
+                throw BackupException(
+                    BackupError.FOLDER_LOCK_RECOVERY_CORRUPT,
+                    "Protected folder lock ${lock.id} has invalid recovery token size ${token.size}."
+                )
+            }
+        } finally {
+            token.fill(0)
+        }
     }
 
     suspend fun exportVault(
@@ -108,6 +146,27 @@ class VaultBackupExporter(
 
         val folders = database.folderDao().getFoldersForVaultOnce(vaultId)
         val locks = database.folderLockDao().getAllForVault(vaultId)
+
+        // P0-2: Verify every folder lock has portable recovery material
+        val missingPortableRecovery = locks.filter { it.recoveryEnvelope == null }
+        if (missingPortableRecovery.isNotEmpty()) {
+            throw BackupException(
+                BackupError.FOLDER_LOCK_RECOVERY_NOT_READY,
+                "${missingPortableRecovery.size} protected folder(s) lack portable recovery information. Unlock them once to prepare backup."
+            )
+        }
+
+        session.masterKeyHandle.useBytes { masterKey ->
+            val metaSubkey = vaultCrypto.deriveMetaSubkey(masterKey)
+            try {
+                for (lock in locks) {
+                    verifyPortableFolderRecovery(lock, metaSubkey)
+                }
+            } finally {
+                metaSubkey.fill(0)
+            }
+        }
+
         val mediaItems = database.mediaItemDao().getAllForIntegrityCheck(vaultId)
 
         val archiveId = UUID.randomUUID().toString()
@@ -119,6 +178,7 @@ class VaultBackupExporter(
 
         session.masterKeyHandle.useBytes { masterKey ->
             val mediaSubkey = vaultCrypto.deriveMediaSubkey(masterKey)
+            val thumbSubkey = vaultCrypto.deriveThumbSubkey(masterKey)
             try {
                 for (m in mediaItems) {
                     val mediaFile = fileStore.getMediaFile(vaultId, m.id)
@@ -130,14 +190,35 @@ class VaultBackupExporter(
                     }
 
                     // Verify file can be authenticated and decrypted cleanly
-                    try {
-                        val verified = vaultCrypto.verifyAndHash(mediaFile, mediaSubkey, m.id)
-                        check(verified.plaintextSize == m.plaintextSize) { "Plaintext size mismatch for item ${m.id}" }
+                    val verified = try {
+                        vaultCrypto.verifyAndHash(mediaFile, mediaSubkey, m.id)
                     } catch (e: Exception) {
                         throw BackupException(
                             BackupError.CORRUPT_MEDIA,
                             "Encrypted media file is corrupt for item ${m.id}: ${e.message}",
                             e
+                        )
+                    }
+
+                    if (verified.plaintextSize != m.plaintextSize) {
+                        throw BackupException(
+                            BackupError.CORRUPT_MEDIA,
+                            "Plaintext size mismatch for item ${m.id}: expected ${m.plaintextSize}, got ${verified.plaintextSize}"
+                        )
+                    }
+
+                    val verifiedHex = verified.sha256.joinToString("") { "%02x".format(it) }
+                    if (!verifiedHex.equals(m.sha256Hex, ignoreCase = true)) {
+                        throw BackupException(
+                            BackupError.CORRUPT_MEDIA,
+                            "Plaintext SHA-256 mismatch for item ${m.id}: expected ${m.sha256Hex}, got $verifiedHex"
+                        )
+                    }
+
+                    if (mediaFile.length() != m.cipherSize) {
+                        throw BackupException(
+                            BackupError.CORRUPT_MEDIA,
+                            "Cipher size mismatch for item ${m.id}: expected ${m.cipherSize}, got ${mediaFile.length()}"
                         )
                     }
 
@@ -155,15 +236,19 @@ class VaultBackupExporter(
                     if (m.encryptedThumbRelativePath != null) {
                         val thumbFile = fileStore.getThumbFile(vaultId, m.id)
                         if (thumbFile.exists() && thumbFile.length() > 0) {
-                            hasThumb = true
-                            descriptors.add(
-                                BackupFileDescriptor(
-                                    typeCode = BackupArchiveFormat.ENTRY_TYPE_THUMB,
-                                    itemId = m.id,
-                                    cipherLength = thumbFile.length(),
-                                    cipherSha256Hex = computeFileSha256(thumbFile)
+                            if (DerivativeCryptoVerifier.verifyThumbnailCiphertext(thumbFile, thumbSubkey, m.id)) {
+                                hasThumb = true
+                                descriptors.add(
+                                    BackupFileDescriptor(
+                                        typeCode = BackupArchiveFormat.ENTRY_TYPE_THUMB,
+                                        itemId = m.id,
+                                        cipherLength = thumbFile.length(),
+                                        cipherSha256Hex = computeFileSha256(thumbFile)
+                                    )
                                 )
-                            )
+                            } else {
+                                SafeLog.w("VaultBackupExporter", "Corrupt thumbnail omitted for item ${m.id}")
+                            }
                         }
                     }
 
@@ -171,15 +256,19 @@ class VaultBackupExporter(
                     if (m.encryptedPreviewRelativePath != null) {
                         val prevFile = fileStore.getPreviewFile(vaultId, m.id)
                         if (prevFile.exists() && prevFile.length() > 0) {
-                            hasPreview = true
-                            descriptors.add(
-                                BackupFileDescriptor(
-                                    typeCode = BackupArchiveFormat.ENTRY_TYPE_PREVIEW,
-                                    itemId = m.id,
-                                    cipherLength = prevFile.length(),
-                                    cipherSha256Hex = computeFileSha256(prevFile)
+                            if (DerivativeCryptoVerifier.verifyPreviewCiphertext(prevFile, thumbSubkey, m.id)) {
+                                hasPreview = true
+                                descriptors.add(
+                                    BackupFileDescriptor(
+                                        typeCode = BackupArchiveFormat.ENTRY_TYPE_PREVIEW,
+                                        itemId = m.id,
+                                        cipherLength = prevFile.length(),
+                                        cipherSha256Hex = computeFileSha256(prevFile)
+                                    )
                                 )
-                            )
+                            } else {
+                                SafeLog.w("VaultBackupExporter", "Corrupt preview omitted for item ${m.id}")
+                            }
                         }
                     }
 
@@ -207,6 +296,7 @@ class VaultBackupExporter(
                 }
             } finally {
                 mediaSubkey.fill(0)
+                thumbSubkey.fill(0)
             }
         }
 

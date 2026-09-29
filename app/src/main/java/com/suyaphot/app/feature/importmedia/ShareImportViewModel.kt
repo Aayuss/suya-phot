@@ -107,6 +107,12 @@ class ShareImportViewModel : ViewModel() {
     ) = withContext(Dispatchers.IO) {
         val app = container ?: return@withContext
         val now = System.currentTimeMillis()
+        val dispCode = when (disposition) {
+            "SOURCE_DELETED" -> com.suyaphot.app.core.model.SourceDisposition.DELETED.code
+            "SOURCE_DELETE_FAILED_VAULT_SAFE" -> com.suyaphot.app.core.model.SourceDisposition.DELETE_FAILED.code
+            "ORIGINAL_RETAINED_BY_USER" -> com.suyaphot.app.core.model.SourceDisposition.RETAINED_BY_USER.code
+            else -> null
+        }
         for (res in results) {
             app.database.vaultJobDao().updateState(
                 res.jobId,
@@ -114,6 +120,13 @@ class ShareImportViewModel : ViewModel() {
                 now,
                 disposition
             )
+            if (dispCode != null) {
+                app.database.vaultJobDao().updateSourceDisposition(
+                    res.jobId,
+                    dispCode,
+                    now
+                )
+            }
         }
     }
 

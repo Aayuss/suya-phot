@@ -179,6 +179,13 @@ class BackupVerifier(private val keyManager: KeyManager) {
             throw BackupException(BackupError.INVALID_ARCHIVE, "Malformed backup manifest JSON", e)
         }
 
+        try {
+            BackupManifestValidator.validate(header.version, manifest)
+        } catch (e: Exception) {
+            masterKey.fill(0)
+            throw e
+        }
+
         return Pair(manifest, masterKey)
     }
 
@@ -215,8 +222,8 @@ class BackupVerifier(private val keyManager: KeyManager) {
         val (manifest, masterKey) = decryptManifestAndMasterKey(dis, recoveryCodeInput)
         masterKey.fill(0)
 
-        val descriptorMap = manifest.descriptors.associateBy { Pair(it.typeCode, it.itemId) }
-        val seenEntries = HashSet<Pair<Byte, String>>()
+        val validated = BackupManifestValidator.validate(manifest.version, manifest)
+        val seenEntries = HashSet<BackupEntryKey>()
 
         val buffer = ByteArray(BackupArchiveFormat.BUFFER_SIZE)
         var reachedEnd = false
@@ -251,12 +258,12 @@ class BackupVerifier(private val keyManager: KeyManager) {
                 throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid entry body length: $entryLength")
             }
 
-            val key = Pair(entryType, entryId)
+            val key = BackupEntryKey(entryType, entryId)
             if (!seenEntries.add(key)) {
                 throw BackupException(BackupError.INVALID_ARCHIVE, "Duplicate entry in backup: type=$entryType, id=$entryId")
             }
 
-            val expectedDesc = descriptorMap[key]
+            val expectedDesc = validated.descriptorsByKey[key]
             if (manifest.version >= BackupArchiveFormat.VERSION_2) {
                 if (expectedDesc == null) {
                     throw BackupException(
@@ -304,10 +311,18 @@ class BackupVerifier(private val keyManager: KeyManager) {
             }
         }
 
-        // Verify all required media entries were present
+        // Verify all declared descriptors were actually seen
         if (manifest.version >= BackupArchiveFormat.VERSION_2) {
+            val expectedKeys = validated.descriptorsByKey.keys
+            if (seenEntries != expectedKeys) {
+                throw BackupException(
+                    BackupError.INVALID_ARCHIVE,
+                    "Body entries do not match authenticated descriptors"
+                )
+            }
+        } else {
             for (m in manifest.mediaItems) {
-                val requiredKey = Pair(BackupArchiveFormat.ENTRY_TYPE_MEDIA, m.id)
+                val requiredKey = BackupEntryKey(BackupArchiveFormat.ENTRY_TYPE_MEDIA, m.id)
                 if (requiredKey !in seenEntries) {
                     throw BackupException(
                         BackupError.MISSING_MEDIA,

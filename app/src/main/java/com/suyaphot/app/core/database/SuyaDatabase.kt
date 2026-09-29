@@ -31,7 +31,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         IntruderEventEntity::class,
         RestoreJobEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class SuyaDatabase : RoomDatabase() {
@@ -57,7 +57,7 @@ abstract class SuyaDatabase : RoomDatabase() {
                     SuyaDatabase::class.java,
                     DB_NAME
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                     .also { instance = it }
             }
@@ -152,6 +152,12 @@ abstract class SuyaDatabase : RoomDatabase() {
         val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE folder_locks ADD COLUMN requiresCredentialReset INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE jobs ADD COLUMN sourceDispositionCode INTEGER")
             }
         }
     }

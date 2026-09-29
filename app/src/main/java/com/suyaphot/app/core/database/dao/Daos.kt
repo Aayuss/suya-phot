@@ -219,13 +219,18 @@ interface MediaItemDao {
     @RawQuery
     suspend fun rawCount(query: SupportSQLiteQuery): Int
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC")
+    @Query("""SELECT id FROM media_items WHERE vaultId = :vaultId AND id IN (:candidateIds) AND deletedAt IS NULL AND concealed = 0
+        AND (:filterCode = 0 OR (:filterCode = 1 AND mediaTypeCode = 0)
+            OR (:filterCode = 2 AND mediaTypeCode = 1) OR (:filterCode = 3 AND favorite = 1))""")
+    suspend fun getVisibleIdsAmong(vaultId: String, candidateIds: List<String>, filterCode: Int): List<String>
+
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC, id DESC")
     fun getByFolderPrivileged(vaultId: String, folderId: String?): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC")
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC, id DESC")
     suspend fun getAllIdsInFolder(vaultId: String, folderId: String?): List<String>
 
-    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC LIMIT :limit OFFSET :offset")
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC, id DESC LIMIT :limit OFFSET :offset")
     suspend fun getPagedIdsInFolder(vaultId: String, folderId: String?, limit: Int, offset: Int): List<String>
 
     @Query("SELECT COUNT(*) FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0)")
@@ -363,6 +368,35 @@ interface VaultJobDao {
 
     @Query("DELETE FROM jobs WHERE id = :id")
     suspend fun delete(id: String)
+
+    @Query("UPDATE jobs SET sourceDispositionCode = :code, updatedAt = :now WHERE id = :id")
+    suspend fun updateSourceDisposition(id: String, code: Int?, now: Long)
+
+    @Query("""
+        SELECT * FROM jobs 
+        WHERE vaultId = :vaultId 
+          AND typeCode = :typeCode 
+          AND sourceDispositionCode IN (:dispositionCodes)
+        ORDER BY updatedAt DESC
+    """)
+    fun observeJobsWithSourceDispositions(
+        vaultId: String, 
+        typeCode: Int, 
+        dispositionCodes: List<Int>
+    ): Flow<List<VaultJobEntity>>
+
+    @Query("""
+        SELECT * FROM jobs 
+        WHERE vaultId = :vaultId 
+          AND typeCode = :typeCode 
+          AND sourceDispositionCode IN (:dispositionCodes)
+        ORDER BY updatedAt DESC
+    """)
+    suspend fun getJobsWithSourceDispositions(
+        vaultId: String, 
+        typeCode: Int, 
+        dispositionCodes: List<Int>
+    ): List<VaultJobEntity>
 }
 
 @Dao

@@ -10,12 +10,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -73,6 +75,12 @@ import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.gallery.GalleryFilter
 import com.suyaphot.app.domain.gallery.ViewerCollection
 import com.suyaphot.app.domain.auth.VaultSession
+import com.suyaphot.app.core.crypto.Aead
+import com.suyaphot.app.core.database.entity.VaultJobEntity
+import com.suyaphot.app.core.model.JobType
+import com.suyaphot.app.core.model.SourceDisposition
+import com.suyaphot.app.domain.importmedia.ImportJobPayload
+import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.MediaFilter
@@ -164,6 +172,60 @@ fun PhotosScreen(
             pendingImportUris = uris
             locationPermissionLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
         } else startImport(uris)
+    }
+
+    val attentionJobs by remember(vaultId) {
+        if (vaultId.isBlank()) kotlinx.coroutines.flow.flowOf(emptyList())
+        else container.database.vaultJobDao().observeJobsWithSourceDispositions(
+            vaultId = vaultId,
+            typeCode = JobType.IMPORT.code,
+            dispositionCodes = listOf(
+                SourceDisposition.RETAINED_AFTER_INTERRUPTION.code,
+                SourceDisposition.DELETE_FAILED.code
+            )
+        )
+    }.collectAsState(initial = emptyList())
+
+    var pendingAttentionConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
+    var pendingAttentionUris by remember { mutableStateOf<List<Pair<VaultJobEntity, Uri>>>(emptyList()) }
+
+    val attentionConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val mode = pendingAttentionConsentMode
+        val current = pendingAttentionUris
+        pendingAttentionConsentMode = null
+        pendingAttentionUris = emptyList()
+        if (result.resultCode == android.app.Activity.RESULT_OK && mode != null) {
+            scope.launch(Dispatchers.IO) {
+                val verified = container.sourceDeletionCoordinator.completeConsent(current.map { it.second }, mode)
+                val now = System.currentTimeMillis()
+                for ((job, uri) in current) {
+                    if (uri in verified.deletedUris) {
+                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETED.code, now)
+                    } else {
+                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETE_FAILED.code, now)
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    statusMessage = if (verified.retainedUris.isNotEmpty()) {
+                        "Some originals could not be deleted by Android; encrypted copies are safe."
+                    } else {
+                        "Originals deleted. Move complete."
+                    }
+                }
+            }
+        } else {
+            scope.launch(Dispatchers.IO) {
+                val now = System.currentTimeMillis()
+                for ((job, _) in current) {
+                    container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.RETAINED_BY_USER.code, now)
+                }
+                withContext(Dispatchers.Main) {
+                    statusMessage = "Kept originals in Gallery."
+                }
+            }
+        }
     }
 
     val galleryFilter = when (selectedFilter) {
@@ -278,6 +340,138 @@ fun PhotosScreen(
                     color = SuyaColors.TextMuted,
                     modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp)
                 )
+            }
+
+            // Attention Banner for Interrupted / Failed Source Deletions
+            if (attentionJobs.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = SuyaColors.Surface,
+                    border = BorderStroke(1.dp, SuyaColors.Line),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 6.dp)
+                        .testTag("move_attention_card")
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        val count = attentionJobs.size
+                        Text(
+                            text = if (count == 1) "1 move needs attention" else "$count moves need attention",
+                            fontFamily = SoraFontFamily,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                            color = SuyaColors.White
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "The encrypted copy is safe in Suya Phot, but the original still remains in Gallery.",
+                            fontFamily = SoraFontFamily,
+                            fontSize = 13.sp,
+                            color = SuyaColors.TextMuted,
+                            lineHeight = 18.sp
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            SuyaButton(
+                                text = "Keep Original",
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        val now = System.currentTimeMillis()
+                                        for (job in attentionJobs) {
+                                            container.database.vaultJobDao().updateSourceDisposition(
+                                                job.id,
+                                                SourceDisposition.RETAINED_BY_USER.code,
+                                                now
+                                            )
+                                        }
+                                        withContext(Dispatchers.Main) {
+                                            statusMessage = "Kept originals in Gallery."
+                                        }
+                                    }
+                                },
+                                variant = ButtonVariant.Ghost
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            SuyaButton(
+                                text = "Finish Moving",
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        val unlocked = session as? VaultSession.Unlocked ?: return@launch
+                                        val jobsWithUris = mutableListOf<Pair<VaultJobEntity, Uri>>()
+                                        for (job in attentionJobs) {
+                                            try {
+                                                val decrypted = Aead.decryptWithPrependedNonce(
+                                                    keyBytes = unlocked.metaSubkey,
+                                                    payload = job.encryptedPayload,
+                                                    aad = "job:${job.id}:v1".toByteArray(Charsets.UTF_8)
+                                                )
+                                                val payload = try {
+                                                    ImportJobPayload.deserialize(decrypted)
+                                                } finally {
+                                                    decrypted.fill(0)
+                                                }
+                                                jobsWithUris.add(Pair(job, Uri.parse(payload.sourceUri)))
+                                            } catch (_: Exception) {
+                                                container.database.vaultJobDao().updateSourceDisposition(
+                                                    job.id,
+                                                    SourceDisposition.DELETE_FAILED.code,
+                                                    System.currentTimeMillis()
+                                                )
+                                            }
+                                        }
+                                        if (jobsWithUris.isEmpty()) return@launch
+
+                                        when (val outcome = container.sourceDeletionCoordinator.deleteSources(jobsWithUris.map { it.second })) {
+                                            is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
+                                                val now = System.currentTimeMillis()
+                                                for ((job, uri) in jobsWithUris) {
+                                                    if (uri in outcome.deletedUris) {
+                                                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETED.code, now)
+                                                    }
+                                                }
+                                                withContext(Dispatchers.Main) {
+                                                    statusMessage = "Originals deleted. Move complete."
+                                                }
+                                            }
+                                            is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
+                                                val now = System.currentTimeMillis()
+                                                for ((job, uri) in jobsWithUris) {
+                                                    if (uri in outcome.deletedUris) {
+                                                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETED.code, now)
+                                                    }
+                                                }
+                                                val remaining = jobsWithUris.filter { it.second in outcome.uris }
+                                                pendingAttentionUris = remaining
+                                                pendingAttentionConsentMode = outcome.mode
+                                                attentionConsentLauncher.launch(
+                                                    IntentSenderRequest.Builder(outcome.intentSender).build()
+                                                )
+                                            }
+                                            is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
+                                                val now = System.currentTimeMillis()
+                                                for ((job, uri) in jobsWithUris) {
+                                                    if (uri in outcome.deletedUris) {
+                                                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETED.code, now)
+                                                    } else {
+                                                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETE_FAILED.code, now)
+                                                    }
+                                                }
+                                                withContext(Dispatchers.Main) {
+                                                    statusMessage = "Android no longer allows automatic deletion. Vault copy remains safe."
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                variant = ButtonVariant.Primary
+                            )
+                        }
+                    }
+                }
             }
 
             // Search Bar (collapsible)

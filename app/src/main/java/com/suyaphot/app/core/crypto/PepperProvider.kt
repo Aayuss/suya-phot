@@ -8,7 +8,7 @@ import javax.crypto.Mac
 import javax.crypto.SecretKey
 
 /**
- * Interface providing hardware-backed HMAC-SHA256 device pepper operations.
+ * Interface providing Android Keystore-backed HMAC-SHA256 device pepper operations.
  */
 interface PepperProvider {
     fun hmacSha256(input: ByteArray): ByteArray
@@ -16,7 +16,7 @@ interface PepperProvider {
 
 /**
  * Production implementation backed by Android Keystore.
- * Fails closed if hardware keystore is unavailable.
+ * Fails closed if keystore is unavailable.
  */
 class AndroidKeystorePepperProvider : PepperProvider {
 

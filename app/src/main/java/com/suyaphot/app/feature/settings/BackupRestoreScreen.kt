@@ -86,10 +86,17 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+enum class BackupRestoreMode {
+    SETUP_RESTORE_ONLY,
+    UNLOCKED_VAULT
+}
+
 @Composable
 fun BackupRestoreScreen(
     container: AppContainer,
     onBack: () -> Unit,
+    mode: BackupRestoreMode = BackupRestoreMode.UNLOCKED_VAULT,
+    onNavigateToFolders: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -105,6 +112,8 @@ fun BackupRestoreScreen(
     var exportRecoveryCode by remember { mutableStateOf("") }
     var exportCodeRevealed by remember { mutableStateOf(false) }
     var exportTargetUri by remember { mutableStateOf<Uri?>(null) }
+    var showFolderPrepDialog by remember { mutableStateOf(false) }
+    var unreadyFolderCount by remember { mutableIntStateOf(0) }
 
     var isRestoring by remember { mutableStateOf(false) }
     var restoreProgressText by remember { mutableStateOf("") }
@@ -213,12 +222,21 @@ fun BackupRestoreScreen(
             } catch (e: BackupException) {
                 withContext(Dispatchers.Main) {
                     isExporting = false
-                    Toast.makeText(context, e.message ?: e.error.userFriendlyMessage(), Toast.LENGTH_LONG).show()
+                    if (e.error == BackupError.FOLDER_LOCK_RECOVERY_NOT_READY) {
+                        val session = sessionState as? VaultSession.Unlocked
+                        if (session != null) {
+                            val locks = container.database.folderLockDao().getAllForVault(session.vaultId)
+                            unreadyFolderCount = locks.count { it.recoveryEnvelope == null }
+                        }
+                        showFolderPrepDialog = true
+                    } else {
+                        Toast.makeText(context, e.error.userFriendlyMessage(), Toast.LENGTH_LONG).show()
+                    }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     isExporting = false
-                    Toast.makeText(context, "Backup was written but could not be verified. Do not rely on this file.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, BackupError.VERIFICATION_FAILED.userFriendlyMessage(), Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -236,21 +254,25 @@ fun BackupRestoreScreen(
                 }
                 withContext(Dispatchers.Main) {
                     restoreSummary = summary
-                    credentialStep = true
-                    newPin = ""
-                    confirmPin = ""
-                    pinStage = 0
-                    patternFirst?.fill('\u0000')
-                    patternFirst = null
-                    credentialError = null
+                    if (mode == BackupRestoreMode.SETUP_RESTORE_ONLY) {
+                        credentialStep = true
+                        newPin = ""
+                        confirmPin = ""
+                        pinStage = 0
+                        patternFirst?.fill('\u0000')
+                        patternFirst = null
+                        credentialError = null
+                    } else {
+                        credentialStep = false
+                    }
                 }
             } catch (e: BackupException) {
                 withContext(Dispatchers.Main) {
-                    restoreError = e.message ?: e.error.userFriendlyMessage()
+                    restoreError = e.error.userFriendlyMessage()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    restoreError = "Incorrect Recovery Code or corrupted backup."
+                    restoreError = BackupError.INVALID_ARCHIVE.userFriendlyMessage()
                 }
             }
         }
@@ -290,12 +312,12 @@ fun BackupRestoreScreen(
             } catch (e: BackupException) {
                 withContext(Dispatchers.Main) {
                     isRestoring = false
-                    Toast.makeText(context, e.message ?: e.error.userFriendlyMessage(), Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, e.error.userFriendlyMessage(), Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     isRestoring = false
-                    Toast.makeText(context, "Restore failed: Invalid or corrupt backup archive.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, BackupError.INVALID_ARCHIVE.userFriendlyMessage(), Toast.LENGTH_LONG).show()
                 }
             } finally {
                 finalCredential.fill('\u0000')
@@ -351,8 +373,8 @@ fun BackupRestoreScreen(
                     }
                 }
 
-                // Export Card (Only shown if primary real vault)
-                if (isRealVault) {
+                // Export Card (Only shown if primary real vault and mode is UNLOCKED_VAULT)
+                if (mode == BackupRestoreMode.UNLOCKED_VAULT && isRealVault) {
                     Surface(
                         shape = RoundedCornerShape(16.dp),
                         color = SuyaColors.Fill06,
@@ -396,31 +418,85 @@ fun BackupRestoreScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.CloudDownload, contentDescription = null, tint = SuyaColors.Accent)
+                            Icon(
+                                Icons.Default.CloudDownload,
+                                contentDescription = null,
+                                tint = if (mode == BackupRestoreMode.SETUP_RESTORE_ONLY) SuyaColors.Accent else SuyaColors.TextMuted
+                            )
                             Spacer(Modifier.width(8.dp))
-                            Text("Restore Vault", fontFamily = SoraFontFamily, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = SuyaColors.White)
+                            Text(
+                                if (mode == BackupRestoreMode.SETUP_RESTORE_ONLY) "Restore Vault" else "Restore a Vault",
+                                fontFamily = SoraFontFamily,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 16.sp,
+                                color = SuyaColors.White
+                            )
                         }
                         Spacer(Modifier.height(6.dp))
-                        Text(
-                            "Restore an existing .suyavault backup using the Recovery Code that protected it. You will choose a new PIN or Pattern for this device.",
-                            fontFamily = SoraFontFamily,
-                            fontSize = 13.sp,
-                            color = SuyaColors.TextMuted
-                        )
-                        Spacer(Modifier.height(14.dp))
-                        SuyaButton(
-                            text = "Open Backup File",
-                            onClick = {
-                                restoreDocumentLauncher.launch(arrayOf("*/*"))
-                            },
-                            variant = ButtonVariant.Secondary,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("backup_open_file_button")
-                        )
+                        if (mode == BackupRestoreMode.SETUP_RESTORE_ONLY) {
+                            Text(
+                                "Restore an existing .suyavault backup using the Recovery Code that protected it. You will choose a new PIN or Pattern for this device.",
+                                fontFamily = SoraFontFamily,
+                                fontSize = 13.sp,
+                                color = SuyaColors.TextMuted
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            SuyaButton(
+                                text = "Open Backup File",
+                                onClick = {
+                                    restoreDocumentLauncher.launch(arrayOf("*/*"))
+                                },
+                                variant = ButtonVariant.Secondary,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("backup_open_file_button")
+                            )
+                        } else {
+                            Text(
+                                "For safety, restoring is only available before a primary vault exists. Export your current vault first, then restore this backup on a fresh installation or another device.",
+                                fontFamily = SoraFontFamily,
+                                fontSize = 13.sp,
+                                color = SuyaColors.TextMuted,
+                                lineHeight = 18.sp
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            SuyaButton(
+                                text = "Inspect Backup (Read-Only)",
+                                onClick = {
+                                    restoreDocumentLauncher.launch(arrayOf("*/*"))
+                                },
+                                variant = ButtonVariant.Secondary,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("backup_inspect_file_button")
+                            )
+                        }
                     }
                 }
             }
+        }
+
+        // Folder Lock Recovery Not Ready Dialog
+        if (showFolderPrepDialog) {
+            SuyaDialog(
+                onDismissRequest = { showFolderPrepDialog = false },
+                title = "Protected folders need preparation",
+                confirmText = if (onNavigateToFolders != null) "Go to Folders" else "OK",
+                onConfirm = {
+                    showFolderPrepDialog = false
+                    onNavigateToFolders?.invoke()
+                },
+                dismissText = if (onNavigateToFolders != null) "Cancel" else "Dismiss",
+                content = {
+                    Text(
+                        text = "${if (unreadyFolderCount > 0) "$unreadyFolderCount protected folder(s) were" else "Protected folders were"} created with an older version of Suya Phot.\n\nUnlock each protected folder once so Suya Phot can create portable recovery information before making this backup.",
+                        fontFamily = SoraFontFamily,
+                        fontSize = 13.sp,
+                        color = SuyaColors.TextMuted,
+                        lineHeight = 18.sp
+                    )
+                }
+            )
         }
 
         // Export Prompt Dialog
@@ -477,6 +553,7 @@ fun BackupRestoreScreen(
 
         // Restore Flow Dialog
         if (showRestoreSecretDialog) {
+            val isInspectMode = mode == BackupRestoreMode.UNLOCKED_VAULT && restoreSummary != null
             SuyaDialog(
                 onDismissRequest = {
                     showRestoreSecretDialog = false
@@ -485,10 +562,16 @@ fun BackupRestoreScreen(
                     confirmPin = ""
                     patternFirst?.fill('\u0000')
                     patternFirst = null
+                    restoreSummary = null
+                    credentialStep = false
                 },
-                title = if (!credentialStep) "Verify Backup" else "Set Device Credential",
-                confirmText = if (credentialStep && (newCredentialType == 0 && pinStage == 1 && confirmPin.length == 6)) "Restore Now" else if (!credentialStep) "Verify" else null,
-                onConfirm = if (!credentialStep) ({
+                title = if (isInspectMode) "Backup Inspection" else if (!credentialStep) "Verify Backup" else "Set Device Credential",
+                confirmText = if (isInspectMode) "Done" else if (credentialStep && (newCredentialType == 0 && pinStage == 1 && confirmPin.length == 6)) "Restore Now" else if (!credentialStep) "Verify" else null,
+                onConfirm = if (isInspectMode) ({
+                    showRestoreSecretDialog = false
+                    restoreRecoveryCode = ""
+                    restoreSummary = null
+                }) else if (!credentialStep) ({
                     inspectBackup(restoreRecoveryCode)
                 }) else if (credentialStep && newCredentialType == 0 && pinStage == 1 && confirmPin.length == 6) ({
                     if (newPin == confirmPin) {
@@ -499,7 +582,30 @@ fun BackupRestoreScreen(
                 }) else null,
                 content = {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        if (!credentialStep) {
+                        if (isInspectMode) {
+                            val sum = restoreSummary!!
+                            Text(
+                                "Backup Verified",
+                                fontFamily = SoraFontFamily,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 15.sp,
+                                color = SuyaColors.Positive
+                            )
+                            Text(
+                                "Contains ${sum.mediaCount} media items and ${sum.folderCount} folders (${sum.totalPlaintextSize / (1024 * 1024)} MB).",
+                                fontFamily = SoraFontFamily,
+                                fontSize = 13.sp,
+                                color = SuyaColors.White
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "For safety, restoring is only available before a primary vault exists. Export your current vault first, then restore this backup on a fresh installation or another device.",
+                                fontFamily = SoraFontFamily,
+                                fontSize = 12.sp,
+                                color = SuyaColors.TextMuted,
+                                lineHeight = 16.sp
+                            )
+                        } else if (!credentialStep) {
                             Text(
                                 "Enter the 26-character Recovery Code that protects this backup archive.",
                                 fontFamily = SoraFontFamily,

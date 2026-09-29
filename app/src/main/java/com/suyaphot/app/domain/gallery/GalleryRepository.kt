@@ -99,19 +99,19 @@ data class ViewerWindow(
         is ViewerCollection.Gallery -> {
             val searchIds = collection.searchIds
             if (searchIds != null) {
-                val visible = dao.getAllVisibleIdsForFilter(vaultId, collection.filter.ordinal).toHashSet()
-                val all = searchIds.filter { it in visible }
-                val total = all.size
-                if (total <= windowSize) {
-                    val idx = all.indexOf(aroundId).coerceAtLeast(0)
-                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total, 0)
+                val candidateSlice = if (searchIds.size <= windowSize * 2) {
+                    searchIds
                 } else {
-                    val idx = all.indexOf(aroundId).coerceAtLeast(0)
-                    val start = (idx - windowSize / 2).coerceIn(0, (total - windowSize).coerceAtLeast(0))
-                    val slice = all.subList(start, start + windowSize)
-                    val finalSlice = if (aroundId in slice) slice else listOf(aroundId) + slice
-                    ViewerWindow(finalSlice, finalSlice.indexOf(aroundId).coerceAtLeast(0), total, start)
+                    val aroundIdx = searchIds.indexOf(aroundId).let { if (it == -1) 0 else it }
+                    val start = (aroundIdx - windowSize / 2).coerceIn(0, (searchIds.size - windowSize).coerceAtLeast(0))
+                    searchIds.subList(start, (start + windowSize).coerceAtMost(searchIds.size))
                 }
+                val visible = dao.getVisibleIdsAmong(vaultId, candidateSlice, collection.filter.ordinal).toHashSet()
+                val all = candidateSlice.filter { it in visible }
+                val total = if (searchIds.size <= windowSize * 2) all.size else searchIds.size
+                val finalSlice = if (aroundId in all) all else listOf(aroundId) + all
+                val idx = finalSlice.indexOf(aroundId).coerceAtLeast(0)
+                ViewerWindow(finalSlice, idx, total, 0)
             } else {
                 val filterSql = when (collection.filter) {
                     GalleryFilter.ALL -> ""
@@ -168,11 +168,12 @@ data class ViewerWindow(
         is ViewerCollection.Gallery -> {
             val searchIds = collection.searchIds
             if (searchIds != null) {
-                val visible = dao.getAllVisibleIdsForFilter(vaultId, collection.filter.ordinal).toHashSet()
-                val all = searchIds.filter { it in visible }
-                val idx = all.indexOf(afterId)
-                if (idx != -1 && idx + 1 < all.size) {
-                    all.subList(idx + 1, (idx + 1 + limit).coerceAtMost(all.size))
+                val idx = searchIds.indexOf(afterId)
+                if (idx != -1 && idx + 1 < searchIds.size) {
+                    val candidateSlice = searchIds.subList(idx + 1, (idx + 1 + limit * 2).coerceAtMost(searchIds.size))
+                    val visibleSet = dao.getVisibleIdsAmong(vaultId, candidateSlice, collection.filter.ordinal).toHashSet()
+                    val filtered = candidateSlice.filter { it in visibleSet }
+                    filtered.take(limit)
                 } else emptyList()
             } else {
                 val target = dao.getItemForVault(afterId, vaultId) ?: return emptyList()
@@ -207,11 +208,12 @@ data class ViewerWindow(
         is ViewerCollection.Gallery -> {
             val searchIds = collection.searchIds
             if (searchIds != null) {
-                val visible = dao.getAllVisibleIdsForFilter(vaultId, collection.filter.ordinal).toHashSet()
-                val all = searchIds.filter { it in visible }
-                val idx = all.indexOf(beforeId)
+                val idx = searchIds.indexOf(beforeId)
                 if (idx > 0) {
-                    all.subList((idx - limit).coerceAtLeast(0), idx)
+                    val candidateSlice = searchIds.subList((idx - limit * 2).coerceAtLeast(0), idx)
+                    val visibleSet = dao.getVisibleIdsAmong(vaultId, candidateSlice, collection.filter.ordinal).toHashSet()
+                    val filtered = candidateSlice.filter { it in visibleSet }
+                    filtered.takeLast(limit)
                 } else emptyList()
             } else {
                 val target = dao.getItemForVault(beforeId, vaultId) ?: return emptyList()
@@ -338,9 +340,11 @@ data class ViewerWindow(
         is ViewerCollection.Gallery -> {
             val searchIds = collection.searchIds
             if (searchIds != null) {
-                // Search results are already ordered by the search index. Recheck DB visibility on open.
-                val visible = dao.getAllVisibleIdsForFilter(vaultId, collection.filter.ordinal).toHashSet()
-                searchIds.filter { it in visible }
+                // Search results are already ordered by the search index. Recheck DB visibility on open in bounded batches.
+                searchIds.chunked(500).flatMap { chunk ->
+                    val visible = dao.getVisibleIdsAmong(vaultId, chunk, collection.filter.ordinal).toHashSet()
+                    chunk.filter { it in visible }
+                }
             } else {
                 val filterSql = when (collection.filter) {
                     GalleryFilter.ALL -> ""
@@ -358,12 +362,13 @@ data class ViewerWindow(
     }
 
     private fun orderSql(sort: String): String = when (sort) {
-        "DATE_TAKEN_ASC" -> "COALESCE(dateTakenMs, importedAt) ASC"
-        "IMPORTED_ASC" -> "importedAt ASC"
-        "SIZE_DESC" -> "plaintextSize DESC"
-        "SIZE_ASC" -> "plaintextSize ASC"
-        "IMPORTED_DESC" -> "importedAt DESC"
-        else -> "COALESCE(dateTakenMs, importedAt) DESC"
+        "DATE_TAKEN_ASC" -> "COALESCE(dateTakenMs, importedAt) ASC, id ASC"
+        "DATE_TAKEN_DESC" -> "COALESCE(dateTakenMs, importedAt) DESC, id DESC"
+        "IMPORTED_ASC" -> "importedAt ASC, id ASC"
+        "IMPORTED_DESC" -> "importedAt DESC, id DESC"
+        "SIZE_ASC" -> "plaintextSize ASC, id ASC"
+        "SIZE_DESC" -> "plaintextSize DESC, id DESC"
+        else -> "COALESCE(dateTakenMs, importedAt) DESC, id DESC"
     }
 
     fun paged(vaultId: String, filter: GalleryFilter, sort: String): Flow<PagingData<MediaItemEntity>> {

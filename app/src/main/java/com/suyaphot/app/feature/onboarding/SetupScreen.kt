@@ -117,6 +117,7 @@ fun SetupScreen(
     if (showRestoreScreen) {
         BackupRestoreScreen(
             container = container,
+            mode = com.suyaphot.app.feature.settings.BackupRestoreMode.SETUP_RESTORE_ONLY,
             onBack = {
                 showRestoreScreen = false
                 scope.launch {

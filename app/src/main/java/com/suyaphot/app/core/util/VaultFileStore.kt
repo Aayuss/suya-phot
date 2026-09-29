@@ -29,7 +29,45 @@ class VaultFileStore(private val context: Context) {
         get() = File(context.cacheDir, "intruder_capture_tmp").apply { mkdirs() }
 
     private fun requireInternalId(value: String, label: String) {
-        require(value.matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "Invalid $label" }
+        InternalId.requireValid(value, label)
+    }
+
+    fun createBackupRestoreStagingDir(): File {
+        val root = File(context.noBackupFilesDir, "restore_staging").apply {
+            check(exists() || mkdirs())
+        }
+        val dir = File(root, UUID.randomUUID().toString())
+        check(dir.mkdir()) { "Could not create restore staging directory" }
+        val rootCanonical = root.canonicalFile
+        val dirCanonical = dir.canonicalFile
+        check(dirCanonical.toPath().startsWith(rootCanonical.toPath())) {
+            "Restore staging path escaped root"
+        }
+        return dirCanonical
+    }
+
+    fun clearStaleBackupRestoreStaging() {
+        val root = File(context.noBackupFilesDir, "restore_staging")
+        if (root.exists()) {
+            root.listFiles()?.forEach { child ->
+                if (child.isDirectory) {
+                    child.deleteRecursively()
+                } else {
+                    child.delete()
+                }
+            }
+        }
+    }
+
+    fun clearOrphanVaultDirs(activeVaultIds: Set<String>) {
+        if (baseVaultDir.exists()) {
+            baseVaultDir.listFiles()?.forEach { dir ->
+                if (dir.isDirectory && dir.name !in activeVaultIds) {
+                    SafeLog.w("VaultFileStore", "Cleaning orphan vault directory: ${dir.name}")
+                    dir.deleteRecursively()
+                }
+            }
+        }
     }
 
     private fun safeExtension(extension: String): String {

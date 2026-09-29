@@ -1,9 +1,9 @@
 package com.suyaphot.app.domain.backup
 
 import android.content.Context
+import android.os.StatFs
 import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
-import com.suyaphot.app.core.crypto.HkdfSha256
 import com.suyaphot.app.core.crypto.KeyManager
 import com.suyaphot.app.core.crypto.VaultCrypto
 import com.suyaphot.app.core.database.SuyaDatabase
@@ -11,6 +11,7 @@ import com.suyaphot.app.core.database.entity.FolderEntity
 import com.suyaphot.app.core.database.entity.FolderLockEntity
 import com.suyaphot.app.core.database.entity.MediaItemEntity
 import com.suyaphot.app.core.database.entity.VaultEntity
+import com.suyaphot.app.core.media.DerivativeCryptoVerifier
 import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
@@ -62,6 +63,9 @@ class VaultBackupImporter(
         newCredentialType: Int,
         onProgress: (bytesRead: Long, totalEstimatedBytes: Long, itemsRead: Int, totalItems: Int) -> Unit
     ): BackupRestoreResult = withContext(Dispatchers.IO) {
+        // Pre-cleanup stale staging
+        fileStore.clearStaleBackupRestoreStaging()
+
         val bufferedIn = BufferedInputStream(inputStream, BackupArchiveFormat.BUFFER_SIZE)
         val dis = DataInputStream(bufferedIn)
         val verifier = BackupVerifier(keyManager)
@@ -80,16 +84,52 @@ class VaultBackupImporter(
             )
         }
 
-        // 3. Validate untrusted manifest structure
-        validateManifestStructure(manifest)
-
-        val stagingDir = File(context.noBackupFilesDir, "staging_${manifest.archiveId}").apply {
-            if (exists()) deleteRecursively()
-            mkdirs()
+        // 3. Strict manifest validation
+        val validated = try {
+            BackupManifestValidator.validate(manifest.version, manifest)
+        } catch (e: Exception) {
+            masterKey.fill(0)
+            newCredential.fill('\u0000')
+            throw e
         }
 
-        val descriptorMap = manifest.descriptors.associateBy { Pair(it.typeCode, it.itemId) }
-        val seenEntries = HashSet<Pair<Byte, String>>()
+        // 4. Free-space precheck
+        val stat = StatFs(context.noBackupFilesDir.absolutePath)
+        val availableBytes = stat.availableBytes
+        val declaredBodyBytes = validated.declaredBodyBytes
+        val safetyMargin = maxOf(256L * 1024 * 1024, declaredBodyBytes / 20L)
+        val requiredBytes = try {
+            Math.addExact(declaredBodyBytes, safetyMargin)
+        } catch (_: ArithmeticException) {
+            masterKey.fill(0)
+            newCredential.fill('\u0000')
+            throw BackupException(BackupError.INVALID_ARCHIVE)
+        }
+
+        if (availableBytes < requiredBytes) {
+            masterKey.fill(0)
+            newCredential.fill('\u0000')
+            throw BackupException(
+                BackupError.NOT_ENOUGH_SPACE,
+                "Not enough storage to restore this vault. Required: ${requiredBytes / (1024 * 1024)} MB, Available: ${availableBytes / (1024 * 1024)} MB"
+            )
+        }
+
+        // 5. Create secure restore staging directory with local random UUID
+        val stagingDir = fileStore.createBackupRestoreStagingDir()
+        var stagedSequence = 0L
+
+        fun newStagedBodyFile(entryType: Byte): File {
+            val type = when (entryType) {
+                BackupArchiveFormat.ENTRY_TYPE_MEDIA -> "media"
+                BackupArchiveFormat.ENTRY_TYPE_THUMB -> "thumb"
+                BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> "preview"
+                else -> "other"
+            }
+            return File(stagingDir, "%08d_%s.bin".format(stagedSequence++, type))
+        }
+
+        val seenEntries = HashSet<BackupEntryKey>()
         val stagedMediaFiles = HashMap<String, File>()
         val stagedThumbFiles = HashMap<String, File>()
         val stagedPreviewFiles = HashMap<String, File>()
@@ -98,11 +138,11 @@ class VaultBackupImporter(
         var reachedEnd = false
         var bytesRead = 0L
         val totalExpectedItems = manifest.mediaItems.size
-        var totalEstimatedBytes = manifest.mediaItems.sumOf { it.cipherSize + 32 }
+        val totalEstimatedBytes = declaredBodyBytes
         var itemsRead = 0
 
         try {
-            // 4. Stream entries and stage to temporary files
+            // 6. Stream entries and stage to temporary sequence files
             while (!reachedEnd) {
                 val nextByte = dis.read()
                 if (nextByte == -1) {
@@ -135,12 +175,12 @@ class VaultBackupImporter(
                 }
                 bytesRead += 1 + 2 + idLength + 8
 
-                val key = Pair(entryType, entryId)
+                val key = BackupEntryKey(entryType, entryId)
                 if (!seenEntries.add(key)) {
                     throw BackupException(BackupError.INVALID_ARCHIVE, "Duplicate entry in backup: type=$entryType, id=$entryId")
                 }
 
-                val expectedDesc = descriptorMap[key]
+                val expectedDesc = validated.descriptorsByKey[key]
                 if (manifest.version >= BackupArchiveFormat.VERSION_2) {
                     if (expectedDesc == null) {
                         throw BackupException(
@@ -156,13 +196,7 @@ class VaultBackupImporter(
                     }
                 }
 
-                val stagePrefix = when (entryType) {
-                    BackupArchiveFormat.ENTRY_TYPE_MEDIA -> "media_"
-                    BackupArchiveFormat.ENTRY_TYPE_THUMB -> "thumb_"
-                    BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> "preview_"
-                    else -> throw BackupException(BackupError.INVALID_ARCHIVE, "Unknown entry type $entryType")
-                }
-                val stagedFile = File(stagingDir, "${stagePrefix}$entryId.bin")
+                val stagedFile = newStagedBodyFile(entryType)
                 val digest = MessageDigest.getInstance("SHA-256")
 
                 FileOutputStream(stagedFile).use { fos ->
@@ -215,16 +249,26 @@ class VaultBackupImporter(
                 throw BackupException(BackupError.INVALID_ARCHIVE, "Unexpected trailing bytes after archive end marker")
             }
 
-            // Verify that all required media items have bodies
-            for (m in manifest.mediaItems) {
-                if (!stagedMediaFiles.containsKey(m.id)) {
-                    throw BackupException(BackupError.MISSING_MEDIA, "Missing required media body for item ${m.id}")
+            // Verify body completeness
+            if (manifest.version >= BackupArchiveFormat.VERSION_2) {
+                if (seenEntries != validated.descriptorsByKey.keys) {
+                    throw BackupException(
+                        BackupError.INVALID_ARCHIVE,
+                        "Archive body entries do not match authenticated descriptors"
+                    )
+                }
+            } else {
+                for (m in manifest.mediaItems) {
+                    if (!stagedMediaFiles.containsKey(m.id)) {
+                        throw BackupException(BackupError.MISSING_MEDIA, "Missing required media body for item ${m.id}")
+                    }
                 }
             }
 
-            // 5. Derive keys and perform full cryptographic verification of all staged media and metadata
+            // 7. Derive keys and perform full cryptographic verification of all staged media and metadata
             val mediaSubkey = vaultCrypto.deriveMediaSubkey(masterKey)
             val metaSubkey = vaultCrypto.deriveMetaSubkey(masterKey)
+            val thumbSubkey = vaultCrypto.deriveThumbSubkey(masterKey)
 
             try {
                 for (m in manifest.mediaItems) {
@@ -267,135 +311,169 @@ class VaultBackupImporter(
                     } catch (e: Exception) {
                         throw BackupException(BackupError.CORRUPT_MEDIA, "Metadata AEAD verification failed for ${m.id}", e)
                     }
+
+                    // Verify optional thumbnail crypto (drop if corrupt)
+                    val stagedThumb = stagedThumbFiles[m.id]
+                    if (stagedThumb != null && stagedThumb.exists()) {
+                        if (!DerivativeCryptoVerifier.verifyThumbnailCiphertext(stagedThumb, thumbSubkey, m.id)) {
+                            stagedThumb.delete()
+                            stagedThumbFiles.remove(m.id)
+                            SafeLog.w("VaultBackupImporter", "Dropped corrupt restored thumbnail for ${m.id}")
+                        }
+                    }
+
+                    // Verify optional preview crypto (drop if corrupt)
+                    val stagedPreview = stagedPreviewFiles[m.id]
+                    if (stagedPreview != null && stagedPreview.exists()) {
+                        if (!DerivativeCryptoVerifier.verifyPreviewCiphertext(stagedPreview, thumbSubkey, m.id)) {
+                            stagedPreview.delete()
+                            stagedPreviewFiles.remove(m.id)
+                            SafeLog.w("VaultBackupImporter", "Dropped corrupt restored preview for ${m.id}")
+                        }
+                    }
                 }
             } finally {
                 mediaSubkey.fill(0)
                 metaSubkey.fill(0)
+                thumbSubkey.fill(0)
             }
 
-            // 6. Wrap master key with the user's NEW credential and recovery code
+            // 8. Wrap master key with the user's NEW credential and recovery code
             val normalizedRecovery = keyManager.normalizeRecoverySecret(recoveryCodeInput)
             val newPinEnvelope = keyManager.createPinEnvelope(masterKey, newCredential)
             val newRecoveryEnvelope = keyManager.createRecoveryEnvelope(masterKey, normalizedRecovery)
 
-            // 7. Commit to database and move files inside Room transaction
-            database.withTransaction {
-                // Insert restored Vault Entity
-                database.vaultDao().insert(
-                    VaultEntity(
-                        id = manifest.vaultId,
-                        kindCode = manifest.vaultKindCode,
-                        createdAt = manifest.createdAt,
-                        schemaVersion = manifest.schemaVersion,
-                        pinEnvelope = newPinEnvelope.serialize(),
-                        recoveryEnvelope = newRecoveryEnvelope.serialize(),
-                        biometricEnvelope = null,
-                        biometricIv = null,
-                        credentialTypeCode = newCredentialType
-                    )
-                )
-
-                // Insert Folders
-                for (f in manifest.folders) {
-                    database.folderDao().insert(
-                        FolderEntity(
-                            id = f.id,
-                            vaultId = manifest.vaultId,
-                            parentId = f.parentId,
-                            encryptedName = f.encryptedNameHex.decodeHex(),
-                            createdAt = f.createdAt,
-                            updatedAt = f.updatedAt,
-                            coverMediaId = null,
-                            sortOrder = f.sortOrder,
-                            directHidden = f.directHidden,
-                            effectiveHidden = f.effectiveHidden,
-                            lockId = f.lockId,
-                            effectiveProtected = f.effectiveProtected
-                        )
-                    )
-                }
-
-                // Insert Folder Locks: cross-device restore marks requiresCredentialReset = true, biometric = null
-                for (l in manifest.folderLocks) {
-                    database.folderLockDao().insert(
-                        FolderLockEntity(
-                            id = l.id,
-                            vaultId = manifest.vaultId,
-                            folderId = l.folderId,
-                            credentialTypeCode = l.credentialTypeCode,
-                            credentialEnvelope = l.credentialEnvelopeHex.decodeHex(),
+            // 9. Commit to database and move files inside Room transaction with crash reconciliation
+            try {
+                database.withTransaction {
+                    // Insert restored Vault Entity
+                    database.vaultDao().insert(
+                        VaultEntity(
+                            id = manifest.vaultId,
+                            kindCode = manifest.vaultKindCode,
+                            createdAt = manifest.createdAt,
+                            schemaVersion = manifest.schemaVersion,
+                            pinEnvelope = newPinEnvelope.serialize(),
+                            recoveryEnvelope = newRecoveryEnvelope.serialize(),
                             biometricEnvelope = null,
                             biometricIv = null,
-                            recoveryEnvelope = l.recoveryEnvelopeHex?.decodeHex(),
-                            createdAt = manifest.createdAt,
-                            updatedAt = manifest.createdAt,
-                            requiresCredentialReset = true
+                            credentialTypeCode = newCredentialType
                         )
                     )
-                }
 
-                // Insert Media Items and move verified staged files into permanent vault directory
-                for (m in manifest.mediaItems) {
-                    val mediaFile = fileStore.getMediaFile(manifest.vaultId, m.id)
-                    val stagedMedia = stagedMediaFiles[m.id]
-                    if (stagedMedia != null && stagedMedia.exists()) {
-                        mediaFile.parentFile?.mkdirs()
-                        if (mediaFile.exists()) mediaFile.delete()
-                        check(stagedMedia.renameTo(mediaFile)) { "Failed to commit media file ${m.id}" }
-                    }
-
-                    var thumbRelPath: String? = null
-                    val stagedThumb = stagedThumbFiles[m.id]
-                    if (stagedThumb != null && stagedThumb.exists()) {
-                        val thumbFile = fileStore.getThumbFile(manifest.vaultId, m.id)
-                        thumbFile.parentFile?.mkdirs()
-                        if (thumbFile.exists()) thumbFile.delete()
-                        if (stagedThumb.renameTo(thumbFile)) {
-                            thumbRelPath = thumbFile.name
-                        }
-                    }
-
-                    var previewRelPath: String? = null
-                    val stagedPreview = stagedPreviewFiles[m.id]
-                    if (stagedPreview != null && stagedPreview.exists()) {
-                        val previewFile = fileStore.getPreviewFile(manifest.vaultId, m.id)
-                        previewFile.parentFile?.mkdirs()
-                        if (previewFile.exists()) previewFile.delete()
-                        if (stagedPreview.renameTo(previewFile)) {
-                            previewRelPath = previewFile.name
-                        }
-                    }
-
-                    database.mediaItemDao().insert(
-                        MediaItemEntity(
-                            id = m.id,
-                            vaultId = manifest.vaultId,
-                            folderId = m.folderId,
-                            mediaTypeCode = m.mediaTypeCode,
-                            encryptedMetadata = m.encryptedMetadataHex.decodeHex(),
-                            encryptedFileRelativePath = mediaFile.name,
-                            encryptedThumbRelativePath = thumbRelPath,
-                            plaintextSize = m.plaintextSize,
-                            cipherSize = m.cipherSize,
-                            sha256Hex = m.sha256Hex,
-                            importedAt = m.importedAt,
-                            updatedAt = m.updatedAt,
-                            favorite = m.favorite,
-                            deletedAt = m.deletedAt,
-                            previousFolderId = m.previousFolderId,
-                            dateTakenMs = m.dateTakenMs,
-                            encryptedPreviewRelativePath = previewRelPath,
-                            cleanupStateCode = m.cleanupStateCode,
-                            concealed = m.concealed
+                    // Insert Folders
+                    for (f in manifest.folders) {
+                        database.folderDao().insert(
+                            FolderEntity(
+                                id = f.id,
+                                vaultId = manifest.vaultId,
+                                parentId = f.parentId,
+                                encryptedName = f.encryptedNameHex.decodeHex(),
+                                createdAt = f.createdAt,
+                                updatedAt = f.updatedAt,
+                                coverMediaId = null,
+                                sortOrder = f.sortOrder,
+                                directHidden = f.directHidden,
+                                effectiveHidden = f.effectiveHidden,
+                                lockId = f.lockId,
+                                effectiveProtected = f.effectiveProtected
+                            )
                         )
-                    )
-                }
+                    }
 
-                // Recompute privacy and concealment
-                privacyCoordinator.recomputeInsideTransaction(manifest.vaultId)
+                    // Insert Folder Locks: cross-device restore marks requiresCredentialReset = true, biometric = null
+                    for (l in manifest.folderLocks) {
+                        database.folderLockDao().insert(
+                            FolderLockEntity(
+                                id = l.id,
+                                vaultId = manifest.vaultId,
+                                folderId = l.folderId,
+                                credentialTypeCode = l.credentialTypeCode,
+                                credentialEnvelope = l.credentialEnvelopeHex.decodeHex(),
+                                biometricEnvelope = null,
+                                biometricIv = null,
+                                recoveryEnvelope = l.recoveryEnvelopeHex?.decodeHex(),
+                                createdAt = manifest.createdAt,
+                                updatedAt = manifest.createdAt,
+                                requiresCredentialReset = true
+                            )
+                        )
+                    }
+
+                    // Insert Media Items and move verified staged files into permanent vault directory
+                    for (m in manifest.mediaItems) {
+                        val mediaFile = fileStore.getMediaFile(manifest.vaultId, m.id)
+                        val stagedMedia = stagedMediaFiles[m.id]
+                        if (stagedMedia != null && stagedMedia.exists()) {
+                            mediaFile.parentFile?.mkdirs()
+                            if (mediaFile.exists()) mediaFile.delete()
+                            check(stagedMedia.renameTo(mediaFile)) { "Failed to commit media file ${m.id}" }
+                        }
+
+                        var thumbRelPath: String? = null
+                        val stagedThumb = stagedThumbFiles[m.id]
+                        if (stagedThumb != null && stagedThumb.exists()) {
+                            val thumbFile = fileStore.getThumbFile(manifest.vaultId, m.id)
+                            thumbFile.parentFile?.mkdirs()
+                            if (thumbFile.exists()) thumbFile.delete()
+                            if (stagedThumb.renameTo(thumbFile)) {
+                                thumbRelPath = thumbFile.name
+                            }
+                        }
+
+                        var previewRelPath: String? = null
+                        val stagedPreview = stagedPreviewFiles[m.id]
+                        if (stagedPreview != null && stagedPreview.exists()) {
+                            val previewFile = fileStore.getPreviewFile(manifest.vaultId, m.id)
+                            previewFile.parentFile?.mkdirs()
+                            if (previewFile.exists()) previewFile.delete()
+                            if (stagedPreview.renameTo(previewFile)) {
+                                previewRelPath = previewFile.name
+                            }
+                        }
+
+                        // Normalize previousFolderId safely if folder was deleted or missing
+                        val safePreviousFolderId = if (m.previousFolderId != null && validated.folderById.containsKey(m.previousFolderId)) {
+                            m.previousFolderId
+                        } else null
+
+                        database.mediaItemDao().insert(
+                            MediaItemEntity(
+                                id = m.id,
+                                vaultId = manifest.vaultId,
+                                folderId = m.folderId,
+                                mediaTypeCode = m.mediaTypeCode,
+                                encryptedMetadata = m.encryptedMetadataHex.decodeHex(),
+                                encryptedFileRelativePath = mediaFile.name,
+                                encryptedThumbRelativePath = thumbRelPath,
+                                plaintextSize = m.plaintextSize,
+                                cipherSize = m.cipherSize,
+                                sha256Hex = m.sha256Hex,
+                                importedAt = m.importedAt,
+                                updatedAt = m.updatedAt,
+                                favorite = m.favorite,
+                                deletedAt = m.deletedAt,
+                                previousFolderId = safePreviousFolderId,
+                                dateTakenMs = m.dateTakenMs,
+                                encryptedPreviewRelativePath = previewRelPath,
+                                cleanupStateCode = m.cleanupStateCode,
+                                concealed = m.concealed
+                            )
+                        )
+                    }
+
+                    // Recompute privacy and concealment
+                    privacyCoordinator.recomputeInsideTransaction(manifest.vaultId)
+                }
+            } catch (e: Exception) {
+                // Synchronous DB transaction rollback cleanup: delete any permanent files created for this uncommitted vault
+                runCatching {
+                    fileStore.getVaultDir(manifest.vaultId).deleteRecursively()
+                }
+                throw e
             }
 
-            // 8. Post-restore security cleanup: lock session, clear folder grants and caches
+            // 10. Post-restore security cleanup: lock session, clear folder grants and caches
             sessionManager?.lock(LockReason.Explicit)
             accessManager?.clear()
             fileStore.clearEphemeralPlaintextCaches()
@@ -410,51 +488,6 @@ class VaultBackupImporter(
             masterKey.fill(0)
             newCredential.fill('\u0000')
             stagingDir.deleteRecursively()
-        }
-    }
-
-    private fun validateManifestStructure(manifest: BackupManifest) {
-        val folderIds = HashSet<String>()
-        val lockIds = HashSet<String>()
-        val mediaIds = HashSet<String>()
-
-        for (f in manifest.folders) {
-            require(f.id.isNotBlank()) { "Empty folder ID in manifest" }
-            require(folderIds.add(f.id)) { "Duplicate folder ID: ${f.id}" }
-            if (f.parentId != null) {
-                require(f.parentId != f.id) { "Folder cannot be its own parent: ${f.id}" }
-            }
-        }
-
-        // Check for folder cycles and depth
-        for (f in manifest.folders) {
-            var curr = f.parentId
-            var depth = 0
-            while (curr != null) {
-                require(depth < 20) { "Folder hierarchy too deep or cycle detected at ${f.id}" }
-                require(curr != f.id) { "Folder cycle detected at ${f.id}" }
-                val parent = manifest.folders.find { it.id == curr }
-                require(parent != null) { "Missing parent folder $curr for ${f.id}" }
-                curr = parent.parentId
-                depth++
-            }
-        }
-
-        for (l in manifest.folderLocks) {
-            require(l.id.isNotBlank()) { "Empty lock ID in manifest" }
-            require(lockIds.add(l.id)) { "Duplicate lock ID: ${l.id}" }
-            require(folderIds.contains(l.folderId)) { "Folder lock references non-existent folder: ${l.folderId}" }
-        }
-
-        for (m in manifest.mediaItems) {
-            require(m.id.isNotBlank()) { "Empty media ID in manifest" }
-            require(mediaIds.add(m.id)) { "Duplicate media ID: ${m.id}" }
-            if (m.folderId != null) {
-                require(folderIds.contains(m.folderId)) { "Media references non-existent folder: ${m.folderId}" }
-            }
-            require(m.plaintextSize >= 0) { "Negative plaintextSize for ${m.id}" }
-            require(m.cipherSize >= 0) { "Negative cipherSize for ${m.id}" }
-            require(m.sha256Hex.length == 64) { "Invalid SHA256 hex length for ${m.id}" }
         }
     }
 }

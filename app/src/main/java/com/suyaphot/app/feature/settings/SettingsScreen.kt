@@ -92,6 +92,7 @@ fun SettingsScreen(
     if (showBackupRestore) {
         BackupRestoreScreen(
             container = container,
+            mode = BackupRestoreMode.UNLOCKED_VAULT,
             onBack = { showBackupRestore = false }
         )
         return

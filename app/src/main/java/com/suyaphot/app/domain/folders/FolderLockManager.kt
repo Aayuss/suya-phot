@@ -17,6 +17,7 @@ import java.security.SecureRandom
 import java.security.MessageDigest
 import java.util.UUID
 import javax.crypto.Cipher
+import com.suyaphot.app.domain.backup.FolderLockCryptoFormat
 
 class FolderLockManager(
     private val database: SuyaDatabase,
@@ -81,7 +82,7 @@ class FolderLockManager(
         }) { "Invalid folder credential" }
     }
 
-    private fun recoveryAad(lockId: String) = "folder-recovery:$lockId:v1".toByteArray(Charsets.UTF_8)
+    private fun recoveryAad(lockId: String) = FolderLockCryptoFormat.recoveryAad(lockId)
 
     private fun recoveryEnvelope(lockId: String, token: ByteArray): ByteArray? {
         val session = sessionManager.sessionState.value as? VaultSession.Unlocked ?: return null

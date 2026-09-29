@@ -218,7 +218,8 @@ data class VaultJobEntity(
     val progressTotal: Long,
     val createdAt: Long,
     val updatedAt: Long,
-    val errorCode: String?
+    val errorCode: String?,
+    val sourceDispositionCode: Int? = null
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

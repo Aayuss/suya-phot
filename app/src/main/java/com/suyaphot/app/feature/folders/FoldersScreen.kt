@@ -80,6 +80,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.suyaphot.app.app.AppContainer
+import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.model.Folder
 import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
@@ -326,17 +327,43 @@ fun FoldersScreen(
             val missing = container.folderAccessManager.missingLockIds(vaultId, folderId)
                 ?: run { pendingFolderId = null; return@launch }
             if (missing.isNotEmpty()) {
-                val lock = container.database.folderLockDao().getForVault(vaultId, missing.first())
+                val missingLockId = missing.first()
+                val lock = container.database.folderLockDao().getForVault(vaultId, missingLockId)
                 if (lock?.requiresCredentialReset == true) {
-                    val folder = folders.find { it.id == folderId }
-                    if (folder != null) {
-                        openLockEdit(folder, recovery = true)
-                    }
+                    val owningFolder = container.database.folderDao().getFolderForVault(lock.folderId, vaultId)
+                    val unlocked = session as? VaultSession.Unlocked
+                    val owningFolderName = if (owningFolder != null && unlocked != null) {
+                        try {
+                            val bytes = Aead.decryptWithPrependedNonce(
+                                unlocked.metaSubkey,
+                                owningFolder.encryptedName,
+                                owningFolder.id.toByteArray(Charsets.UTF_8)
+                            )
+                            try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0.toByte()) }
+                        } catch (_: Exception) {
+                            "Protected folder"
+                        }
+                    } else "Protected folder"
+
+                    editLockFolderId = lock.folderId
+                    editLockFolderName = owningFolderName
+                    editLockRecovery = true
+                    editLockCurrentType = lock.credentialTypeCode
+                    editLockTargetType = lock.credentialTypeCode
+                    editLockCurrentPin = ""
+                    editLockCurrentPattern?.fill('\u0000')
+                    editLockCurrentPattern = null
+                    editLockNewPin = ""
+                    editLockConfirmPin = ""
+                    editLockFirstPattern = null
+                    editLockRecoveryCode = ""
+                    editLockError = null
+                    selectedFolderForAction = null
+
                     folderActionStatus = "This protected folder was restored from another device. Set a new PIN or Pattern using your Recovery Kit."
-                    pendingFolderId = null
                     return@launch
                 }
-                pendingLockId = missing.first()
+                pendingLockId = missingLockId
                 gateTypeCode = lock?.credentialTypeCode ?: 0
                 pendingLockBioIv = lock?.biometricIv?.takeIf { lock.biometricEnvelope != null }
                 gateInput = ""
@@ -401,6 +428,10 @@ fun FoldersScreen(
                 editLockFirstPattern = null
                 editLockRecoveryCode = ""
                 folderActionStatus = "Folder lock updated"
+                val nextFolder = pendingFolderId
+                if (nextFolder != null) {
+                    attemptOpenFolder(nextFolder)
+                }
             } else {
                 editLockError = if (editLockRecovery) "Recovery failed or unavailable for this folder" else "Current credential was incorrect"
                 editLockErrorTrigger++
@@ -1202,6 +1233,7 @@ fun FoldersScreen(
                 editLockConfirmPin = ""
                 editLockFirstPattern = null
                 editLockRecoveryCode = ""
+                pendingFolderId = null
             },
             title = if (editLockRecovery) "Recover $editLockFolderName" else "Change lock for $editLockFolderName",
             confirmText = if (editLockTargetType == 0) "Save new PIN" else null,

@@ -163,7 +163,12 @@ class ImportRecoveryManager(
                         id = job.id,
                         stateCode = JobState.COMPLETED.code,
                         now = now,
-                        errorCode = com.suyaphot.app.core.model.SourceDisposition.RETAINED_AFTER_INTERRUPTION.name
+                        errorCode = null
+                    )
+                    database.vaultJobDao().updateSourceDisposition(
+                        id = job.id,
+                        code = com.suyaphot.app.core.model.SourceDisposition.RETAINED_AFTER_INTERRUPTION.code,
+                        now = now
                     )
                 }
             }

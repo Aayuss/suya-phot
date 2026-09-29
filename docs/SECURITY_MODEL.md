@@ -31,7 +31,7 @@ Using domain separation info strings:
 1. User enters numeric PIN (minimum 4 digits, recommended 6+).
 2. Generate 16-byte random salt.
 3. PBKDF2-HMAC-SHA256 with a fixed, envelope-recorded work factor derives an intermediate key.
-4. Intermediate key is combined with an Android Keystore HMAC pepper (hardware-backed key alias `suya_phot_pepper_key`).
+4. Intermediate key is combined with an Android Keystore HMAC pepper (key alias `suya_phot_hmac_pepper_v1`).
 5. Resulting KEK wraps the `VaultMasterKey` using AES-256-GCM.
 6. Stored envelope: `{version, salt, iterations, nonce, wrappedMasterKey}` (Version 1).
 7. Verification: Successful GCM tag authentication indicates correct PIN without storing any plaintext hash or password equivalent.

@@ -5,6 +5,7 @@ import com.suyaphot.app.core.crypto.HkdfSha256
 import com.suyaphot.app.core.crypto.KeyManager
 import com.suyaphot.app.crypto.FakePepperProvider
 import com.suyaphot.app.domain.backup.BackupArchiveFormat
+import com.suyaphot.app.domain.backup.BackupFileDescriptor
 import com.suyaphot.app.domain.backup.BackupFolderEntry
 import com.suyaphot.app.domain.backup.BackupFolderLockEntry
 import com.suyaphot.app.domain.backup.BackupManifest
@@ -137,7 +138,7 @@ class BackupRoundTripTest {
         )
         val manifest = BackupManifest(
             archiveId = "arch-123",
-            version = 1,
+            version = BackupArchiveFormat.CURRENT_VERSION,
             createdAt = 1700000000000L,
             schemaVersion = 4,
             vaultId = "vault_abc",
@@ -149,7 +150,7 @@ class BackupRoundTripTest {
                     id = "item_1",
                     folderId = null,
                     mediaTypeCode = 0,
-                    encryptedMetadataHex = "aa",
+                    encryptedMetadataHex = "00".repeat(32),
                     plaintextSize = 2048L,
                     cipherSize = 2076L,
                     sha256Hex = "00".repeat(32),
@@ -163,6 +164,14 @@ class BackupRoundTripTest {
                     concealed = false,
                     hasThumb = false,
                     hasPreview = false
+                )
+            ),
+            descriptors = listOf(
+                BackupFileDescriptor(
+                    typeCode = BackupArchiveFormat.ENTRY_TYPE_MEDIA,
+                    itemId = "item_1",
+                    cipherLength = 2076L,
+                    cipherSha256Hex = "00".repeat(32)
                 )
             )
         )

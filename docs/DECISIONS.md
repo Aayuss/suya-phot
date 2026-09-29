@@ -18,7 +18,7 @@
 
 ## ADR 005: Decoy Vault Isolation
 - **Decision**: Real and decoy vaults have independent 256-bit master keys, separate envelopes, and distinct directory shards.
-- **Rationale**: Coercion protection with zero leakage; secondary UI looks and feels identical to a genuine fresh vault.
+- **Rationale**: The secondary vault is designed not to reveal the primary vault through normal in-app UI. It is not a guarantee against forensic analysis, OS-level observation, device compromise, backup-size analysis, or other privileged inspection.
 
 ## ADR 006: Shizuku as an Optional Enhancement
 - **Decision**: Implement standard Android MediaStore APIs by default (`createDeleteRequest`); provide Shizuku support strictly as an optional toggle in advanced settings.

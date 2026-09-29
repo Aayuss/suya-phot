@@ -44,6 +44,10 @@ class SuyaApp : Application() {
         applicationScope.launch {
             try {
                 container.vaultFileStore.clearEphemeralPlaintextCaches()
+                container.vaultFileStore.clearStaleBackupRestoreStaging()
+                val vaults = container.database.vaultDao().getAllVaults()
+                val activeVaultIds = vaults.map { it.id }.toSet()
+                container.vaultFileStore.clearOrphanVaultDirs(activeVaultIds)
             } catch (e: Exception) {
                 SafeLog.w("SuyaApp", "Initial cleanup error", e)
             }

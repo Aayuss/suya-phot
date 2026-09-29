@@ -43,7 +43,7 @@ Optimized for the **Samsung Galaxy S23 Ultra** and modern Android devices (API 2
 
 5. **Performance & Memory Controls**:
    - Zero background services, polling loops, or persistent wake locks. Session timeout is evaluated passively using `ProcessLifecycleObserver` and monotonic `SystemClock.elapsedRealtime()`.
-   - Continuous keyset pagination (`fetchNextViewerBatch` / `fetchPreviousViewerBatch`) ensures smooth scrolling across 50k+ media items without JVM heap exhaustion or viewer boundary limits.
+   - Continuous keyset pagination (`fetchNextViewerBatch` / `fetchPreviousViewerBatch`) with deterministic total ordering ensures smooth scrolling across large media collections without JVM heap exhaustion or viewer boundary limits.
    - Large camera images are decoded with a two-pass bounds inspection (`inJustDecodeBounds`) and sampled toward a 2560px maximum dimension using `RGB_565`.
    - Video playback decrypts into an ephemeral `playback_cache` directory, immediately released and deleted upon screen exit or vault lock.
    - Encrypted, downsampled 360px thumbnails for gallery grids.

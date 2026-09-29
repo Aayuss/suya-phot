@@ -63,13 +63,17 @@ enum class ImportMode(val code: Int) {
     }
 }
 
-enum class SourceDisposition {
-    NOT_APPLICABLE,
-    PENDING_DELETE,
-    DELETED,
-    RETAINED_BY_USER,
-    RETAINED_AFTER_INTERRUPTION,
-    DELETE_FAILED
+enum class SourceDisposition(val code: Int) {
+    NOT_APPLICABLE(0),
+    PENDING_DELETE(1),
+    DELETED(2),
+    RETAINED_BY_USER(3),
+    RETAINED_AFTER_INTERRUPTION(4),
+    DELETE_FAILED(5);
+
+    companion object {
+        fun fromCode(code: Int?): SourceDisposition? = entries.firstOrNull { it.code == code }
+    }
 }
 
 data class PrivateMediaMetadata(
