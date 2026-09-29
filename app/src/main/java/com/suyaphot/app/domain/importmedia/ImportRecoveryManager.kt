@@ -1,8 +1,11 @@
 package com.suyaphot.app.domain.importmedia
 
 import com.suyaphot.app.core.crypto.Aead
+import com.suyaphot.app.core.crypto.VaultCrypto
 import com.suyaphot.app.core.database.SuyaDatabase
+import com.suyaphot.app.core.database.entity.MediaItemEntity
 import com.suyaphot.app.core.database.entity.VaultJobEntity
+import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.JobType
 import com.suyaphot.app.core.model.ImportMode
@@ -11,17 +14,20 @@ import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.VaultSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import androidx.room.withTransaction
 
 /**
  * Reconciles non-terminal import jobs and orphaned files upon startup and unlock.
  */
 class ImportRecoveryManager(
     private val database: SuyaDatabase,
-    private val fileStore: VaultFileStore
+    private val fileStore: VaultFileStore,
+    private val vaultCrypto: VaultCrypto
 ) {
 
     suspend fun reconcileActiveJobs(session: VaultSession.Unlocked) = withContext(Dispatchers.IO) {
         val metaKey = session.metaSubkey.copyOf()
+        val mediaKey = session.mediaSubkey.copyOf()
         try {
         val activeJobs = database.vaultJobDao().getActiveJobsForType(JobType.IMPORT.code)
         val now = System.currentTimeMillis()
@@ -59,6 +65,50 @@ class ImportRecoveryManager(
                                 stateCode = recoveredState.code,
                                 now = now
                             )
+                        } else if (payload.stagedMedia != null && finalFile.exists()) {
+                            val staged = payload.stagedMedia
+                            val target = payload.targetFolderId?.let { database.folderDao().getFolderForVault(it, session.vaultId) }
+                            val targetValid = payload.targetFolderId == null || target != null
+                            val stagedValid = runCatching {
+                                require(targetValid && !(payload.targetFolderId == null && staged.concealed))
+                                require(staged.sha256Hex.matches(Regex("[0-9a-fA-F]{64}")))
+                                val metadata = Aead.decryptWithPrependedNonce(metaKey, staged.encryptedMetadata, payload.itemId.toByteArray())
+                                try { PrivateMediaMetadata.deserialize(metadata) } finally { metadata.fill(0) }
+                                val verified = vaultCrypto.verifyAndHash(finalFile, mediaKey, payload.itemId)
+                                val hash = verified.sha256.joinToString("") { "%02x".format(it) }
+                                require(hash.equals(staged.sha256Hex, ignoreCase = true) && verified.plaintextSize == staged.plaintextSize)
+                                true
+                            }.getOrDefault(false)
+                            if (stagedValid) {
+                                val recoveredState = if (payload.mode == ImportMode.COPY) JobState.COMPLETED else JobState.AWAITING_SOURCE_DELETE
+                                database.withTransaction {
+                                    val currentTarget = payload.targetFolderId?.let {
+                                        database.folderDao().getFolderForVault(it, session.vaultId)
+                                    }
+                                    check(payload.targetFolderId == null || currentTarget != null) {
+                                        "Recovery target folder no longer available"
+                                    }
+                                    database.mediaItemDao().insert(
+                                        MediaItemEntity(
+                                            id = payload.itemId, vaultId = session.vaultId,
+                                            folderId = payload.targetFolderId, mediaTypeCode = staged.mediaTypeCode,
+                                            encryptedMetadata = staged.encryptedMetadata,
+                                            encryptedFileRelativePath = finalFile.name,
+                                            encryptedThumbRelativePath = staged.thumbnailFileName?.takeIf {
+                                                it == fileStore.getThumbFile(session.vaultId, payload.itemId).name && fileStore.getThumbFile(session.vaultId, payload.itemId).exists()
+                                            },
+                                            plaintextSize = staged.plaintextSize, cipherSize = finalFile.length(),
+                                            sha256Hex = staged.sha256Hex, importedAt = staged.importedAt,
+                                            updatedAt = now, favorite = false, deletedAt = null,
+                                            previousFolderId = null, dateTakenMs = staged.dateTakenMs,
+                                            concealed = currentTarget?.let { it.effectiveHidden || it.effectiveProtected } ?: false
+                                        )
+                                    )
+                                    database.vaultJobDao().updateState(job.id, recoveredState.code, now)
+                                }
+                            } else {
+                                database.vaultJobDao().updateState(job.id, JobState.VERIFYING.code, now, "STAGED_REVERIFY_FAILED")
+                            }
                         } else {
                             val partialFile = fileStore.getPartialFile(session.vaultId, job.id)
                             // Without the encrypted metadata row there is no safe way to finalize
@@ -100,6 +150,7 @@ class ImportRecoveryManager(
         }
         } finally {
             metaKey.fill(0)
+            mediaKey.fill(0)
         }
     }
 

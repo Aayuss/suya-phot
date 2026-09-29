@@ -20,6 +20,7 @@ import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.SessionManager
 import com.suyaphot.app.domain.auth.VaultSession
+import com.suyaphot.app.domain.folders.FolderAccessManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
@@ -48,7 +49,8 @@ class RestoreCoordinator(
     private val mediaItemDao: MediaItemDao,
     private val vaultCrypto: VaultCrypto,
     private val fileStore: VaultFileStore,
-    private val conflictResolver: ConflictResolver
+    private val conflictResolver: ConflictResolver,
+    private val folderAccessManager: FolderAccessManager? = null
 ) {
 
     private fun bytesToHex(bytes: ByteArray): String =
@@ -88,6 +90,9 @@ class RestoreCoordinator(
         // Section 19: Verify item belongs to current vault session
         val item = mediaItemDao.getItemForVault(itemId, session.vaultId)
             ?: return@withContext RestoreResult.Failure(itemId, "Item not found in vault", vaultCopyIntact = false)
+        if (item.concealed && (item.folderId == null || folderAccessManager?.canOpen(session.vaultId, item.folderId) != true)) {
+            return@withContext RestoreResult.Failure(itemId, "PROTECTED_FOLDER_AUTH_REQUIRED", vaultCopyIntact = true)
+        }
 
         val vaultFile = fileStore.getMediaFile(session.vaultId, itemId)
         if (!vaultFile.exists()) {
@@ -113,15 +118,19 @@ class RestoreCoordinator(
                 decryptedBytes.fill(0)
             }
         } catch (e: Exception) {
-            return@withContext RestoreResult.Failure(itemId, "Failed decrypting metadata: ${e.message}", vaultCopyIntact = true)
+            return@withContext RestoreResult.Failure(itemId, "METADATA_UNAVAILABLE", vaultCopyIntact = true)
         }
 
         val isVideo = item.mediaTypeCode == MediaType.VIDEO.code
-        val collectionUri = if (isVideo) {
-            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        }
+        val availableVolumes = if (Build.VERSION.SDK_INT >= 29) {
+            runCatching { MediaStore.getExternalVolumeNames(context) }.getOrDefault(emptySet())
+        } else emptySet()
+        val targetVolume = metadata.sourceVolume?.takeIf { it in availableVolumes }
+            ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
+        fun collectionFor(volume: String): Uri = if (isVideo) {
+            MediaStore.Video.Media.getContentUri(volume)
+        } else MediaStore.Images.Media.getContentUri(volume)
+        var collectionUri = collectionFor(targetVolume)
 
         val defaultFolder = if (isVideo) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
         val fallbackPath = "$defaultFolder/Suya Phot Restored/"
@@ -152,12 +161,19 @@ class RestoreCoordinator(
         }
 
         val resolver = context.contentResolver
-        val insertedUri = try {
+        var insertedUri = try {
             resolver.insert(collectionUri, values)
         } catch (e: Exception) {
             SafeLog.e("RestoreCoordinator", "Failed inserting MediaStore row", e)
             null
-        } ?: return@withContext RestoreResult.Failure(itemId, "Could not insert MediaStore pending record", vaultCopyIntact = true)
+        }
+        if (insertedUri == null && targetVolume != MediaStore.VOLUME_EXTERNAL_PRIMARY) {
+            collectionUri = collectionFor(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val fallbackName = conflictResolver.resolveName(restoredDisplayName, restoreRelPath, collectionUri)
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, fallbackName)
+            insertedUri = runCatching { resolver.insert(collectionUri, values) }.getOrNull()
+        }
+        insertedUri ?: return@withContext RestoreResult.Failure(itemId, "Could not insert MediaStore pending record", vaultCopyIntact = true)
 
         val destinationBytes = insertedUri.toString().toByteArray(Charsets.UTF_8)
         val encryptedDestination = try {

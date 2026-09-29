@@ -1,5 +1,7 @@
 package com.suyaphot.app.feature.viewer
 
+import android.content.Intent
+import android.content.ClipData
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
@@ -27,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.outlined.Delete
@@ -55,9 +58,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -78,6 +81,9 @@ import com.suyaphot.app.ui.components.SuyaIconButton
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -102,11 +108,18 @@ fun MediaViewerScreen(
     var metadata by remember { mutableStateOf<PrivateMediaMetadata?>(null) }
     var fullBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+    var loadProgress by remember { mutableStateOf<Pair<Long, Long>?>(null) }
+    var loadError by remember { mutableStateOf<String?>(null) }
 
     var isChromeVisible by remember { mutableStateOf(true) }
     var showDetailsSheet by remember { mutableStateOf(false) }
     var showRestoreDialog by remember { mutableStateOf(false) }
     var showTrashDialog by remember { mutableStateOf(false) }
+    var restoreError by remember { mutableStateOf<String?>(null) }
+    val trashRetentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
+    var shareJob by remember { mutableStateOf<Job?>(null) }
+    var shareProgress by remember { mutableStateOf<Pair<Long, Long>?>(null) }
+    var shareError by remember { mutableStateOf<String?>(null) }
 
     // Video temporary playback file
     var tempPlaybackFile by remember { mutableStateOf<File?>(null) }
@@ -118,13 +131,20 @@ fun MediaViewerScreen(
 
     // Load media data and decrypt on demand
     LaunchedEffect(itemId, session?.vaultId) {
-        val load = withContext(Dispatchers.IO) {
-            val activeSession = session ?: return@withContext ViewerLoad()
-            val entity = container.database.mediaItemDao().getItemForVault(itemId, activeSession.vaultId)
+        isLoading = true
+        loadError = null
+        val load = runCatching { withContext(Dispatchers.IO) {
+            val lease = container.sessionManager.acquireOperationKeyLease() ?: return@withContext ViewerLoad()
+            try {
+            val entity = container.database.mediaItemDao().getItemForVault(itemId, lease.vaultId)
                 ?: return@withContext ViewerLoad()
+            if (entity.deletedAt != null || (entity.concealed &&
+                    (entity.folderId == null || !container.folderAccessManager.canOpen(lease.vaultId, entity.folderId)))) {
+                return@withContext ViewerLoad()
+            }
             val decodedMetadata = runCatching {
                 val bytes = Aead.decryptWithPrependedNonce(
-                    activeSession.metaSubkey,
+                    lease.metaSubkey,
                     entity.encryptedMetadata,
                     itemId.toByteArray(Charsets.UTF_8)
                 )
@@ -135,15 +155,25 @@ fun MediaViewerScreen(
                 }
             }.getOrNull()
 
-            val vaultFile = container.vaultFileStore.getMediaFile(activeSession.vaultId, itemId)
+            val vaultFile = container.vaultFileStore.getMediaFile(lease.vaultId, itemId)
             if (entity.mediaTypeCode == MediaType.IMAGE.code) {
                 val extension = decodedMetadata?.originalFileExtension ?: "img"
                 val verified = container.vaultFileStore.createViewerTempFile(itemId, extension)
                 try {
+                    check((verified.parentFile?.usableSpace ?: 0L) >= entity.plaintextSize + 16L * 1024 * 1024)
+                    val coroutine = currentCoroutineContext()
                     val verification = container.vaultCrypto.decryptVerifiedToFile(
-                        vaultFile, activeSession.mediaSubkey, itemId, verified
-                    )
+                        vaultFile, lease.mediaSubkey, itemId, verified
+                    ) { current, total ->
+                        coroutine.ensureActive()
+                        scope.launch { loadProgress = current to total }
+                    }
+                    check(verification.plaintextSize == entity.plaintextSize)
                     check(verification.sha256.toHex().equals(entity.sha256Hex, ignoreCase = true))
+                    coroutine.ensureActive()
+                    check(container.sessionManager.currentVaultId == lease.vaultId)
+                    check(!entity.concealed || (entity.folderId != null &&
+                        container.folderAccessManager.canOpen(lease.vaultId, entity.folderId)))
                     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     BitmapFactory.decodeFile(verified.absolutePath, bounds)
                     val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
@@ -167,27 +197,44 @@ fun MediaViewerScreen(
                     decodedMetadata?.originalFileExtension ?: "mp4"
                 )
                 try {
+                    check((temp.parentFile?.usableSpace ?: 0L) >= entity.plaintextSize + 16L * 1024 * 1024)
+                    val coroutine = currentCoroutineContext()
                     val verification = container.vaultCrypto.decryptVerifiedToFile(
-                        vaultFile, activeSession.mediaSubkey, itemId, temp
-                    )
+                        vaultFile, lease.mediaSubkey, itemId, temp
+                    ) { current, total ->
+                        coroutine.ensureActive()
+                        scope.launch { loadProgress = current to total }
+                    }
+                    check(verification.plaintextSize == entity.plaintextSize)
                     check(verification.sha256.toHex().equals(entity.sha256Hex, ignoreCase = true))
+                    coroutine.ensureActive()
+                    check(container.sessionManager.currentVaultId == lease.vaultId)
+                    check(!entity.concealed || (entity.folderId != null &&
+                        container.folderAccessManager.canOpen(lease.vaultId, entity.folderId)))
                     ViewerLoad(entity, decodedMetadata, playbackFile = temp)
                 } catch (t: Throwable) {
                     temp.delete()
                     throw t
                 }
             }
+            } finally { lease.close() }
+        } }.getOrElse {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            loadError = "Could not open a verified preview. The vault copy remains unchanged."
+            ViewerLoad()
         }
         mediaEntity = load.entity
         metadata = load.metadata
         fullBitmap = load.bitmap
         tempPlaybackFile = load.playbackFile
+        loadProgress = null
         isLoading = false
     }
 
     // Release temporary playback file and ExoPlayer upon exit or lock
     DisposableEffect(Unit) {
         onDispose {
+            shareJob?.cancel()
             exoPlayer?.release()
             exoPlayer = null
             tempPlaybackFile?.delete()
@@ -200,11 +247,16 @@ fun MediaViewerScreen(
             .background(Color.Black)
     ) {
         if (isLoading) {
-            CircularProgressIndicator(
-                color = SuyaColors.Accent,
-                modifier = Modifier.align(Alignment.Center)
-            )
+            Column(modifier = Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(color = SuyaColors.Accent)
+                val progress = loadProgress
+                if (progress != null && progress.second > 0) {
+                    Text("Verifying ${(progress.first * 100 / progress.second).coerceIn(0, 100)}%", color = SuyaColors.White)
+                }
+                Text("Cancel", color = SuyaColors.Accent, modifier = Modifier.clickable(onClick = onBack))
+            }
         } else {
+            loadError?.let { Text(it, color = SuyaColors.Negative, modifier = Modifier.align(Alignment.Center)) }
             val entity = mediaEntity
             if (entity != null) {
                 if (entity.mediaTypeCode == MediaType.IMAGE.code && fullBitmap != null) {
@@ -373,6 +425,38 @@ fun MediaViewerScreen(
                         onClick = { showRestoreDialog = true }
                     )
                     SuyaIconButton(
+                        icon = Icons.Default.Share,
+                        contentDescription = "Share securely",
+                        onClick = {
+                            if (shareJob != null) return@SuyaIconButton
+                            shareError = null
+                            shareProgress = 0L to (mediaEntity?.plaintextSize ?: 0L)
+                            shareJob = scope.launch {
+                                try {
+                                    val prepared = container.shareCoordinator.prepare(itemId) { current, total ->
+                                        scope.launch { shareProgress = current to total }
+                                    }
+                                    if (prepared == null) {
+                                        shareError = "Could not prepare a verified share copy"
+                                    } else {
+                                        val send = Intent(Intent.ACTION_SEND).apply {
+                                            type = prepared.mimeType
+                                            putExtra(Intent.EXTRA_STREAM, prepared.uri)
+                                            clipData = ClipData.newUri(context.contentResolver, "Suya Phot media", prepared.uri)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(Intent.createChooser(send, "Share media"))
+                                    }
+                                } catch (_: Exception) {
+                                    shareError = "Sharing was cancelled or unavailable"
+                                } finally {
+                                    shareJob = null
+                                    shareProgress = null
+                                }
+                            }
+                        }
+                    )
+                    SuyaIconButton(
                         icon = Icons.Outlined.Delete,
                         contentDescription = "Trash",
                         onClick = { showTrashDialog = true }
@@ -380,12 +464,37 @@ fun MediaViewerScreen(
                 }
             }
         }
+        if (shareJob != null) {
+            Surface(
+                color = SuyaColors.Surface.copy(alpha = 0.95f),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.align(Alignment.Center).padding(24.dp)
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(20.dp)) {
+                    CircularProgressIndicator(color = SuyaColors.Accent)
+                    val progress = shareProgress
+                    Text(
+                        if (progress != null && progress.second > 0) "Preparing share ${(progress.first * 100 / progress.second).coerceIn(0, 100)}%"
+                        else "Preparing verified share copy...",
+                        color = SuyaColors.White,
+                        fontSize = 13.sp
+                    )
+                    Text("Cancel", color = SuyaColors.Accent, modifier = Modifier.clickable { shareJob?.cancel() })
+                }
+            }
+        }
+        shareError?.let { error ->
+            Text(error, color = SuyaColors.Negative, modifier = Modifier.align(Alignment.TopCenter).padding(top = 90.dp))
+        }
+        restoreError?.let { error ->
+            Text(error, color = SuyaColors.Negative, modifier = Modifier.align(Alignment.TopCenter).padding(top = 120.dp))
+        }
     }
 
     // Details Bottom Sheet
     if (showDetailsSheet && metadata != null) {
         val meta = metadata!!
-        val clipboard = LocalClipboardManager.current
+        val clipboard = LocalClipboard.current
         val dateFormat = SimpleDateFormat("MMM dd, yyyy  h:mm a", Locale.getDefault())
 
         ModalBottomSheet(
@@ -437,7 +546,7 @@ fun MediaViewerScreen(
                             fontSize = 13.sp,
                             color = SuyaColors.Accent,
                             modifier = Modifier.clickable {
-                                clipboard.setText(AnnotatedString(hash))
+                                scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("SHA-256", hash))) }
                             }
                         )
                     }
@@ -454,7 +563,9 @@ fun MediaViewerScreen(
             title = "Move to Original Gallery?",
             content = {
                 Text(
-                    text = "This item will be decrypted, verified, and placed back in your public Samsung Gallery.",
+                    text = if (mediaEntity?.concealed == true)
+                        "This protected item will be decrypted and moved to the public Gallery, where other gallery apps can see it."
+                    else "This item will be decrypted, verified, and placed back in your public Gallery.",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted
@@ -467,7 +578,7 @@ fun MediaViewerScreen(
                     when (container.restoreCoordinator.restoreItem(itemId, move = true)) {
                         is RestoreResult.Success,
                         is RestoreResult.SuccessWithCleanupPending -> onBack()
-                        is RestoreResult.Failure -> Unit
+                        is RestoreResult.Failure -> restoreError = "Could not move this item. The private copy remains in Suya Phot."
                     }
                 }
             }
@@ -481,7 +592,8 @@ fun MediaViewerScreen(
             title = "Move to Vault Trash?",
             content = {
                 Text(
-                    text = "This item will be hidden in Trash for 30 days before permanent deletion.",
+                    text = if (trashRetentionDays == 0) "This item will stay in Trash until you delete it permanently."
+                    else "This item will stay in Trash for $trashRetentionDays days before permanent deletion.",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted

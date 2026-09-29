@@ -46,11 +46,20 @@ class FakeFolderDao : FolderDao {
     override fun getFoldersForVault(vaultId: String): Flow<List<FolderEntity>> =
         flowOf(folders.values.filter { it.vaultId == vaultId })
 
+    override suspend fun getFoldersForVaultOnce(vaultId: String): List<FolderEntity> =
+        folders.values.filter { it.vaultId == vaultId }
+
     override fun getSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>> =
         flowOf(folders.values.filter { it.vaultId == vaultId && it.parentId == parentId })
 
     override fun getSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>> =
         flowOf(folders.values.filter { it.vaultId == vaultId && it.parentId == parentId }.map { FolderWithCount(it, 0) })
+
+    override fun getHiddenRoots(vaultId: String): Flow<List<FolderWithCount>> =
+        flowOf(folders.values.filter { it.vaultId == vaultId && it.directHidden }.map { FolderWithCount(it, 0) })
+
+    override fun getAllSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>> =
+        getSubFolders(vaultId, parentId)
 
     override suspend fun getSubFoldersSync(vaultId: String, parentId: String?): List<FolderEntity> =
         folders.values.filter { it.vaultId == vaultId && it.parentId == parentId }
@@ -74,6 +83,24 @@ class FakeFolderDao : FolderDao {
     override suspend fun renameFolderForVault(vaultId: String, folderId: String, nameBytes: ByteArray, now: Long): Int {
         val folder = folders[folderId]?.takeIf { it.vaultId == vaultId } ?: return 0
         folders[folderId] = folder.copy(encryptedName = nameBytes, updatedAt = now)
+        return 1
+    }
+
+    override suspend fun setDirectHidden(vaultId: String, folderId: String, hidden: Boolean, now: Long): Int {
+        val folder = folders[folderId]?.takeIf { it.vaultId == vaultId } ?: return 0
+        folders[folderId] = folder.copy(directHidden = hidden, updatedAt = now)
+        return 1
+    }
+
+    override suspend fun setEffectivePrivacy(vaultId: String, folderId: String, hidden: Boolean, protected: Boolean, now: Long): Int {
+        val folder = folders[folderId]?.takeIf { it.vaultId == vaultId } ?: return 0
+        folders[folderId] = folder.copy(effectiveHidden = hidden, effectiveProtected = protected, updatedAt = now)
+        return 1
+    }
+
+    override suspend fun setLockId(vaultId: String, folderId: String, lockId: String?, now: Long): Int {
+        val folder = folders[folderId]?.takeIf { it.vaultId == vaultId } ?: return 0
+        folders[folderId] = folder.copy(lockId = lockId, updatedAt = now)
         return 1
     }
 

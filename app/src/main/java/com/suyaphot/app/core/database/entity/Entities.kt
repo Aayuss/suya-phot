@@ -19,7 +19,8 @@ data class VaultEntity(
     val pinEnvelope: ByteArray,
     val recoveryEnvelope: ByteArray? = null,
     val biometricEnvelope: ByteArray? = null,
-    val biometricIv: ByteArray? = null
+    val biometricIv: ByteArray? = null,
+    val credentialTypeCode: Int = 0
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -51,7 +52,10 @@ data class VaultEntity(
     indices = [
         Index("vaultId"),
         Index("parentId"),
-        Index(value = ["vaultId", "parentId"])
+        Index(value = ["vaultId", "parentId"]),
+        Index("effectiveHidden"),
+        Index("effectiveProtected"),
+        Index("lockId")
     ]
 )
 data class FolderEntity(
@@ -62,7 +66,11 @@ data class FolderEntity(
     val createdAt: Long,
     val updatedAt: Long,
     val coverMediaId: String?,
-    val sortOrder: Long
+    val sortOrder: Long,
+    val directHidden: Boolean = false,
+    val effectiveHidden: Boolean = false,
+    val lockId: String? = null,
+    val effectiveProtected: Boolean = false
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -98,7 +106,8 @@ data class FolderEntity(
         Index("deletedAt"),
         Index("favorite"),
         Index("mediaTypeCode"),
-        Index(value = ["vaultId", "sha256Hex"])
+        Index(value = ["vaultId", "sha256Hex"]),
+        Index(value = ["vaultId", "concealed", "deletedAt"])
     ]
 )
 data class MediaItemEntity(
@@ -119,7 +128,8 @@ data class MediaItemEntity(
     val previousFolderId: String?,
     val dateTakenMs: Long? = null,
     val encryptedPreviewRelativePath: String? = null,
-    val cleanupStateCode: Int = 0
+    val cleanupStateCode: Int = 0,
+    val concealed: Boolean = false
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -136,6 +146,27 @@ data class MediaItemEntity(
         return result
     }
 }
+
+@Entity(
+    tableName = "folder_locks",
+    foreignKeys = [
+        ForeignKey(entity = VaultEntity::class, parentColumns = ["id"], childColumns = ["vaultId"], onDelete = ForeignKey.CASCADE),
+        ForeignKey(entity = FolderEntity::class, parentColumns = ["id"], childColumns = ["folderId"], onDelete = ForeignKey.CASCADE)
+    ],
+    indices = [Index(value = ["folderId"], unique = true), Index("vaultId")]
+)
+data class FolderLockEntity(
+    @PrimaryKey val id: String,
+    val vaultId: String,
+    val folderId: String,
+    val credentialTypeCode: Int,
+    val credentialEnvelope: ByteArray,
+    val biometricEnvelope: ByteArray?,
+    val biometricIv: ByteArray?,
+    val relockPolicyCode: Int,
+    val createdAt: Long,
+    val updatedAt: Long
+)
 
 @Entity(
     tableName = "restore_jobs",

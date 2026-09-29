@@ -58,8 +58,20 @@ class RestoreRecoveryManager(
             complete(jobId)
             return
         }
+        if (uri == null) {
+            database.restoreJobDao().updatePhase(
+                jobId, RestorePhase.CLEANUP_PENDING.code, null, System.currentTimeMillis(), "PUBLIC_URI_UNAVAILABLE"
+            )
+            return
+        }
         val item = database.mediaItemDao().getItemForVault(mediaId, vaultId)
-        if (item != null && uri != null && !publicHashMatches(uri, item.sha256Hex)) {
+        if (item == null) {
+            database.restoreJobDao().updatePhase(
+                jobId, RestorePhase.CLEANUP_PENDING.code, null, System.currentTimeMillis(), "MEDIA_RECORD_UNAVAILABLE"
+            )
+            return
+        }
+        if (!publicHashMatches(uri, item.sha256Hex)) {
             database.restoreJobDao().updatePhase(
                 jobId, RestorePhase.CLEANUP_PENDING.code, null, System.currentTimeMillis(), "PUBLIC_REVERIFY_FAILED"
             )

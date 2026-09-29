@@ -61,7 +61,7 @@ com.suyaphot.app
 │   ├── security                 // Security diagnostics, intruder logs, secondary PIN
 │   ├── trash                    // Vault trash, auto-purge, restoration
 │   ├── intruder                 // CameraX silent selfie capture
-│   └── settings                 // App preferences, storage stats, backup export
+│   └── settings                 // App preferences, storage stats, local-vault loss warning
 ├── navigation                   // Navigation Compose destinations & transitions
 └── ui
     ├── theme                    // SuyaColors, SuyaTypography (Sora), Shapes

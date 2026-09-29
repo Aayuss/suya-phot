@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import com.suyaphot.app.core.database.entity.FolderEntity
+import com.suyaphot.app.core.database.entity.FolderLockEntity
 import com.suyaphot.app.core.database.entity.IntruderEventEntity
 import com.suyaphot.app.core.database.entity.MediaItemEntity
 import com.suyaphot.app.core.database.entity.VaultEntity
@@ -35,6 +36,9 @@ interface VaultDao {
 
     @Query("UPDATE vaults SET pinEnvelope = :newPinEnvelope WHERE id = :vaultId")
     suspend fun updatePinEnvelope(vaultId: String, newPinEnvelope: ByteArray)
+
+    @Query("UPDATE vaults SET pinEnvelope = :envelope, credentialTypeCode = :typeCode WHERE id = :vaultId")
+    suspend fun updateCredential(vaultId: String, envelope: ByteArray, typeCode: Int): Int
 
     @Query("UPDATE vaults SET recoveryEnvelope = :newRecoveryEnvelope WHERE id = :vaultId")
     suspend fun updateRecoveryEnvelope(vaultId: String, newRecoveryEnvelope: ByteArray?)
@@ -71,16 +75,32 @@ interface FolderDao {
     @Query("SELECT * FROM folders WHERE vaultId = :vaultId ORDER BY sortOrder ASC, createdAt DESC")
     fun getFoldersForVault(vaultId: String): Flow<List<FolderEntity>>
 
+    @Query("SELECT * FROM folders WHERE vaultId = :vaultId")
+    suspend fun getFoldersForVaultOnce(vaultId: String): List<FolderEntity>
+
     @Query("SELECT * FROM folders WHERE vaultId = :vaultId AND parentId IS :parentId ORDER BY sortOrder ASC, createdAt DESC")
     fun getSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>>
 
     @Query("""
-        SELECT f.*, (SELECT COUNT(*) FROM media_items m WHERE m.vaultId = f.vaultId AND m.folderId = f.id AND m.deletedAt IS NULL) AS itemCount
+        SELECT f.*, (SELECT COUNT(*) FROM media_items m WHERE m.vaultId = f.vaultId AND m.folderId = f.id AND m.deletedAt IS NULL AND m.concealed = 0) AS itemCount
         FROM folders f
-        WHERE f.vaultId = :vaultId AND f.parentId IS :parentId
+        WHERE f.vaultId = :vaultId AND f.parentId IS :parentId AND f.effectiveHidden = 0
         ORDER BY f.sortOrder ASC, f.createdAt DESC
     """)
     fun getSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>>
+
+    @Query("""
+        SELECT f.*, 0 AS itemCount FROM folders f
+        WHERE f.vaultId = :vaultId AND f.directHidden = 1
+          AND (f.parentId IS NULL OR NOT EXISTS (
+              SELECT 1 FROM folders p WHERE p.id = f.parentId AND p.vaultId = f.vaultId AND p.effectiveHidden = 1
+          ))
+        ORDER BY f.sortOrder ASC, f.createdAt DESC
+    """)
+    fun getHiddenRoots(vaultId: String): Flow<List<FolderWithCount>>
+
+    @Query("SELECT * FROM folders WHERE vaultId = :vaultId AND parentId IS :parentId ORDER BY sortOrder ASC, createdAt DESC")
+    fun getAllSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>>
 
     @Query("SELECT * FROM folders WHERE vaultId = :vaultId AND parentId IS :parentId")
     suspend fun getSubFoldersSync(vaultId: String, parentId: String?): List<FolderEntity>
@@ -97,6 +117,33 @@ interface FolderDao {
     @Query("UPDATE folders SET encryptedName = :nameBytes, updatedAt = :now WHERE id = :folderId AND vaultId = :vaultId")
     suspend fun renameFolderForVault(vaultId: String, folderId: String, nameBytes: ByteArray, now: Long): Int
 
+    @Query("UPDATE folders SET directHidden = :hidden, updatedAt = :now WHERE vaultId = :vaultId AND id = :folderId")
+    suspend fun setDirectHidden(vaultId: String, folderId: String, hidden: Boolean, now: Long): Int
+
+    @Query("UPDATE folders SET effectiveHidden = :hidden, effectiveProtected = :protected, updatedAt = :now WHERE vaultId = :vaultId AND id = :folderId")
+    suspend fun setEffectivePrivacy(vaultId: String, folderId: String, hidden: Boolean, protected: Boolean, now: Long): Int
+
+    @Query("UPDATE folders SET lockId = :lockId, updatedAt = :now WHERE vaultId = :vaultId AND id = :folderId")
+    suspend fun setLockId(vaultId: String, folderId: String, lockId: String?, now: Long): Int
+
+}
+
+@Dao
+interface FolderLockDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insert(lock: FolderLockEntity)
+
+    @Query("SELECT * FROM folder_locks WHERE vaultId = :vaultId AND folderId = :folderId LIMIT 1")
+    suspend fun getForFolder(vaultId: String, folderId: String): FolderLockEntity?
+
+    @Query("SELECT * FROM folder_locks WHERE vaultId = :vaultId AND id = :lockId LIMIT 1")
+    suspend fun getForVault(vaultId: String, lockId: String): FolderLockEntity?
+
+    @Query("UPDATE folder_locks SET biometricEnvelope = :envelope, biometricIv = :iv, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
+    suspend fun updateBiometric(vaultId: String, lockId: String, envelope: ByteArray?, iv: ByteArray?, now: Long): Int
+
+    @Query("DELETE FROM folder_locks WHERE vaultId = :vaultId AND id = :lockId")
+    suspend fun delete(vaultId: String, lockId: String): Int
 }
 
 @Dao
@@ -119,29 +166,43 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND id IN (:ids)")
     suspend fun getItemsByIdsForVault(vaultId: String, ids: List<String>): List<MediaItemEntity>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
     fun getAllActive(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL ORDER BY importedAt DESC")
+    @Query("SELECT COUNT(*) FROM media_items WHERE vaultId = :vaultId")
+    fun observeMediaChanges(vaultId: String): Flow<Int>
+
+    @Query("""SELECT id FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0
+        AND (:filterCode = 0 OR (:filterCode = 1 AND mediaTypeCode = 0)
+            OR (:filterCode = 2 AND mediaTypeCode = 1) OR (:filterCode = 3 AND favorite = 1))""")
+    suspend fun getAllVisibleIdsForFilter(vaultId: String, filterCode: Int): List<String>
+
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
     suspend fun getAllActiveOnce(vaultId: String): List<MediaItemEntity>
+
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC LIMIT :limit OFFSET :offset")
+    suspend fun getSearchBatch(vaultId: String, limit: Int, offset: Int): List<MediaItemEntity>
 
     @RawQuery(observedEntities = [MediaItemEntity::class])
     fun pagingSource(query: SupportSQLiteQuery): PagingSource<Int, MediaItemEntity>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC")
     fun getByFolder(vaultId: String, folderId: String?): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND favorite = 1 AND deletedAt IS NULL ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND favorite = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
     fun getFavorites(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 0 AND deletedAt IS NULL ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 0 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
     fun getPhotosOnly(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 1 AND deletedAt IS NULL ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
     fun getVideosOnly(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL ORDER BY deletedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 0 ORDER BY deletedAt DESC")
     fun getTrashItems(vaultId: String): Flow<List<MediaItemEntity>>
+
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 1 ORDER BY deletedAt DESC")
+    fun getPrivateTrashItems(vaultId: String): Flow<List<MediaItemEntity>>
 
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND deletedAt < :cutoffTimestamp LIMIT :limit")
     suspend fun getExpiredTrash(vaultId: String, cutoffTimestamp: Long, limit: Int = 100): List<MediaItemEntity>
@@ -167,11 +228,17 @@ interface MediaItemDao {
     @Query("SELECT COALESCE(SUM(cipherSize), 0) FROM media_items WHERE vaultId = :vaultId")
     suspend fun sumCipherSize(vaultId: String): Long
 
-    @Query("UPDATE media_items SET folderId = :newFolderId, updatedAt = :now WHERE vaultId = :vaultId AND id IN (:ids) AND deletedAt IS NULL")
-    suspend fun moveItemsToFolderForVault(vaultId: String, ids: List<String>, newFolderId: String?, now: Long): Int
+    @Query("UPDATE media_items SET folderId = :newFolderId, concealed = :concealed, updatedAt = :now WHERE vaultId = :vaultId AND id IN (:ids) AND deletedAt IS NULL")
+    suspend fun moveItemsToFolderForVault(vaultId: String, ids: List<String>, newFolderId: String?, concealed: Boolean, now: Long): Int
 
     @Query("UPDATE media_items SET folderId = :targetFolderId, updatedAt = :now WHERE vaultId = :vaultId AND folderId = :sourceFolderId AND deletedAt IS NULL")
     suspend fun moveFolderContents(vaultId: String, sourceFolderId: String, targetFolderId: String?, now: Long)
+
+    @Query("""UPDATE media_items SET concealed = COALESCE(
+        (SELECT CASE WHEN f.effectiveHidden = 1 OR f.effectiveProtected = 1 THEN 1 ELSE 0 END
+         FROM folders f WHERE f.id = media_items.folderId AND f.vaultId = media_items.vaultId), 0)
+        WHERE vaultId = :vaultId AND deletedAt IS NULL""")
+    suspend fun recomputeActiveConcealment(vaultId: String): Int
 
     @Query("UPDATE media_items SET favorite = :favorite, updatedAt = :now WHERE id = :id AND vaultId = :vaultId AND deletedAt IS NULL")
     suspend fun updateFavoriteForVault(vaultId: String, id: String, favorite: Boolean, now: Long): Int
@@ -182,8 +249,8 @@ interface MediaItemDao {
     @Query("UPDATE media_items SET previousFolderId = folderId, folderId = NULL, deletedAt = :now, updatedAt = :now WHERE vaultId = :vaultId AND folderId = :folderId AND deletedAt IS NULL")
     suspend fun trashFolderContents(vaultId: String, folderId: String, now: Long)
 
-    @Query("UPDATE media_items SET folderId = :folderId, previousFolderId = NULL, deletedAt = NULL, updatedAt = :restoredAt WHERE vaultId = :vaultId AND id = :id AND deletedAt IS NOT NULL")
-    suspend fun restoreFromTrashForVault(vaultId: String, id: String, folderId: String?, restoredAt: Long): Int
+    @Query("UPDATE media_items SET folderId = :folderId, concealed = :concealed, previousFolderId = NULL, deletedAt = NULL, updatedAt = :restoredAt WHERE vaultId = :vaultId AND id = :id AND deletedAt IS NOT NULL")
+    suspend fun restoreFromTrashForVault(vaultId: String, id: String, folderId: String?, concealed: Boolean, restoredAt: Long): Int
 
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId")
     suspend fun getAllForIntegrityCheck(vaultId: String): List<MediaItemEntity>
@@ -214,6 +281,9 @@ interface VaultJobDao {
 
     @Query("UPDATE jobs SET progressCurrent = :current, progressTotal = :total, updatedAt = :now WHERE id = :id")
     suspend fun updateProgress(id: String, current: Long, total: Long, now: Long)
+
+    @Query("UPDATE jobs SET encryptedPayload = :payload, updatedAt = :now WHERE id = :id AND vaultId = :vaultId")
+    suspend fun updateEncryptedPayload(id: String, vaultId: String, payload: ByteArray, now: Long): Int
 
     @Query("SELECT * FROM jobs WHERE id = :id LIMIT 1")
     suspend fun getJob(id: String): VaultJobEntity?

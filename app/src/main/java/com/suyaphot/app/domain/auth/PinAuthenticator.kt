@@ -9,6 +9,7 @@ import com.suyaphot.app.core.datastore.SecurityPreferences
 import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.core.util.SafeLog
 import kotlinx.coroutines.flow.first
+import java.security.MessageDigest
 import javax.crypto.Cipher
 
 sealed interface AuthResult {
@@ -39,6 +40,8 @@ class PinAuthenticator(
 
     @Volatile
     private var monotonicLockoutDeadlineMs: Long = 0L
+    private var reauthFailures = 0
+    private var reauthBlockedUntil = 0L
 
     companion object {
         fun calculateLockoutMs(attempts: Int): Long {
@@ -59,6 +62,7 @@ class PinAuthenticator(
         val candidateCopy = candidate.copyOf()
         return try {
             val real = vaultDao.getVaultByKind(VaultKind.REAL.code) ?: return false
+            if (real.credentialTypeCode != 0) return false
             val envelope = runCatching { KeyManager.PinEnvelope.deserialize(real.pinEnvelope) }.getOrNull()
                 ?: return false
             val key = keyManager.unwrapPinEnvelope(envelope, candidateCopy)
@@ -111,6 +115,59 @@ class PinAuthenticator(
      * Evaluates both real and secondary vaults to prevent timing attacks (Section 30).
      */
     suspend fun authenticateWithPin(pinChars: CharArray): AuthResult {
+        return authenticateWithCredential(pinChars, 0)
+    }
+
+    suspend fun authenticateWithPattern(nodes: IntArray): AuthResult {
+        val credential = try {
+            PatternCredential.canonicalChars(nodes)
+        } catch (_: IllegalArgumentException) {
+            return AuthResult.Error("Pattern needs at least four nodes")
+        }
+        nodes.fill(-1)
+        return authenticateWithCredential(credential, 1)
+    }
+
+    suspend fun verifyCurrentCredential(chars: CharArray, typeCode: Int): Boolean {
+        return try {
+            val session = sessionManager.sessionState.value as? VaultSession.Unlocked ?: return false
+            if (SystemClock.elapsedRealtime() < reauthBlockedUntil) return false
+            val vault = vaultDao.getVault(session.vaultId) ?: return false
+            if (vault.credentialTypeCode != typeCode) return false
+            val envelope = runCatching { KeyManager.PinEnvelope.deserialize(vault.pinEnvelope) }.getOrNull() ?: return false
+            val key = keyManager.unwrapPinEnvelope(envelope, chars)
+            key?.fill(0)
+            if (key == null) {
+                reauthFailures++
+                if (reauthFailures >= 5) reauthBlockedUntil = SystemClock.elapsedRealtime() + 30_000L
+            } else {
+                reauthFailures = 0
+                reauthBlockedUntil = 0L
+            }
+            key != null
+        } finally {
+            chars.fill('\u0000')
+        }
+    }
+
+    suspend fun changeCurrentCredential(current: CharArray, currentType: Int, replacement: CharArray, replacementType: Int): Boolean {
+        return try {
+            val session = sessionManager.sessionState.value as? VaultSession.Unlocked ?: return false
+            val vault = vaultDao.getVault(session.vaultId) ?: return false
+            if (vault.credentialTypeCode != currentType || replacementType !in 0..1) return false
+            val oldEnvelope = runCatching { KeyManager.PinEnvelope.deserialize(vault.pinEnvelope) }.getOrNull() ?: return false
+            val master = keyManager.unwrapPinEnvelope(oldEnvelope, current) ?: return false
+            try {
+                val newEnvelope = keyManager.createPinEnvelope(master, replacement)
+                vaultDao.updateCredential(vault.id, newEnvelope.serialize(), replacementType) == 1
+            } finally { master.fill(0) }
+        } finally {
+            current.fill('\u0000')
+            replacement.fill('\u0000')
+        }
+    }
+
+    private suspend fun authenticateWithCredential(pinChars: CharArray, typeCode: Int): AuthResult {
         val now = System.currentTimeMillis()
         val elapsedNow = SystemClock.elapsedRealtime()
         val monotonicRemaining = (monotonicLockoutDeadlineMs - elapsedNow).coerceAtLeast(0L)
@@ -151,18 +208,20 @@ class PinAuthenticator(
         }
 
         return when {
-            realResult != null -> {
+            realResult != null && realVault?.credentialTypeCode == typeCode -> {
                 secondaryResult?.fill(0)
                 preferences.resetFailedAttempts()
                 establishSession(realVault!!.id, VaultKind.REAL, realResult)
                 AuthResult.Success(realVault.id, VaultKind.REAL)
             }
-            secondaryResult != null -> {
+            secondaryResult != null && secondaryVault?.credentialTypeCode == typeCode -> {
                 preferences.resetFailedAttempts()
                 establishSession(secondaryVault!!.id, VaultKind.SECONDARY, secondaryResult)
                 AuthResult.Success(secondaryVault.id, VaultKind.SECONDARY)
             }
             else -> {
+                realResult?.fill(0)
+                secondaryResult?.fill(0)
                 val currentAttempts = preferences.failedAttempts.first() + 1
                 val lockoutDuration = calculateLockoutMs(currentAttempts)
                 val newLockoutUntil = if (lockoutDuration > 0) now + lockoutDuration else 0L
@@ -195,6 +254,20 @@ class PinAuthenticator(
         }
     }
 
+    /** Re-authenticates the already-open vault without switching vaults or resetting its session. */
+    suspend fun verifyCurrentBiometric(cipher: Cipher): Boolean {
+        val active = sessionManager.sessionState.value as? VaultSession.Unlocked ?: return false
+        val vault = vaultDao.getVault(active.vaultId) ?: return false
+        val envelope = vault.biometricEnvelope ?: return false
+        val master = try { cipher.doFinal(envelope) } catch (_: Exception) { return false }
+        return try {
+            val derived = vaultCrypto.deriveMediaSubkey(master)
+            try {
+                sessionManager.currentVaultId == active.vaultId && MessageDigest.isEqual(derived, active.mediaSubkey)
+            } finally { derived.fill(0) }
+        } finally { master.fill(0) }
+    }
+
     /**
      * Unwraps master key via recovery code and sets a new PIN.
      */
@@ -208,7 +281,7 @@ class PinAuthenticator(
         try {
             // Re-wrap master key with new PIN
             val newPinEnvelope = keyManager.createPinEnvelope(masterKey, newPinChars)
-            vaultDao.updatePinEnvelope(realVault.id, newPinEnvelope.serialize())
+            vaultDao.updateCredential(realVault.id, newPinEnvelope.serialize(), 0)
             preferences.resetFailedAttempts()
             establishSession(realVault.id, VaultKind.REAL, masterKey)
             return true

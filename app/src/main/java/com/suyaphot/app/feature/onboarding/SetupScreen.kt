@@ -47,8 +47,10 @@ import com.suyaphot.app.R
 import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.core.database.entity.VaultEntity
 import com.suyaphot.app.core.model.VaultKind
+import com.suyaphot.app.domain.auth.PatternCredential
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.PinDots
+import com.suyaphot.app.ui.components.PatternLockPad
 import com.suyaphot.app.ui.components.SecurePinPad
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaTextField
@@ -61,8 +63,11 @@ import java.util.UUID
 
 enum class SetupStep {
     WELCOME,
+    CHOOSE_CREDENTIAL,
     ENTER_PIN,
     CONFIRM_PIN,
+    ENTER_PATTERN,
+    CONFIRM_PATTERN,
     RECOVERY_KIT,
     CONFIRM_RECOVERY,
     COMPLETE
@@ -79,6 +84,8 @@ fun SetupScreen(
 
     var initialPin by remember { mutableStateOf("") }
     var confirmPin by remember { mutableStateOf("") }
+    var initialPattern by remember { mutableStateOf(intArrayOf()) }
+    var credentialTypeCode by remember { mutableIntStateOf(0) }
     var pinErrorMessage by remember { mutableStateOf<String?>(null) }
     var shakeTrigger by remember { mutableIntStateOf(0) }
 
@@ -93,6 +100,7 @@ fun SetupScreen(
         onDispose {
             initialPin = ""
             confirmPin = ""
+            initialPattern.fill(-1)
             generatedRecoveryCode = ""
             group1Input = ""
             group2Input = ""
@@ -136,7 +144,7 @@ fun SetupScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Encrypted private photo and video vault for your device. Local-first, zero-knowledge, hardware-backed protection.",
+                            text = "A private, encrypted photo and video gallery on your device.",
                             fontFamily = SoraFontFamily,
                             fontSize = 14.sp,
                             color = SuyaColors.TextMuted,
@@ -146,9 +154,25 @@ fun SetupScreen(
                         Spacer(modifier = Modifier.height(40.dp))
                         SuyaButton(
                             text = "Create Vault",
-                            onClick = { currentStep = SetupStep.ENTER_PIN },
+                            onClick = { currentStep = SetupStep.CHOOSE_CREDENTIAL },
                             modifier = Modifier.fillMaxWidth(0.8f)
                         )
+                    }
+                }
+
+                SetupStep.CHOOSE_CREDENTIAL -> {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        Text("Choose your vault lock", fontFamily = SoraFontFamily, fontSize = 22.sp, color = SuyaColors.White)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("A PIN is easier to use with accessibility services. A pattern needs at least four dots.", fontFamily = SoraFontFamily, fontSize = 13.sp, color = SuyaColors.TextMuted, textAlign = TextAlign.Center)
+                        Spacer(modifier = Modifier.height(28.dp))
+                        SuyaButton("Use 6-digit PIN", onClick = { credentialTypeCode = 0; currentStep = SetupStep.ENTER_PIN }, modifier = Modifier.fillMaxWidth(0.9f))
+                        Spacer(modifier = Modifier.height(12.dp))
+                        SuyaButton("Use Pattern", onClick = { credentialTypeCode = 1; currentStep = SetupStep.ENTER_PATTERN }, variant = ButtonVariant.Secondary, modifier = Modifier.fillMaxWidth(0.9f))
                     }
                 }
 
@@ -245,6 +269,46 @@ fun SetupScreen(
                                     confirmPin = confirmPin.dropLast(1)
                                 }
                             }
+                        )
+                    }
+                }
+
+                SetupStep.ENTER_PATTERN, SetupStep.CONFIRM_PATTERN -> {
+                    val confirming = step == SetupStep.CONFIRM_PATTERN
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxSize()) {
+                        Spacer(modifier = Modifier.height(40.dp))
+                        Text(
+                            if (confirming) "Confirm Vault Pattern" else "Create Vault Pattern",
+                            fontFamily = SoraFontFamily, fontWeight = FontWeight.Medium, fontSize = 22.sp, color = SuyaColors.White
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            pinErrorMessage ?: if (confirming) "Draw the same pattern again" else "Connect at least four dots; six or more is stronger",
+                            fontFamily = SoraFontFamily, fontSize = 13.sp,
+                            color = if (pinErrorMessage != null) SuyaColors.Negative else SuyaColors.TextMuted
+                        )
+                        Spacer(modifier = Modifier.height(36.dp))
+                        PatternLockPad(
+                            onPatternComplete = { raw ->
+                                val pattern = runCatching { PatternCredential.normalize(raw) }.getOrNull()
+                                if (pattern == null) {
+                                    pinErrorMessage = "Connect at least four dots"
+                                    shakeTrigger++
+                                } else if (!confirming) {
+                                    initialPattern = pattern
+                                    pinErrorMessage = null
+                                    currentStep = SetupStep.CONFIRM_PATTERN
+                                } else if (pattern.contentEquals(initialPattern)) {
+                                    generatedRecoveryCode = container.keyManager.generateRecoverySecret()
+                                    currentStep = SetupStep.RECOVERY_KIT
+                                } else {
+                                    pinErrorMessage = "Patterns do not match. Try again."
+                                    shakeTrigger++
+                                }
+                            },
+                            errorTrigger = shakeTrigger,
+                            enabled = true,
+                            modifier = Modifier.fillMaxWidth(0.85f)
                         )
                     }
                 }
@@ -372,7 +436,7 @@ fun SetupScreen(
 
                                 scope.launch {
                                     val masterKey = container.keyManager.generateMasterKey()
-                                    val pinChars = initialPin.toCharArray()
+                                    val pinChars = if (credentialTypeCode == 1) PatternCredential.canonicalChars(initialPattern) else initialPin.toCharArray()
                                     try {
                                         val pinEnvelope = container.keyManager.createPinEnvelope(masterKey, pinChars)
                                         val normRecovery = container.keyManager.normalizeRecoverySecret(generatedRecoveryCode)
@@ -388,7 +452,8 @@ fun SetupScreen(
                                             pinEnvelope = pinEnvelope.serialize(),
                                             recoveryEnvelope = recoveryEnvelope.serialize(),
                                             biometricEnvelope = null,
-                                            biometricIv = null
+                                            biometricIv = null,
+                                            credentialTypeCode = credentialTypeCode
                                         )
 
                                         withContext(Dispatchers.IO) {
@@ -396,7 +461,11 @@ fun SetupScreen(
                                         }
 
                                         // authenticateWithPin takes ownership of and clears this CharArray.
-                                        container.pinAuthenticator.authenticateWithPin(pinChars)
+                                        if (credentialTypeCode == 1) {
+                                            container.pinAuthenticator.authenticateWithPattern(initialPattern)
+                                        } else {
+                                            container.pinAuthenticator.authenticateWithPin(pinChars)
+                                        }
                                         currentStep = SetupStep.COMPLETE
                                     } finally {
                                         masterKey.fill(0)

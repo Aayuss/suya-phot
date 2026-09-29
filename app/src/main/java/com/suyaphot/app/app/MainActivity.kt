@@ -26,6 +26,7 @@ import androidx.compose.foundation.Image
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
 import com.suyaphot.app.domain.auth.VaultSession
+import com.suyaphot.app.domain.folders.ViewerAccessScope
 import com.suyaphot.app.feature.folders.FoldersScreen
 import com.suyaphot.app.feature.intruder.IntruderLogsScreen
 import com.suyaphot.app.feature.lock.LockScreen
@@ -41,6 +42,7 @@ import com.suyaphot.app.ui.theme.SuyaColors
 import com.suyaphot.app.ui.theme.SuyaTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 class MainActivity : FragmentActivity() {
@@ -82,7 +84,17 @@ fun MainAppHost(container: AppContainer) {
 
     var activeTab by remember { mutableStateOf(SuyaNavTab.PHOTOS) }
     var activeViewerItemId by remember { mutableStateOf<String?>(null) }
+    var activeViewerScope by remember { mutableStateOf<ViewerAccessScope?>(null) }
+    var viewerAccessTick by remember { mutableStateOf(0L) }
+    val accessRevision by container.folderAccessManager.revision.collectAsState()
+    LaunchedEffect(activeViewerScope) {
+        while (activeViewerScope != null) {
+            delay(1_000)
+            viewerAccessTick++
+        }
+    }
     var showTrashScreen by remember { mutableStateOf(false) }
+    var showPrivateTrashScreen by remember { mutableStateOf(false) }
     var showIntruderLogsScreen by remember { mutableStateOf(false) }
 
     // Reconcile active jobs whenever vault is unlocked
@@ -93,6 +105,7 @@ fun MainAppHost(container: AppContainer) {
             container.restoreRecoveryManager.reconcile(s)
         } else {
             container.vaultSearchIndex.clear()
+            container.encryptedThumbnailRepository.clear()
             withContext(Dispatchers.IO) {
                 container.vaultFileStore.clearEphemeralPlaintextCaches()
             }
@@ -152,16 +165,32 @@ fun MainAppHost(container: AppContainer) {
     }
 
     // Vault is unlocked: display media viewer or navigation tab
-    if (activeViewerItemId != null) {
+    val viewerAllowed = run {
+        viewerAccessTick
+        accessRevision
+        activeViewerScope?.let(container.folderAccessManager::isScopeValid) ?: true
+    }
+    LaunchedEffect(accessRevision, viewerAccessTick, viewerAllowed) {
+        if (!viewerAllowed) { activeViewerItemId = null; activeViewerScope = null }
+    }
+    if (activeViewerItemId != null && !viewerAllowed) {
+        Box(modifier = Modifier.fillMaxSize().background(SuyaColors.Background))
+    } else if (activeViewerItemId != null) {
         MediaViewerScreen(
             itemId = activeViewerItemId!!,
             container = container,
-            onBack = { activeViewerItemId = null }
+            onBack = { activeViewerItemId = null; activeViewerScope = null }
         )
     } else if (showTrashScreen) {
         TrashScreen(
             container = container,
             onBack = { showTrashScreen = false }
+        )
+    } else if (showPrivateTrashScreen) {
+        TrashScreen(
+            container = container,
+            onBack = { showPrivateTrashScreen = false },
+            privateMode = true
         )
     } else if (showIntruderLogsScreen) {
         IntruderLogsScreen(
@@ -173,7 +202,12 @@ fun MainAppHost(container: AppContainer) {
             bottomBar = {
                 SuyaBottomNav(
                     selectedTab = activeTab,
-                    onTabSelected = { activeTab = it }
+                    onTabSelected = {
+                        if (activeTab == SuyaNavTab.FOLDERS && it != SuyaNavTab.FOLDERS) {
+                            container.folderAccessManager.clear()
+                        }
+                        activeTab = it
+                    }
                 )
             },
             containerColor = SuyaColors.Background
@@ -181,20 +215,20 @@ fun MainAppHost(container: AppContainer) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(bottom = paddingValues.calculateBottomPadding())
+                    .padding(paddingValues)
             ) {
                 AnimatedContent(targetState = activeTab, label = "tab_content") { tab ->
                     when (tab) {
                         SuyaNavTab.PHOTOS -> {
                             PhotosScreen(
                                 container = container,
-                                onMediaClick = { itemId -> activeViewerItemId = itemId }
+                                onMediaClick = { itemId -> activeViewerScope = null; activeViewerItemId = itemId }
                             )
                         }
                         SuyaNavTab.FOLDERS -> {
                             FoldersScreen(
                                 container = container,
-                                onMediaClick = { itemId -> activeViewerItemId = itemId },
+                                onMediaClick = { itemId, viewerScope -> activeViewerScope = viewerScope; activeViewerItemId = itemId },
                                 onFolderOpened = { /* folder traversal handled internally */ }
                             )
                         }
@@ -207,7 +241,8 @@ fun MainAppHost(container: AppContainer) {
                         SuyaNavTab.SETTINGS -> {
                             SettingsScreen(
                                 container = container,
-                                onOpenTrash = { showTrashScreen = true }
+                                onOpenTrash = { showTrashScreen = true },
+                                onOpenPrivateTrash = { showPrivateTrashScreen = true }
                             )
                         }
                     }

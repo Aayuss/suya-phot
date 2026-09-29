@@ -13,6 +13,7 @@ import java.nio.ByteOrder
 import com.suyaphot.app.core.crypto.VaultCrypto
 import java.io.ByteArrayInputStream
 import java.io.File
+import com.suyaphot.app.domain.auth.PatternCredential
 
 class KeyManagerTest {
 
@@ -123,6 +124,46 @@ class KeyManagerTest {
             newPin.fill('\u0000')
             encrypted.delete()
         }
+    }
+
+    @Test
+    fun pinToPatternAndBackPreservesSameMasterKey() {
+        val master = keyManager.generateMasterKey()
+        val pin = keyManager.createPinEnvelope(master, "123456".toCharArray(), iterations = 100_000)
+        val fromPin = keyManager.unwrapPinEnvelope(pin, "123456".toCharArray())!!
+        val pattern = PatternCredential.canonicalChars(intArrayOf(0, 1, 2, 5, 8))
+        val patternEnvelope = keyManager.createPinEnvelope(fromPin, pattern, iterations = 100_000)
+        assertNull(keyManager.unwrapPinEnvelope(patternEnvelope, "123456".toCharArray()))
+        val fromPattern = keyManager.unwrapPinEnvelope(patternEnvelope, pattern)!!
+        assertArrayEquals(master, fromPattern)
+        val newPin = keyManager.createPinEnvelope(fromPattern, "654321".toCharArray(), iterations = 100_000)
+        assertArrayEquals(master, keyManager.unwrapPinEnvelope(newPin, "654321".toCharArray()))
+        fromPin.fill(0)
+        fromPattern.fill(0)
+        master.fill(0)
+        pattern.fill('\u0000')
+    }
+
+    @Test
+    fun folderLockEnvelopeRejectsWrongCredentialAndOtherLockId() {
+        val token = keyManager.generateMasterKey()
+        val envelope = keyManager.createFolderLockEnvelope(token, "987654".toCharArray(), "lock-1")
+        assertArrayEquals(token, keyManager.unwrapFolderLockEnvelope(envelope, "987654".toCharArray(), "lock-1"))
+        assertNull(keyManager.unwrapFolderLockEnvelope(envelope, "123456".toCharArray(), "lock-1"))
+        assertNull(keyManager.unwrapFolderLockEnvelope(envelope, "987654".toCharArray(), "lock-2"))
+        assertNull(keyManager.unwrapPinEnvelope(envelope, "987654".toCharArray()))
+        token.fill(0)
+    }
+
+    @Test
+    fun folderPatternEnvelopeRoundTrip() {
+        val token = keyManager.generateMasterKey()
+        val pattern = PatternCredential.canonicalChars(intArrayOf(0, 1, 2, 5, 8))
+        val envelope = keyManager.createFolderLockEnvelope(token, pattern, "pattern-lock")
+        assertArrayEquals(token, keyManager.unwrapFolderLockEnvelope(envelope, pattern, "pattern-lock"))
+        assertNull(keyManager.unwrapFolderLockEnvelope(envelope, PatternCredential.canonicalChars(intArrayOf(0, 3, 6, 7, 8)), "pattern-lock"))
+        token.fill(0)
+        pattern.fill('\u0000')
     }
 
     @Test(expected = IllegalArgumentException::class)

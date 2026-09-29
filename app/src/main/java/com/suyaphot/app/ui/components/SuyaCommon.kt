@@ -24,6 +24,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
@@ -242,8 +243,8 @@ fun FolderTile(
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = Icons.Default.Folder,
-                        contentDescription = "Folder",
+                        imageVector = if (folder.lockId != null) Icons.Default.Lock else Icons.Default.Folder,
+                        contentDescription = if (folder.lockId != null) "Locked folder" else "Folder",
                         tint = SuyaColors.Accent,
                         modifier = Modifier.size(24.dp)
                     )
@@ -261,7 +262,7 @@ fun FolderTile(
                     color = SuyaColors.White
                 )
                 Text(
-                    text = "${folder.itemCount} items",
+                    text = if (folder.lockId != null || folder.effectiveProtected) "Locked" else "${folder.itemCount} items",
                     fontFamily = SoraFontFamily,
                     fontSize = 12.sp,
                     color = SuyaColors.TextMuted
@@ -339,8 +340,8 @@ fun EmptyState(
 fun SuyaDialog(
     onDismissRequest: () -> Unit,
     title: String,
-    confirmText: String,
-    onConfirm: () -> Unit,
+    confirmText: String?,
+    onConfirm: (() -> Unit)?,
     dismissText: String = "Cancel",
     content: @Composable () -> Unit
 ) {
@@ -371,12 +372,14 @@ fun SuyaDialog(
                         onClick = onDismissRequest,
                         variant = ButtonVariant.Ghost
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    SuyaButton(
-                        text = confirmText,
-                        onClick = onConfirm,
-                        variant = ButtonVariant.Primary
-                    )
+                    if (confirmText != null && onConfirm != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        SuyaButton(
+                            text = confirmText,
+                            onClick = onConfirm,
+                            variant = ButtonVariant.Primary
+                        )
+                    }
                 }
             }
         }

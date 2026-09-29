@@ -27,7 +27,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,14 +69,10 @@ fun MediaTile(
         label = "tile_scale"
     )
 
-    var thumbnailBitmap by remember(item.id) { mutableStateOf<Bitmap?>(null) }
+    var thumbnailBitmap by remember(item.id, item.updatedAt) { mutableStateOf<Bitmap?>(null) }
 
-    LaunchedEffect(item.id) {
+    LaunchedEffect(item.id, item.updatedAt) {
         thumbnailBitmap = withContext(Dispatchers.IO) { thumbLoader(item.id) }
-    }
-
-    DisposableEffect(item.id) {
-        onDispose { thumbnailBitmap?.recycle() }
     }
 
     Box(

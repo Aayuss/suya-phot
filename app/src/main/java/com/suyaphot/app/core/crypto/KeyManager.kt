@@ -159,6 +159,10 @@ class KeyManager(
      * Derives a KEK from a PIN using PBKDF2 + Keystore pepper + HKDF.
      */
     fun derivePinKek(pinChars: CharArray, salt: ByteArray, iterations: Int): ByteArray {
+        return deriveCredentialKek(pinChars, salt, iterations, "suya-phot-pin-kek")
+    }
+
+    private fun deriveCredentialKek(pinChars: CharArray, salt: ByteArray, iterations: Int, domain: String): ByteArray {
         val pbeSpec = PBEKeySpec(pinChars, salt, iterations, 256)
         val pbkdf2Key = try {
             SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
@@ -172,7 +176,7 @@ class KeyManager(
         val peppered = applyKeystorePepper(pbkdf2Key)
 
         // Final HKDF expand into 256-bit AES key
-        val info = "suya-phot-pin-kek".toByteArray(Charsets.UTF_8)
+        val info = domain.toByteArray(Charsets.UTF_8)
         val kek = HkdfSha256.derive(peppered, salt = salt, info = info, length = 32)
         pbkdf2Key.fill(0)
         peppered.fill(0)
@@ -218,6 +222,30 @@ class KeyManager(
         return try {
             Aead.decrypt(kek, envelope.nonce, aad = "pin-envelope-v1".toByteArray(Charsets.UTF_8), ciphertext = envelope.wrappedKey)
         } catch (e: Exception) {
+            null
+        } finally {
+            kek.fill(0)
+        }
+    }
+
+    fun createFolderLockEnvelope(token: ByteArray, credential: CharArray, lockId: String): PinEnvelope {
+        require(token.size == 32)
+        val salt = ByteArray(PIN_SALT_LEN).also { SecureRandom().nextBytes(it) }
+        val kek = deriveCredentialKek(credential, salt, PBKDF2_ITERATIONS, "suya-phot:folder-lock:kdf:v1")
+        val nonce = Aead.generateNonce()
+        val wrapped = try {
+            Aead.encrypt(kek, nonce, "suya-phot:folder-lock:envelope:v1:$lockId".toByteArray(), token)
+        } finally {
+            kek.fill(0)
+        }
+        return PinEnvelope(1, salt, PBKDF2_ITERATIONS, nonce, wrapped)
+    }
+
+    fun unwrapFolderLockEnvelope(envelope: PinEnvelope, credential: CharArray, lockId: String): ByteArray? {
+        val kek = deriveCredentialKek(credential, envelope.salt, envelope.iterations, "suya-phot:folder-lock:kdf:v1")
+        return try {
+            Aead.decrypt(kek, envelope.nonce, "suya-phot:folder-lock:envelope:v1:$lockId".toByteArray(), envelope.wrappedKey)
+        } catch (_: Exception) {
             null
         } finally {
             kek.fill(0)

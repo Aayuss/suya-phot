@@ -366,6 +366,7 @@ class VaultCrypto {
             }
         } catch (t: Throwable) {
             runCatching { destinationTemp.delete() }
+            if (t is kotlinx.coroutines.CancellationException) throw t
             throw VaultIntegrityException("Vault item could not be authenticated", t)
         }
     }

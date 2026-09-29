@@ -64,6 +64,7 @@ import kotlinx.coroutines.withContext
 fun SettingsScreen(
     container: AppContainer,
     onOpenTrash: () -> Unit,
+    onOpenPrivateTrash: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
@@ -123,6 +124,13 @@ fun SettingsScreen(
                             color = SuyaColors.White
                         )
                         Text(text = "Encrypted local data & thumbnails", fontFamily = SoraFontFamily, fontSize = 12.sp, color = SuyaColors.TextMuted)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Uninstalling Suya Phot removes this device's local vault. Encrypted export is not available yet; keep your original files.",
+                            fontFamily = SoraFontFamily,
+                            fontSize = 12.sp,
+                            color = SuyaColors.TextMuted
+                        )
                         Spacer(modifier = Modifier.height(14.dp))
                         SuyaButton(
                             text = "Clean Temporary Cache",
@@ -145,6 +153,12 @@ fun SettingsScreen(
                     subtitle = "View and restore deleted media",
                     icon = Icons.Default.Delete,
                     onClick = onOpenTrash
+                )
+                SettingRowItem(
+                    title = "Private Trash",
+                    subtitle = "Re-authenticate to view deleted protected media",
+                    icon = Icons.Default.Delete,
+                    onClick = onOpenPrivateTrash
                 )
 
                 SettingRowItem(

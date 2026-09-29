@@ -46,6 +46,7 @@ import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.auth.AuthResult
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.PinDots
+import com.suyaphot.app.ui.components.PatternLockPad
 import com.suyaphot.app.ui.components.SecurePinPad
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
@@ -68,6 +69,7 @@ fun LockScreen(
     var enteredPin by remember { mutableStateOf("") }
     var shakeTrigger by remember { mutableIntStateOf(0) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var showPatternInput by remember { mutableStateOf(false) }
 
     val lockoutTimestamp by container.preferences.lockoutUntilTimestamp.collectAsState(initial = 0L)
     var lockoutSecondsLeft by remember { mutableIntStateOf(0) }
@@ -82,6 +84,14 @@ fun LockScreen(
     val realVault by container.database.vaultDao()
         .observeVaultByKind(VaultKind.REAL.code)
         .collectAsState(initial = null)
+    val secondaryVault by container.database.vaultDao()
+        .observeVaultByKind(VaultKind.SECONDARY.code)
+        .collectAsState(initial = null)
+    val patternAvailable = realVault?.credentialTypeCode == 1 || secondaryVault?.credentialTypeCode == 1
+    val pinAvailable = realVault?.credentialTypeCode == 0 || secondaryVault?.credentialTypeCode == 0
+    LaunchedEffect(realVault?.credentialTypeCode, secondaryVault?.credentialTypeCode) {
+        showPatternInput = realVault?.credentialTypeCode == 1
+    }
     val realVaultWithBiometric = realVault?.takeIf {
         it.biometricEnvelope != null && it.biometricIv != null
     }
@@ -111,7 +121,7 @@ fun LockScreen(
             val promptInfo = BiometricPrompt.PromptInfo.Builder()
                 .setTitle("Unlock Suya Phot")
                 .setSubtitle("Use your fingerprint to unlock your secure vault")
-                .setNegativeButtonText("Use PIN")
+                .setNegativeButtonText(if (showPatternInput) "Use Pattern" else "Use PIN")
                 .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                 .build()
 
@@ -206,7 +216,7 @@ fun LockScreen(
                 )
             } else {
                 Text(
-                    text = "Enter your PIN to unlock",
+                    text = if (showPatternInput) "Draw your pattern to unlock" else "Enter your PIN to unlock",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted
@@ -215,7 +225,7 @@ fun LockScreen(
 
             Spacer(modifier = Modifier.height(28.dp))
 
-            PinDots(
+            if (!showPatternInput) PinDots(
                 pinLength = 6,
                 enteredCount = enteredPin.length,
                 shakeTrigger = shakeTrigger
@@ -223,7 +233,33 @@ fun LockScreen(
 
             Spacer(modifier = Modifier.weight(1f))
 
-            SecurePinPad(
+            if (showPatternInput) {
+                PatternLockPad(
+                    onPatternComplete = { nodes ->
+                        scope.launch {
+                            when (val result = container.pinAuthenticator.authenticateWithPattern(nodes)) {
+                                is AuthResult.Success -> onUnlocked()
+                                is AuthResult.IncorrectPin -> {
+                                    shakeTrigger++
+                                    errorMessage = "Incorrect pattern"
+                                    val threshold = container.preferences.intruderTriggerCount.first()
+                                    if (container.preferences.intruderSelfieEnabled.first() && result.attempts == threshold) {
+                                        container.intruderCaptureManager.captureIntruderPhoto(
+                                            lifecycleOwner = lifecycleOwner,
+                                            failureReason = "Failed pattern attempt #${result.attempts}"
+                                        )
+                                    }
+                                }
+                                is AuthResult.LockedOut -> { shakeTrigger++; errorMessage = "Too many failed attempts" }
+                                is AuthResult.Error -> { shakeTrigger++; errorMessage = result.message }
+                            }
+                        }
+                    },
+                    errorTrigger = shakeTrigger,
+                    enabled = lockoutSecondsLeft <= 0,
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                )
+            } else SecurePinPad(
                 onDigitClick = { digit ->
                     if (lockoutSecondsLeft <= 0 && enteredPin.length < 6) {
                         enteredPin += digit
@@ -278,13 +314,19 @@ fun LockScreen(
                 }
             )
 
+            if (patternAvailable && pinAvailable) {
+                TextButton(onClick = { showPatternInput = !showPatternInput; enteredPin = ""; errorMessage = null }) {
+                    Text(if (showPatternInput) "Use PIN instead" else "Use Pattern instead", color = SuyaColors.Accent)
+                }
+            }
+
             Spacer(modifier = Modifier.height(12.dp))
 
             TextButton(
                 onClick = { showForgotPinDialog = true }
             ) {
                 Text(
-                    text = "Forgot PIN?",
+                    text = if (showPatternInput) "Forgot pattern?" else "Forgot PIN?",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted

@@ -1,5 +1,7 @@
 package com.suyaphot.app.feature.folders
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -8,6 +10,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,6 +40,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.outlined.Delete
@@ -46,11 +52,12 @@ import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -58,6 +65,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.suyaphot.app.app.AppContainer
@@ -66,12 +79,15 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.auth.VaultSession
+import com.suyaphot.app.domain.auth.PatternCredential
 import com.suyaphot.app.domain.folders.FolderDeletePolicy
 import com.suyaphot.app.domain.folders.FolderManager
+import com.suyaphot.app.domain.folders.ViewerAccessScope
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.FolderTile
 import com.suyaphot.app.ui.components.MediaTile
+import com.suyaphot.app.ui.components.PatternLockPad
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
 import com.suyaphot.app.ui.components.SuyaIconButton
@@ -81,20 +97,34 @@ import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.flowOf
 
 @Composable
 fun FoldersScreen(
     container: AppContainer,
     modifier: Modifier = Modifier,
-    onMediaClick: (itemId: String) -> Unit = {},
+    onMediaClick: (itemId: String, scope: ViewerAccessScope?) -> Unit = { _, _ -> },
     onFolderOpened: (folderId: String) -> Unit = {}
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
 
     var currentParentId by remember { mutableStateOf<String?>(null) }
+    var hiddenMode by remember { mutableStateOf(false) }
+    val accessRevision by container.folderAccessManager.revision.collectAsState()
+    var pendingFolderId by remember { mutableStateOf<String?>(null) }
+    var pendingLockId by remember { mutableStateOf<String?>(null) }
+    var pendingLockBioIv by remember { mutableStateOf<ByteArray?>(null) }
+    var showHiddenAuth by remember { mutableStateOf(false) }
+    var hiddenBioIv by remember { mutableStateOf<ByteArray?>(null) }
+    var gateInput by remember { mutableStateOf("") }
+    var gateError by remember { mutableStateOf<String?>(null) }
+    var gateErrorTrigger by remember { mutableIntStateOf(0) }
+    var gateTypeCode by remember { mutableIntStateOf(0) }
     var breadcrumbs by remember { mutableStateOf<List<Pair<String?, String>>>(emptyList()) }
 
     // Dialog states
@@ -110,10 +140,25 @@ fun FoldersScreen(
 
     var showDeleteFolderDialog by remember { mutableStateOf(false) }
     var deleteFolderPolicy by remember { mutableStateOf(FolderDeletePolicy.MOVE_CONTENTS_TO_PARENT) }
+    var showHideConfirmDialog by remember { mutableStateOf(false) }
+    var showCreateLockDialog by remember { mutableStateOf(false) }
+    var lockTypeCode by remember { mutableIntStateOf(0) }
+    var newLockInput by remember { mutableStateOf("") }
+    var confirmLockInput by remember { mutableStateOf("") }
+    var firstLockPattern by remember { mutableStateOf<IntArray?>(null) }
+    var lockError by remember { mutableStateOf<String?>(null) }
+    var lockErrorTrigger by remember { mutableIntStateOf(0) }
+    var showEnrollBiometricDialog by remember { mutableStateOf(false) }
+    var enrollLockId by remember { mutableStateOf<String?>(null) }
+    var enrollTypeCode by remember { mutableIntStateOf(0) }
+    var enrollInput by remember { mutableStateOf("") }
+    var enrollError by remember { mutableStateOf<String?>(null) }
+    var enrollErrorTrigger by remember { mutableIntStateOf(0) }
 
     var showMoveFolderDialog by remember { mutableStateOf(false) }
     var targetParentFolderId by remember { mutableStateOf<String?>(null) }
     var allFoldersInVault by remember { mutableStateOf<List<Folder>>(emptyList()) }
+    var folderActionStatus by remember { mutableStateOf<String?>(null) }
 
     // Media Multi-selection in current folder
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
@@ -140,7 +185,7 @@ fun FoldersScreen(
                     folderId = currentParentId,
                     mode = ImportMode.COPY,
                     onItemComplete = { current, total, _ ->
-                        importProgressText = "Importing $current of $total items..."
+                        scope.launch { importProgressText = "Importing $current of $total items..." }
                     }
                 )
                 isImporting = false
@@ -150,14 +195,15 @@ fun FoldersScreen(
     }
 
     // Subfolders flow for current parent
-    val foldersFlow = remember(currentParentId) {
-        container.folderManager.getSubFoldersFlow(currentParentId)
+    val foldersFlow = remember(currentParentId, hiddenMode, vaultId) {
+        container.folderManager.getSubFoldersFlow(currentParentId, hiddenMode)
     }
     val folders by foldersFlow.collectAsState(initial = emptyList())
 
     // Media items flow for current parent folder
-    val mediaFlow = remember(vaultId, currentParentId) {
-        container.database.mediaItemDao().getByFolder(vaultId, currentParentId)
+    val mediaFlow = remember(vaultId, currentParentId, hiddenMode) {
+        if (hiddenMode && currentParentId == null) flowOf(emptyList())
+        else container.database.mediaItemDao().getByFolder(vaultId, currentParentId)
     }
     val rawMediaEntities by mediaFlow.collectAsState(initial = emptyList())
     val mediaItems = remember(rawMediaEntities) {
@@ -187,8 +233,199 @@ fun FoldersScreen(
         }
     }
 
+    LaunchedEffect(accessRevision, currentParentId, hiddenMode, vaultId) {
+        if (hiddenMode && !container.folderAccessManager.hasHiddenGrant(vaultId)) {
+            container.folderAccessManager.clear()
+            hiddenMode = false
+            currentParentId = null
+        } else if (currentParentId != null && !container.folderAccessManager.canOpen(vaultId, currentParentId!!)) {
+            container.folderAccessManager.retainLocksForFolder(vaultId, null)
+            currentParentId = null
+        }
+    }
+
+    fun attemptOpenFolder(folderId: String) {
+        pendingFolderId = folderId
+        scope.launch {
+            val entity = container.database.folderDao().getFolderForVault(folderId, vaultId) ?: return@launch
+            if (entity.effectiveHidden && !container.folderAccessManager.hasHiddenGrant(vaultId)) {
+                val vault = container.database.vaultDao().getVault(vaultId)
+                gateTypeCode = vault?.credentialTypeCode ?: 0
+                hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+                gateInput = ""
+                gateError = null
+                showHiddenAuth = true
+                return@launch
+            }
+            val missing = container.folderAccessManager.missingLockIds(vaultId, folderId)
+            if (missing.isNotEmpty()) {
+                pendingLockId = missing.first()
+                val lock = container.database.folderLockDao().getForVault(vaultId, missing.first())
+                gateTypeCode = lock?.credentialTypeCode ?: 0
+                pendingLockBioIv = lock?.biometricIv?.takeIf { lock.biometricEnvelope != null }
+                gateInput = ""
+                gateError = null
+                return@launch
+            }
+            container.folderAccessManager.retainLocksForFolder(vaultId, folderId)
+            currentParentId = folderId
+            pendingFolderId = null
+        }
+    }
+
+    fun submitGate(credential: CharArray) {
+        scope.launch {
+            val success = if (showHiddenAuth) {
+                container.pinAuthenticator.verifyCurrentCredential(credential, gateTypeCode)
+            } else {
+                val lockId = pendingLockId ?: return@launch
+                container.folderLockManager.unlock(lockId, credential, gateTypeCode)
+            }
+            credential.fill('\u0000')
+            gateInput = ""
+            if (!success) {
+                gateError = "Incorrect credential"
+                gateErrorTrigger++
+                return@launch
+            }
+            gateError = null
+            if (showHiddenAuth) {
+                container.folderAccessManager.grantHidden(vaultId)
+                hiddenMode = true
+                showHiddenAuth = false
+            } else {
+                pendingLockId = null
+            }
+            pendingFolderId?.let { attemptOpenFolder(it) }
+        }
+    }
+
+    fun launchFolderBiometric() {
+        val lockId = pendingLockId ?: return
+        val iv = pendingLockBioIv ?: return
+        val activity = context as? FragmentActivity ?: return
+        try {
+            val cipher = container.keyManager.createBiometricDecryptCipher("folder_$lockId", iv)
+            val prompt = BiometricPrompt(
+                activity, ContextCompat.getMainExecutor(activity),
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        val authCipher = result.cryptoObject?.cipher ?: return
+                        scope.launch {
+                            if (container.folderLockManager.unlockWithBiometric(lockId, authCipher)) {
+                                pendingLockId = null
+                                pendingLockBioIv = null
+                                pendingFolderId?.let { attemptOpenFolder(it) }
+                            } else gateError = "Fingerprint unavailable; use the folder credential"
+                        }
+                    }
+                }
+            )
+            prompt.authenticate(
+                BiometricPrompt.PromptInfo.Builder()
+                    .setTitle("Unlock protected folder")
+                    .setNegativeButtonText("Use folder credential")
+                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                    .build(),
+                BiometricPrompt.CryptoObject(cipher)
+            )
+        } catch (_: Exception) { gateError = "Fingerprint unavailable; use the folder credential" }
+    }
+
+    fun launchHiddenBiometric() {
+        val iv = hiddenBioIv ?: return
+        val activity = context as? FragmentActivity ?: return
+        try {
+            val cipher = container.keyManager.createBiometricDecryptCipher(vaultId, iv)
+            val prompt = BiometricPrompt(
+                activity, ContextCompat.getMainExecutor(activity),
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        val authorizedCipher = result.cryptoObject?.cipher ?: return
+                        scope.launch {
+                            if (container.pinAuthenticator.verifyCurrentBiometric(authorizedCipher)) {
+                                container.folderAccessManager.grantHidden(vaultId)
+                                showHiddenAuth = false
+                                hiddenMode = true
+                                pendingFolderId?.let { attemptOpenFolder(it) }
+                            } else gateError = "Fingerprint unavailable; use your vault credential"
+                        }
+                    }
+                }
+            )
+            prompt.authenticate(
+                BiometricPrompt.PromptInfo.Builder()
+                    .setTitle("Open Hidden folders")
+                    .setNegativeButtonText("Use vault credential")
+                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                    .build(),
+                BiometricPrompt.CryptoObject(cipher)
+            )
+        } catch (_: Exception) { gateError = "Fingerprint unavailable; use your vault credential" }
+    }
+
+    fun enrollFolderBiometric(credential: CharArray) {
+        val lockId = enrollLockId ?: return
+        val activity = context as? FragmentActivity ?: return
+        scope.launch {
+            val token = container.folderLockManager.tokenForBiometricEnrollment(lockId, credential, enrollTypeCode)
+            if (token == null) { enrollError = "Incorrect folder credential"; enrollErrorTrigger++; return@launch }
+            try {
+                val cipher = container.keyManager.createBiometricEncryptCipher("folder_$lockId")
+                val prompt = BiometricPrompt(
+                    activity, ContextCompat.getMainExecutor(activity),
+                    object : BiometricPrompt.AuthenticationCallback() {
+                        override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                            val authCipher = result.cryptoObject?.cipher
+                            try {
+                                if (authCipher != null) {
+                                    val envelope = authCipher.doFinal(token)
+                                    scope.launch {
+                                        if (container.folderLockManager.saveBiometricEnvelope(lockId, envelope, authCipher.iv)) {
+                                            showEnrollBiometricDialog = false
+                                            selectedFolderForAction = null
+                                            folderActionStatus = "Fingerprint enabled for folder"
+                                        } else enrollError = "Could not save fingerprint setting"
+                                    }
+                                }
+                            } catch (_: Exception) { enrollError = "Fingerprint enrollment failed" }
+                            finally { token.fill(0) }
+                        }
+                        override fun onAuthenticationError(errorCode: Int, errString: CharSequence) { token.fill(0) }
+                    }
+                )
+                prompt.authenticate(
+                    BiometricPrompt.PromptInfo.Builder()
+                        .setTitle("Enable folder fingerprint")
+                        .setNegativeButtonText("Cancel")
+                        .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                        .build(),
+                    BiometricPrompt.CryptoObject(cipher)
+                )
+            } catch (_: Exception) { token.fill(0); enrollError = "Fingerprint unavailable" }
+        }
+    }
+
+    LaunchedEffect(hiddenMode, currentParentId, vaultId) {
+        while (hiddenMode || currentParentId != null) {
+            delay(1_000)
+            if (hiddenMode && !container.folderAccessManager.hasHiddenGrant(vaultId)) {
+                container.folderAccessManager.clear()
+                hiddenMode = false
+                currentParentId = null
+                break
+            }
+            currentParentId?.let {
+                if (!container.folderAccessManager.canOpen(vaultId, it)) {
+                    container.folderAccessManager.retainLocksForFolder(vaultId, null)
+                    currentParentId = null
+                }
+            }
+        }
+    }
+
     val currentTitle = if (currentParentId == null) {
-        "Folders"
+        if (hiddenMode) "Hidden folders" else "Folders"
     } else {
         breadcrumbs.lastOrNull { it.first == currentParentId }?.second ?: "Folder"
     }
@@ -237,15 +474,40 @@ fun FoldersScreen(
             } else {
                 SuyaTopBar(
                     title = currentTitle,
-                    navigationIcon = if (currentParentId != null) Icons.AutoMirrored.Filled.ArrowBack else null,
-                    onNavigationClick = if (currentParentId != null) {
+                    navigationIcon = if (currentParentId != null || hiddenMode) Icons.AutoMirrored.Filled.ArrowBack else null,
+                    onNavigationClick = if (currentParentId != null || hiddenMode) {
                         {
-                            val parentIdx = breadcrumbs.indexOfLast { it.first == currentParentId } - 1
-                            currentParentId = if (parentIdx >= 0) breadcrumbs[parentIdx].first else null
+                            if (currentParentId == null) {
+                                hiddenMode = false
+                                container.folderAccessManager.clear()
+                            } else {
+                                val parentIdx = breadcrumbs.indexOfLast { it.first == currentParentId } - 1
+                                val parent = if (parentIdx >= 0) breadcrumbs[parentIdx].first else null
+                                scope.launch {
+                                    container.folderAccessManager.retainLocksForFolder(vaultId, parent)
+                                    currentParentId = parent
+                                }
+                            }
                         }
                     } else null,
                     actions = {
-                        SuyaIconButton(
+                        if (currentParentId == null && !hiddenMode) {
+                            SuyaIconButton(
+                                icon = Icons.Default.VisibilityOff,
+                                contentDescription = "Hidden folders",
+                                onClick = {
+                                    scope.launch {
+                                        val vault = container.database.vaultDao().getVault(vaultId)
+                                        gateTypeCode = vault?.credentialTypeCode ?: 0
+                                        hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+                                        gateInput = ""
+                                        gateError = null
+                                        showHiddenAuth = true
+                                    }
+                                }
+                            )
+                        }
+                        if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
                             contentDescription = "Import media here",
                             onClick = {
@@ -254,7 +516,7 @@ fun FoldersScreen(
                                 )
                             }
                         )
-                        SuyaIconButton(
+                        if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.CreateNewFolder,
                             contentDescription = "New subfolder",
                             onClick = {
@@ -268,6 +530,9 @@ fun FoldersScreen(
             }
 
             // Breadcrumb trail
+            folderActionStatus?.let {
+                Text(it, color = SuyaColors.TextMuted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 18.dp))
+            }
             if (breadcrumbs.size > 1) {
                 LazyRow(
                     modifier = Modifier
@@ -285,7 +550,10 @@ fun FoldersScreen(
                             fontSize = 13.sp,
                             color = if (isLast) SuyaColors.White else SuyaColors.Accent,
                             modifier = Modifier.clickable {
-                                currentParentId = crumb.first
+                                scope.launch {
+                                    container.folderAccessManager.retainLocksForFolder(vaultId, crumb.first)
+                                    currentParentId = crumb.first
+                                }
                             }
                         )
                         if (!isLast) {
@@ -306,7 +574,7 @@ fun FoldersScreen(
                     icon = Icons.Default.Folder,
                     title = if (currentParentId == null) "No folders created" else "This folder is empty",
                     subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Import media or create subfolders inside.",
-                    actionText = "Import Photos & Videos",
+                    actionText = if (hiddenMode && currentParentId == null) null else "Import Photos & Videos",
                     onActionClick = {
                         pickerLauncher.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
@@ -341,7 +609,7 @@ fun FoldersScreen(
                         ) { folder ->
                             FolderTile(
                                 folder = folder,
-                                onClick = { currentParentId = folder.id },
+                                onClick = { attemptOpenFolder(folder.id) },
                                 onLongClick = {
                                     selectedFolderForAction = folder
                                 }
@@ -375,7 +643,12 @@ fun FoldersScreen(
                                         if (isSelected) selectedMediaIds.remove(item.id)
                                         else selectedMediaIds[item.id] = Unit
                                     } else {
-                                        onMediaClick(item.id)
+                                        val folderId = currentParentId
+                                        if (folderId == null) onMediaClick(item.id, null)
+                                        else scope.launch {
+                                            val viewerScope = container.folderAccessManager.scopeForFolder(vaultId, folderId)
+                                            if (viewerScope != null) onMediaClick(item.id, viewerScope)
+                                        }
                                     }
                                 },
                                 onLongClick = {
@@ -384,11 +657,7 @@ fun FoldersScreen(
                                     }
                                 },
                                 thumbLoader = { itemId ->
-                                    val thumbFile = container.vaultFileStore.getThumbFile(vaultId, itemId)
-                                    val subkey = (container.sessionManager.sessionState.value as? VaultSession.Unlocked)?.thumbSubkey
-                                    if (subkey != null) {
-                                        container.thumbnailGenerator.decryptThumbnail(thumbFile, subkey, itemId)
-                                    } else null
+                                    container.encryptedThumbnailRepository.load(vaultId, itemId, item.updatedAt)
                                 }
                             )
                         }
@@ -463,6 +732,63 @@ fun FoldersScreen(
         }
     }
 
+    if (showHiddenAuth || pendingLockId != null) {
+        SuyaDialog(
+            onDismissRequest = {
+                showHiddenAuth = false
+                pendingLockId = null
+                pendingFolderId = null
+                gateInput = ""
+            },
+            title = if (showHiddenAuth) "Open Hidden folders" else "Unlock folder",
+            confirmText = if (gateTypeCode == 0) "Unlock" else null,
+            onConfirm = if (gateTypeCode == 0) ({ submitGate(gateInput.toCharArray()) }) else null,
+            content = {
+                Column {
+                    if (gateTypeCode == 1) {
+                        PatternLockPad(
+                            onPatternComplete = { raw ->
+                                val chars = runCatching { PatternCredential.canonicalChars(raw) }.getOrNull()
+                                if (chars == null) { gateError = "Connect at least four dots"; gateErrorTrigger++ }
+                                else submitGate(chars)
+                            },
+                            errorTrigger = gateErrorTrigger,
+                            enabled = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        SuyaTextField(
+                            value = gateInput,
+                            onValueChange = { gateInput = it.take(12); gateError = null },
+                            label = "PIN",
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                        )
+                    }
+                    if (pendingLockId != null && pendingLockBioIv != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        SuyaButton(
+                            text = "Use fingerprint",
+                            onClick = { launchFolderBiometric() },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    if (showHiddenAuth && hiddenBioIv != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        SuyaButton(
+                            text = "Use fingerprint",
+                            onClick = { launchHiddenBiometric() },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    gateError?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
+                }
+            }
+        )
+    }
+
     // Create Folder Dialog
     if (showCreateDialog) {
         SuyaDialog(
@@ -533,6 +859,70 @@ fun FoldersScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                     SuyaButton(
+                        text = "Move Folder",
+                        leadingIcon = Icons.AutoMirrored.Filled.DriveFileMove,
+                        onClick = {
+                            scope.launch {
+                                allFoldersInVault = container.folderManager.getMoveDestinations(hiddenMode)
+                                targetParentFolderId = targetFolder.parentId
+                                showMoveFolderDialog = true
+                            }
+                        },
+                        variant = ButtonVariant.Secondary,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    SuyaButton(
+                        text = if (targetFolder.directHidden) "Unhide Folder" else "Hide Folder",
+                        leadingIcon = Icons.Default.VisibilityOff,
+                        onClick = { showHideConfirmDialog = true },
+                        variant = ButtonVariant.Secondary,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    SuyaButton(
+                        text = if (targetFolder.lockId == null) "Lock Folder" else "Remove Folder Lock",
+                        leadingIcon = Icons.Default.Lock,
+                        onClick = {
+                            if (targetFolder.lockId == null) {
+                                lockTypeCode = 0
+                                newLockInput = ""
+                                confirmLockInput = ""
+                                firstLockPattern = null
+                                lockError = null
+                                showCreateLockDialog = true
+                            } else {
+                                scope.launch {
+                                    if (!container.folderAccessManager.hasLockGrant(vaultId, targetFolder.lockId)) {
+                                        attemptOpenFolder(targetFolder.id)
+                                    } else {
+                                        container.folderLockManager.remove(targetFolder.id)
+                                        selectedFolderForAction = null
+                                    }
+                                }
+                            }
+                        },
+                        variant = ButtonVariant.Secondary,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (targetFolder.lockId != null && container.folderAccessManager.hasLockGrant(vaultId, targetFolder.lockId)) {
+                        SuyaButton(
+                            text = "Allow fingerprint for folder",
+                            onClick = {
+                                scope.launch {
+                                    val lock = container.database.folderLockDao().getForVault(vaultId, targetFolder.lockId)
+                                    if (lock != null) {
+                                        enrollLockId = lock.id
+                                        enrollTypeCode = lock.credentialTypeCode
+                                        enrollInput = ""
+                                        enrollError = null
+                                        showEnrollBiometricDialog = true
+                                    }
+                                }
+                            },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    SuyaButton(
                         text = "Delete Folder",
                         leadingIcon = Icons.Outlined.Delete,
                         onClick = {
@@ -545,6 +935,156 @@ fun FoldersScreen(
             },
             confirmText = "Done",
             onConfirm = { selectedFolderForAction = null }
+        )
+    }
+
+    if (showMoveFolderDialog && selectedFolderForAction != null) {
+        val moving = selectedFolderForAction!!
+        val byId = allFoldersInVault.associateBy { it.id }
+        fun validTarget(targetId: String): Boolean {
+            var cursor: String? = targetId
+            val seen = HashSet<String>()
+            while (cursor != null) {
+                if (!seen.add(cursor) || cursor == moving.id) return false
+                cursor = byId[cursor]?.parentId
+            }
+            return true
+        }
+        SuyaDialog(
+            onDismissRequest = { showMoveFolderDialog = false },
+            title = "Move ${moving.name}",
+            confirmText = "Move",
+            onConfirm = {
+                scope.launch {
+                    val moved = container.folderManager.moveFolder(moving.id, targetParentFolderId)
+                    folderActionStatus = if (moved) "Folder moved" else "Folder could not be moved"
+                    if (moved) { showMoveFolderDialog = false; selectedFolderForAction = null }
+                }
+            },
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.height(300.dp).verticalScroll(rememberScrollState())) {
+                    SuyaButton("Root", onClick = { targetParentFolderId = null }, variant = if (targetParentFolderId == null) ButtonVariant.Primary else ButtonVariant.Secondary)
+                    allFoldersInVault.filter { validTarget(it.id) }.forEach { folder ->
+                        SuyaButton(
+                            text = folder.name,
+                            onClick = { targetParentFolderId = folder.id },
+                            variant = if (targetParentFolderId == folder.id) ButtonVariant.Primary else ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+        )
+    }
+
+    if (showHideConfirmDialog && selectedFolderForAction != null) {
+        val target = selectedFolderForAction!!
+        SuyaDialog(
+            onDismissRequest = { showHideConfirmDialog = false },
+            title = if (target.directHidden) "Unhide ${target.name}?" else "Hide ${target.name}?",
+            confirmText = if (target.directHidden) "Unhide" else "Hide",
+            onConfirm = {
+                scope.launch {
+                    container.folderPrivacyCoordinator.setHidden(vaultId, target.id, !target.directHidden)
+                    showHideConfirmDialog = false
+                    selectedFolderForAction = null
+                }
+            },
+            content = {
+                Text(
+                    if (target.directHidden) "It will remain hidden if its parent is still hidden."
+                    else "This folder, its subfolders and media will disappear from normal Photos, Search, Favorites and Folders. Open Hidden folders to access it.",
+                    color = SuyaColors.TextMuted, fontSize = 13.sp
+                )
+            }
+        )
+    }
+
+    if (showCreateLockDialog && selectedFolderForAction != null) {
+        val target = selectedFolderForAction!!
+        SuyaDialog(
+            onDismissRequest = { showCreateLockDialog = false; newLockInput = ""; confirmLockInput = ""; firstLockPattern = null },
+            title = "Lock ${target.name}",
+            confirmText = if (lockTypeCode == 0) "Create lock" else null,
+            onConfirm = if (lockTypeCode == 0) ({
+                if (newLockInput.length !in 4..12 || !newLockInput.all(Char::isDigit)) {
+                    lockError = "Use 4–12 digits (6 or more recommended)"
+                } else if (newLockInput != confirmLockInput) {
+                    lockError = "PINs do not match"
+                } else {
+                    scope.launch {
+                        val created = container.folderLockManager.create(target.id, newLockInput.toCharArray(), 0)
+                        if (created) {
+                            showCreateLockDialog = false
+                            selectedFolderForAction = null
+                            newLockInput = ""
+                            confirmLockInput = ""
+                        } else lockError = "Could not create folder lock"
+                    }
+                }
+            }) else null,
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SuyaButton("PIN", onClick = { lockTypeCode = 0; firstLockPattern = null }, variant = if (lockTypeCode == 0) ButtonVariant.Primary else ButtonVariant.Secondary)
+                        SuyaButton("Pattern", onClick = { lockTypeCode = 1; newLockInput = ""; confirmLockInput = "" }, variant = if (lockTypeCode == 1) ButtonVariant.Primary else ButtonVariant.Secondary)
+                    }
+                    if (lockTypeCode == 0) {
+                        SuyaTextField(newLockInput, onValueChange = { newLockInput = it.take(12) }, label = "New PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                        SuyaTextField(confirmLockInput, onValueChange = { confirmLockInput = it.take(12) }, label = "Confirm PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                    } else {
+                        Text(if (firstLockPattern == null) "Draw a pattern" else "Draw it again to confirm", color = SuyaColors.TextMuted, fontSize = 13.sp)
+                        PatternLockPad(
+                            onPatternComplete = { raw ->
+                                val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
+                                if (normalized == null) { lockError = "Connect at least four dots"; lockErrorTrigger++ }
+                                else if (firstLockPattern == null) { firstLockPattern = normalized; lockError = null }
+                                else if (!normalized.contentEquals(firstLockPattern)) { lockError = "Patterns do not match"; lockErrorTrigger++; firstLockPattern = null }
+                                else {
+                                    scope.launch {
+                                        val created = container.folderLockManager.create(target.id, PatternCredential.canonicalChars(normalized), 1)
+                                        if (created) { showCreateLockDialog = false; selectedFolderForAction = null; firstLockPattern = null }
+                                        else lockError = "Could not create folder lock"
+                                    }
+                                }
+                            },
+                            errorTrigger = lockErrorTrigger,
+                            enabled = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    lockError?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
+                    Text("Folder locks guard access inside an unlocked vault; they are not separate encryption keys for media.", color = SuyaColors.TextMuted, fontSize = 11.sp)
+                }
+            }
+        )
+    }
+
+    if (showEnrollBiometricDialog && enrollLockId != null) {
+        SuyaDialog(
+            onDismissRequest = { showEnrollBiometricDialog = false; enrollInput = "" },
+            title = "Enable folder fingerprint",
+            confirmText = if (enrollTypeCode == 0) "Continue" else null,
+            onConfirm = if (enrollTypeCode == 0) ({ enrollFolderBiometric(enrollInput.toCharArray()); enrollInput = "" }) else null,
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Verify this folder's credential before enrolling fingerprint.", color = SuyaColors.TextMuted, fontSize = 12.sp)
+                    if (enrollTypeCode == 0) {
+                        SuyaTextField(enrollInput, onValueChange = { enrollInput = it.take(12) }, label = "Folder PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                    } else {
+                        PatternLockPad(
+                            onPatternComplete = { raw ->
+                                val chars = runCatching { PatternCredential.canonicalChars(raw) }.getOrNull()
+                                if (chars == null) { enrollError = "Connect at least four dots"; enrollErrorTrigger++ }
+                                else enrollFolderBiometric(chars)
+                            },
+                            errorTrigger = enrollErrorTrigger,
+                            enabled = true
+                        )
+                    }
+                    enrollError?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
+                }
+            }
         )
     }
 

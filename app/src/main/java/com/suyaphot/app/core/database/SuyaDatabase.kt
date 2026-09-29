@@ -5,12 +5,14 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.suyaphot.app.core.database.dao.FolderDao
+import com.suyaphot.app.core.database.dao.FolderLockDao
 import com.suyaphot.app.core.database.dao.IntruderEventDao
 import com.suyaphot.app.core.database.dao.MediaItemDao
 import com.suyaphot.app.core.database.dao.VaultDao
 import com.suyaphot.app.core.database.dao.VaultJobDao
 import com.suyaphot.app.core.database.dao.RestoreJobDao
 import com.suyaphot.app.core.database.entity.FolderEntity
+import com.suyaphot.app.core.database.entity.FolderLockEntity
 import com.suyaphot.app.core.database.entity.IntruderEventEntity
 import com.suyaphot.app.core.database.entity.MediaItemEntity
 import com.suyaphot.app.core.database.entity.VaultEntity
@@ -23,18 +25,20 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     entities = [
         VaultEntity::class,
         FolderEntity::class,
+        FolderLockEntity::class,
         MediaItemEntity::class,
         VaultJobEntity::class,
         IntruderEventEntity::class,
         RestoreJobEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class SuyaDatabase : RoomDatabase() {
 
     abstract fun vaultDao(): VaultDao
     abstract fun folderDao(): FolderDao
+    abstract fun folderLockDao(): FolderLockDao
     abstract fun mediaItemDao(): MediaItemDao
     abstract fun vaultJobDao(): VaultJobDao
     abstract fun intruderEventDao(): IntruderEventDao
@@ -53,7 +57,7 @@ abstract class SuyaDatabase : RoomDatabase() {
                     SuyaDatabase::class.java,
                     DB_NAME
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { instance = it }
             }
@@ -81,6 +85,39 @@ abstract class SuyaDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_restore_jobs_vaultId ON restore_jobs(vaultId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_restore_jobs_mediaId ON restore_jobs(mediaId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_restore_jobs_phaseCode ON restore_jobs(phaseCode)")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE vaults ADD COLUMN credentialTypeCode INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE folders ADD COLUMN directHidden INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE folders ADD COLUMN effectiveHidden INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE folders ADD COLUMN lockId TEXT")
+                db.execSQL("ALTER TABLE folders ADD COLUMN effectiveProtected INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE media_items ADD COLUMN concealed INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_folders_effectiveHidden ON folders(effectiveHidden)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_folders_effectiveProtected ON folders(effectiveProtected)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_folders_lockId ON folders(lockId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_vaultId_concealed_deletedAt ON media_items(vaultId, concealed, deletedAt)")
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS folder_locks (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        vaultId TEXT NOT NULL,
+                        folderId TEXT NOT NULL,
+                        credentialTypeCode INTEGER NOT NULL,
+                        credentialEnvelope BLOB NOT NULL,
+                        biometricEnvelope BLOB,
+                        biometricIv BLOB,
+                        relockPolicyCode INTEGER NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        FOREIGN KEY(vaultId) REFERENCES vaults(id) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(folderId) REFERENCES folders(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )""".trimIndent()
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_folder_locks_folderId ON folder_locks(folderId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_folder_locks_vaultId ON folder_locks(vaultId)")
             }
         }
     }

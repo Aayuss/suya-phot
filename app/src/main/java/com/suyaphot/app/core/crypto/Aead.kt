@@ -97,8 +97,14 @@ object Aead {
         plaintext: ByteArray,
         aad: ByteArray = ByteArray(0)
     ): ByteArray {
-        val nonce = generateNonce()
-        val ciphertext = encrypt(key, nonce, aad, plaintext)
+        // Android Keystore GCM keys reject caller-selected encryption IVs. Let the provider
+        // generate one and serialize the actual IV returned by Cipher for decryption.
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key)
+        if (aad.isNotEmpty()) cipher.updateAAD(aad)
+        val nonce = cipher.iv
+        require(nonce.size == NONCE_LENGTH_BYTES) { "AES-GCM nonce must be 12 bytes" }
+        val ciphertext = cipher.doFinal(plaintext)
         return try {
             ByteArray(nonce.size + ciphertext.size).also { result ->
                 nonce.copyInto(result)

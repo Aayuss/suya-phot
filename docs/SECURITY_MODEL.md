@@ -58,6 +58,10 @@ Using domain separation info strings:
 - The UI in secondary mode provides identical features without displaying words such as "Decoy" or "Fake".
 - Real vault storage usage and folder counts are completely hidden when in secondary mode.
 
+### Hidden and locked folders
+
+Room schema v3 stores direct and inherited hidden/protected folder flags and a materialized media `concealed` flag. Ordinary gallery, search, favorites, and Trash queries exclude concealed media. Entering Hidden folders requires a short-lived vault re-authentication grant; folder PIN/pattern locks require separate, short-lived grants for every locked ancestor. Grants are in memory and cleared on vault lock or app background. Folder locks do not create an independent media-encryption domain: media remains encrypted by its vault key, and the extra lock is an application access gate. Deleted protected media stays classified as private; if its original folder is gone, restore uses a hidden recovery folder rather than visible root.
+
 ---
 
 ## 4. Encrypted File Format (SUPH v1)

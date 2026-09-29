@@ -20,7 +20,7 @@ Optimized for the **Samsung Galaxy S23 Ultra** and modern Android devices (API 2
 1. **Keystore-Assisted Cryptographic Security**:
    - Master keys (256-bit random) derived using domain-separated HKDF-SHA256 (`mediaSubkey`, `metaSubkey`, `thumbSubkey`).
    - Streaming AES-256-GCM authenticated encryption for photos and videos using the versioned `SUPH` v1 binary container format (authenticated header and bounded 256 KiB I/O buffers; the complete media file is never buffered in memory).
-   - Dual-envelope PIN authentication combining PBKDF2-HMAC-SHA256 (a fixed, envelope-recorded work factor) with an Android Keystore-backed HMAC pepper.
+   - PIN or 3×3 pattern credential envelope combining PBKDF2-HMAC-SHA256 (a fixed, envelope-recorded work factor) with an Android Keystore-backed HMAC pepper. Existing PIN envelopes remain readable.
    - Biometric unwrap via `BiometricPrompt` with an Android Keystore authenticated `CryptoObject` (AES-256-GCM). Plaintext key material is kept only in the active in-memory session and is never persisted.
    - 128-bit emergency Recovery Kit formatted as a 26-character Base32 code (`XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX`), normalized and validated for exact 26-character input.
 
@@ -34,9 +34,10 @@ Optimized for the **Samsung Galaxy S23 Ultra** and modern Android devices (API 2
    - Restores media to public MediaStore with a full SHA-256 recheck before any private vault copy is removed. Source deletion uses standard Android scoped-storage consent APIs.
 
 4. **Arbitrarily Nested Folders & Media Management**:
-   - Multi-level folder hierarchy with O(1) item selection and instant moves without re-encryption.
+   - Multi-level folder hierarchy with media moves that do not re-encrypt files.
    - Strict cycle prevention algorithm preventing moving a folder into its own descendant.
    - Dynamic breadcrumb navigation, folder renaming, and transactional deletion policies (move contents to parent or trash).
+   - Hidden subtrees and per-folder PIN/pattern locks exclude protected media from ordinary gallery, search, favorites, and Trash views. Folder locks are in-app access gates; the vault key remains the at-rest encryption boundary.
 
 5. **Performance & Memory Controls**:
    - Zero background services, polling loops, or persistent wake locks. Session timeout is evaluated passively using `ProcessLifecycleObserver` and monotonic `SystemClock.elapsedRealtime()`.
@@ -55,6 +56,8 @@ Optimized for the **Samsung Galaxy S23 Ultra** and modern Android devices (API 2
 ### Prerequisites
 - JDK 17 (recommended: Eclipse Temurin 17)
 - Android SDK (API 35 platforms and build-tools)
+
+The vault is device-local and Android backup is disabled. Uninstalling the app removes this device's vault; encrypted export is not implemented yet. Keep original media until you have independently verified your copy and recovery plan.
 
 ### Running Tests
 ```bash

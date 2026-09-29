@@ -2,11 +2,17 @@ package com.suyaphot.app.domain.trash
 
 import com.suyaphot.app.core.database.SuyaDatabase
 import com.suyaphot.app.core.database.entity.MediaItemEntity
+import com.suyaphot.app.core.database.entity.FolderEntity
+import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.datastore.SecurityPreferences
 import com.suyaphot.app.core.util.VaultFileStore
+import com.suyaphot.app.domain.folders.FolderAccessManager
+import com.suyaphot.app.domain.folders.FolderPrivacyCoordinator
+import com.suyaphot.app.domain.auth.SessionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 data class PermanentDeleteSummary(
     val deleted: Int,
@@ -17,8 +23,18 @@ data class PermanentDeleteSummary(
 class TrashCoordinator(
     private val database: SuyaDatabase,
     private val fileStore: VaultFileStore,
-    private val preferences: SecurityPreferences
+    private val preferences: SecurityPreferences,
+    private val accessManager: FolderAccessManager? = null,
+    private val sessionManager: SessionManager? = null
 ) {
+    private suspend fun authorized(vaultId: String, item: MediaItemEntity): Boolean {
+        if (!item.concealed) return true
+        val access = accessManager ?: return false
+        if (!access.hasHiddenGrant(vaultId)) return false
+        val folderId = item.previousFolderId ?: return true
+        val folder = database.folderDao().getFolderForVault(folderId, vaultId) ?: return true
+        return access.canOpen(vaultId, folder.id)
+    }
     suspend fun purgeExpired(vaultId: String): PermanentDeleteSummary = withContext(Dispatchers.IO) {
         val retentionDays = preferences.trashRetentionDays.first()
         if (retentionDays == 0) return@withContext PermanentDeleteSummary(0, 0, emptyList())
@@ -37,7 +53,14 @@ class TrashCoordinator(
     }
 
     suspend fun permanentDelete(vaultId: String, ids: List<String>): PermanentDeleteSummary = withContext(Dispatchers.IO) {
-        permanentDeleteEntities(vaultId, database.mediaItemDao().getItemsByIdsForVault(vaultId, ids))
+        val all = database.mediaItemDao().getItemsByIdsForVault(vaultId, ids)
+        val allowed = mutableListOf<MediaItemEntity>()
+        val denied = mutableListOf<String>()
+        for (item in all) {
+            if (authorized(vaultId, item)) allowed += item else denied += item.id
+        }
+        val result = permanentDeleteEntities(vaultId, allowed)
+        result.copy(cleanupPending = result.cleanupPending + denied.size, failedIds = result.failedIds + denied)
     }
 
     private suspend fun permanentDeleteEntities(
@@ -64,13 +87,42 @@ class TrashCoordinator(
         val now = System.currentTimeMillis()
         var restored = 0
         for (item in items) {
-            val validFolder = item.previousFolderId?.takeIf {
-                database.folderDao().getFolderForVault(it, vaultId) != null
-            }
+            if (!authorized(vaultId, item)) continue
+            val validFolder = item.previousFolderId?.let { database.folderDao().getFolderForVault(it, vaultId) }
+            val restoredFolder = if (item.concealed && (validFolder == null || (!validFolder.effectiveHidden && !validFolder.effectiveProtected))) {
+                ensureRecoveredPrivateFolder(vaultId)
+            } else validFolder
+            // Failure to create the hidden fallback must never make private media visible at root.
+            if (item.concealed && restoredFolder == null) continue
             restored += database.mediaItemDao().restoreFromTrashForVault(
-                vaultId, item.id, validFolder, now
+                vaultId, item.id, restoredFolder?.id,
+                item.concealed || restoredFolder?.let { it.effectiveHidden || it.effectiveProtected } == true,
+                now
             )
         }
         restored
+    }
+
+    private suspend fun ensureRecoveredPrivateFolder(vaultId: String): FolderEntity? {
+        val id = UUID.nameUUIDFromBytes("suya-phot:recovered-private:$vaultId".toByteArray()).toString()
+        database.folderDao().getFolderForVault(id, vaultId)?.let { existing ->
+            if (!existing.effectiveHidden) {
+                FolderPrivacyCoordinator(database).setHidden(vaultId, id, true)
+                return database.folderDao().getFolderForVault(id, vaultId)
+            }
+            return existing
+        }
+        val lease = sessionManager?.acquireOperationKeyLease() ?: return null
+        try {
+            if (lease.vaultId != vaultId) return null
+            val name = "Recovered Private".toByteArray(Charsets.UTF_8)
+            val encrypted = try { Aead.encryptWithPrependedNonce(lease.metaSubkey, name, id.toByteArray()) }
+                finally { name.fill(0) }
+            val now = System.currentTimeMillis()
+            val folder = FolderEntity(id, vaultId, null, encrypted, now, now, null, 0L,
+                directHidden = true, effectiveHidden = true)
+            database.folderDao().insert(folder)
+            return folder
+        } finally { lease.close() }
     }
 }

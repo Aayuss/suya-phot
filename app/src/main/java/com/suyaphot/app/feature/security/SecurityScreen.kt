@@ -37,6 +37,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,9 +60,11 @@ import com.suyaphot.app.core.database.entity.VaultEntity
 import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.auth.ChangeSecondaryPinResult
+import com.suyaphot.app.domain.auth.PatternCredential
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
+import com.suyaphot.app.ui.components.PatternLockPad
 import com.suyaphot.app.ui.components.SuyaTextField
 import com.suyaphot.app.ui.components.SuyaTopBar
 import com.suyaphot.app.ui.theme.SoraFontFamily
@@ -92,6 +95,14 @@ fun SecurityScreen(
     var confirmSecondaryPinInput by remember { mutableStateOf("") }
     var secondaryPinError by remember { mutableStateOf<String?>(null) }
     var showIntruderPermissionDialog by remember { mutableStateOf(false) }
+    var showChangeCredentialDialog by remember { mutableStateOf(false) }
+    var currentCredentialInput by remember { mutableStateOf("") }
+    var currentPatternCredential by remember { mutableStateOf<CharArray?>(null) }
+    var newCredentialInput by remember { mutableStateOf("") }
+    var confirmCredentialInput by remember { mutableStateOf("") }
+    var firstNewPattern by remember { mutableStateOf<IntArray?>(null) }
+    var changeCredentialError by remember { mutableStateOf<String?>(null) }
+    var changePatternErrorTrigger by remember { mutableIntStateOf(0) }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -114,6 +125,32 @@ fun SecurityScreen(
     val canEnrollBiometrics = remember {
         val bm = BiometricManager.from(context)
         bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
+    }
+
+    fun submitChangedCredential(newChars: CharArray) {
+        val oldType = realVault?.credentialTypeCode ?: 0
+        val oldChars = if (oldType == 1) currentPatternCredential?.copyOf()
+            else currentCredentialInput.toCharArray()
+        if (oldChars == null || oldChars.isEmpty()) {
+            newChars.fill('\u0000')
+            changeCredentialError = "Enter your current credential first"
+            return
+        }
+        scope.launch {
+            val changed = container.pinAuthenticator.changeCurrentCredential(oldChars, oldType, newChars, 1 - oldType)
+            if (changed) {
+                currentPatternCredential?.fill('\u0000')
+                currentPatternCredential = null
+                currentCredentialInput = ""
+                newCredentialInput = ""
+                confirmCredentialInput = ""
+                firstNewPattern = null
+                showChangeCredentialDialog = false
+            } else {
+                changeCredentialError = "Current credential was incorrect or update failed"
+                changePatternErrorTrigger++
+            }
+        }
     }
 
     if (isSecondary) {
@@ -188,6 +225,22 @@ fun SecurityScreen(
                     statusPositive = realVault?.recoveryEnvelope != null
                 )
 
+                SuyaButton(
+                    text = if (realVault?.credentialTypeCode == 1) "Change Pattern to PIN" else "Change PIN to Pattern",
+                    onClick = {
+                        currentCredentialInput = ""
+                        currentPatternCredential?.fill('\u0000')
+                        currentPatternCredential = null
+                        newCredentialInput = ""
+                        confirmCredentialInput = ""
+                        firstNewPattern = null
+                        changeCredentialError = null
+                        showChangeCredentialDialog = true
+                    },
+                    variant = ButtonVariant.Secondary,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
                 // Biometric Unlock
                 if (canEnrollBiometrics) {
                     SecurityToggleRow(
@@ -251,7 +304,7 @@ fun SecurityScreen(
                 // Intruder Selfie
                 SecurityToggleRow(
                     title = "Intruder Selfie",
-                    subtitle = "Captures a front-camera photo after $intruderThreshold failed PIN attempts",
+                    subtitle = "Captures a front-camera photo after $intruderThreshold failed vault credential attempts",
                     icon = Icons.Default.CameraAlt,
                     checked = intruderEnabled,
                     onCheckedChange = { enable ->
@@ -368,7 +421,72 @@ fun SecurityScreen(
         }
     }
 
-    // Secondary PIN Dialog
+    if (showChangeCredentialDialog && !isSecondary) {
+        val oldType = realVault?.credentialTypeCode ?: 0
+        SuyaDialog(
+            onDismissRequest = {
+                showChangeCredentialDialog = false
+                currentPatternCredential?.fill('\u0000')
+                currentPatternCredential = null
+                currentCredentialInput = ""
+                newCredentialInput = ""
+                confirmCredentialInput = ""
+                firstNewPattern = null
+            },
+            title = if (oldType == 0) "Change PIN to Pattern" else "Change Pattern to PIN",
+            confirmText = if (oldType == 1) "Change to PIN" else null,
+            onConfirm = if (oldType == 1) ({
+                if (newCredentialInput.length != 6 || newCredentialInput != confirmCredentialInput) {
+                    changeCredentialError = "Enter and confirm a new 6-digit PIN"
+                } else submitChangedCredential(newCredentialInput.toCharArray())
+            }) else null,
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (oldType == 0) {
+                        SuyaTextField(
+                            currentCredentialInput,
+                            onValueChange = { currentCredentialInput = it.take(6); changeCredentialError = null },
+                            label = "Current PIN",
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                        )
+                        Text(if (firstNewPattern == null) "Draw a new pattern" else "Draw the new pattern again", color = SuyaColors.TextMuted, fontSize = 13.sp)
+                        PatternLockPad(
+                            onPatternComplete = { raw ->
+                                val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
+                                if (normalized == null) { changeCredentialError = "Connect at least four dots"; changePatternErrorTrigger++ }
+                                else if (firstNewPattern == null) { firstNewPattern = normalized; changeCredentialError = null }
+                                else if (!normalized.contentEquals(firstNewPattern)) { firstNewPattern = null; changeCredentialError = "Patterns do not match"; changePatternErrorTrigger++ }
+                                else submitChangedCredential(PatternCredential.canonicalChars(normalized))
+                            },
+                            errorTrigger = changePatternErrorTrigger,
+                            enabled = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        Text(if (currentPatternCredential == null) "Draw your current pattern" else "Current pattern captured", color = SuyaColors.TextMuted, fontSize = 13.sp)
+                        if (currentPatternCredential == null) {
+                            PatternLockPad(
+                                onPatternComplete = { raw ->
+                                    currentPatternCredential = runCatching { PatternCredential.canonicalChars(raw) }.getOrNull()
+                                    if (currentPatternCredential == null) { changeCredentialError = "Connect at least four dots"; changePatternErrorTrigger++ }
+                                    else changeCredentialError = null
+                                },
+                                errorTrigger = changePatternErrorTrigger,
+                                enabled = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        SuyaTextField(newCredentialInput, onValueChange = { newCredentialInput = it.take(6) }, label = "New PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                        SuyaTextField(confirmCredentialInput, onValueChange = { confirmCredentialInput = it.take(6) }, label = "Confirm PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                    }
+                    changeCredentialError?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
+                }
+            }
+        )
+    }
+
+    // Intruder permission dialog
     if (showIntruderPermissionDialog) {
         SuyaDialog(
             onDismissRequest = { showIntruderPermissionDialog = false },

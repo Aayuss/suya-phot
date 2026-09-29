@@ -61,6 +61,8 @@ import com.suyaphot.app.core.database.entity.MediaItemEntity
 import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
+import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.gallery.GalleryFilter
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.ui.components.ButtonVariant
@@ -79,6 +81,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.paging.compose.itemKey
 
@@ -97,9 +100,15 @@ fun PhotosScreen(
     var searchQuery by remember { mutableStateOf("") }
 
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
-    val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() } }
+    var allMatchingIds by remember { mutableStateOf<Set<String>?>(null) }
+    val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() || allMatchingIds != null } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
+    val trashRetentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
+    var statusMessage by remember { mutableStateOf<String?>(null) }
+
+    fun selectedIds(): List<String> = allMatchingIds?.toList() ?: selectedMediaIds.keys.toList()
+    fun clearSelection() { selectedMediaIds.clear(); allMatchingIds = null }
 
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
@@ -115,16 +124,20 @@ fun PhotosScreen(
         if (uris.isNotEmpty()) {
             isImporting = true
             scope.launch {
-                container.importCoordinator.importBatch(
+                val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
                     mode = ImportMode.COPY,
                     onItemComplete = { current, total, _ ->
-                        importProgressText = "Importing $current of $total items..."
+                        scope.launch { importProgressText = "Importing $current of $total items..." }
                     }
                 )
                 isImporting = false
                 importProgressText = ""
+                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
+                val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
+                val failed = results.count { it is ImportResult.Failure }
+                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
             }
         }
     }
@@ -140,17 +153,24 @@ fun PhotosScreen(
     }
     val pagedEntities = pagingFlow.collectAsLazyPagingItems()
     var searchEntities by remember { mutableStateOf<List<MediaItemEntity>>(emptyList()) }
+    var searchIndexRevision by remember { mutableStateOf(0L) }
 
     LaunchedEffect(vaultId, session) {
         val unlocked = session as? VaultSession.Unlocked ?: return@LaunchedEffect
-        container.vaultSearchIndex.rebuild(vaultId, unlocked.metaSubkey.copyOf(), container.database.mediaItemDao())
+        val dao = container.database.mediaItemDao()
+        dao.observeMediaChanges(vaultId).collectLatest {
+            delay(250)
+            container.vaultSearchIndex.rebuild(vaultId, unlocked.metaSubkey.copyOf(), dao)
+            clearSelection()
+            searchIndexRevision++
+        }
     }
-    LaunchedEffect(searchQuery, galleryFilter, sortOrder) {
+    LaunchedEffect(searchQuery, galleryFilter, sortOrder, searchIndexRevision, vaultId) {
         if (searchQuery.isBlank()) {
             searchEntities = emptyList()
         } else {
             delay(250)
-            searchEntities = container.vaultSearchIndex.search(searchQuery, galleryFilter, sortOrder)
+            searchEntities = container.vaultSearchIndex.search(searchQuery, galleryFilter, sortOrder, vaultId, container.database.mediaItemDao())
         }
     }
     val isSearching = searchQuery.isNotBlank()
@@ -174,12 +194,12 @@ fun PhotosScreen(
                         SuyaIconButton(
                             icon = Icons.Default.Close,
                             contentDescription = "Clear selection",
-                            onClick = { selectedMediaIds.clear() },
+                            onClick = { clearSelection() },
                             size = 38
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(
-                            text = "${selectedMediaIds.size} selected",
+                            text = "${allMatchingIds?.size ?: selectedMediaIds.size} selected",
                             fontFamily = SoraFontFamily,
                             fontWeight = FontWeight.Medium,
                             fontSize = 18.sp,
@@ -191,11 +211,11 @@ fun PhotosScreen(
                             icon = Icons.Default.SelectAll,
                             contentDescription = "Select all",
                             onClick = {
-                                selectedMediaIds.clear()
-                                if (isSearching) {
-                                    searchEntities.forEach { selectedMediaIds[it.id] = Unit }
-                                } else {
-                                    pagedEntities.itemSnapshotList.items.forEach { selectedMediaIds[it.id] = Unit }
+                                scope.launch {
+                                    val ids = if (isSearching) searchEntities.map { it.id }
+                                    else container.database.mediaItemDao().getAllVisibleIdsForFilter(vaultId, galleryFilter.ordinal)
+                                    selectedMediaIds.clear()
+                                    allMatchingIds = ids.toSet()
                                 }
                             },
                             size = 38
@@ -222,6 +242,16 @@ fun PhotosScreen(
                             }
                         )
                     }
+                )
+            }
+
+            statusMessage?.let { message ->
+                Text(
+                    text = message,
+                    fontFamily = SoraFontFamily,
+                    fontSize = 12.sp,
+                    color = SuyaColors.TextMuted,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp)
                 )
             }
 
@@ -272,21 +302,20 @@ fun PhotosScreen(
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
                             val item = entity.toMediaItem()
-                            val isSelected = selectedMediaIds.containsKey(item.id)
+                            val isSelected = allMatchingIds?.contains(item.id) ?: selectedMediaIds.containsKey(item.id)
                             MediaTile(
                                 item = item,
                                 isSelected = isSelected,
                                 isInSelectionMode = isInSelectionMode,
                                 onClick = {
                                     if (isInSelectionMode) {
-                                        if (isSelected) selectedMediaIds.remove(item.id) else selectedMediaIds[item.id] = Unit
+                                        if (allMatchingIds != null) allMatchingIds = if (isSelected) allMatchingIds!! - item.id else allMatchingIds!! + item.id
+                                        else if (isSelected) selectedMediaIds.remove(item.id) else selectedMediaIds[item.id] = Unit
                                     } else onMediaClick(item.id)
                                 },
-                                onLongClick = { selectedMediaIds[item.id] = Unit },
+                                onLongClick = { if (allMatchingIds == null) selectedMediaIds[item.id] = Unit },
                                 thumbLoader = { itemId ->
-                                    val thumbFile = container.vaultFileStore.getThumbFile(vaultId, itemId)
-                                    val subkey = (container.sessionManager.sessionState.value as? VaultSession.Unlocked)?.thumbSubkey
-                                    subkey?.let { container.thumbnailGenerator.decryptThumbnail(thumbFile, it, itemId) }
+                                    container.encryptedThumbnailRepository.load(vaultId, itemId, item.updatedAt)
                                 }
                             )
                         }
@@ -296,30 +325,27 @@ fun PhotosScreen(
                     ) { index ->
                         val entity = pagedEntities[index] ?: return@items
                         val item = entity.toMediaItem()
-                        val isSelected = selectedMediaIds.containsKey(item.id)
+                        val isSelected = allMatchingIds?.contains(item.id) ?: selectedMediaIds.containsKey(item.id)
                         MediaTile(
                             item = item,
                             isSelected = isSelected,
                             isInSelectionMode = isInSelectionMode,
                             onClick = {
                                 if (isInSelectionMode) {
-                                    if (isSelected) selectedMediaIds.remove(item.id)
+                                    if (allMatchingIds != null) allMatchingIds = if (isSelected) allMatchingIds!! - item.id else allMatchingIds!! + item.id
+                                    else if (isSelected) selectedMediaIds.remove(item.id)
                                     else selectedMediaIds[item.id] = Unit
                                 } else {
                                     onMediaClick(item.id)
                                 }
                             },
                             onLongClick = {
-                                if (!selectedMediaIds.containsKey(item.id)) {
+                                if (allMatchingIds == null && !selectedMediaIds.containsKey(item.id)) {
                                     selectedMediaIds[item.id] = Unit
                                 }
                             },
                             thumbLoader = { itemId ->
-                                val thumbFile = container.vaultFileStore.getThumbFile(vaultId, itemId)
-                                val subkey = (container.sessionManager.sessionState.value as? VaultSession.Unlocked)?.thumbSubkey
-                                if (subkey != null) {
-                                    container.thumbnailGenerator.decryptThumbnail(thumbFile, subkey, itemId)
-                                } else null
+                                container.encryptedThumbnailRepository.load(vaultId, itemId, item.updatedAt)
                             }
                         )
                     }
@@ -395,7 +421,8 @@ fun PhotosScreen(
             title = "Move to Vault Trash?",
             content = {
                 Text(
-                    text = "Items in Trash are retained for 30 days before permanent deletion.",
+                    text = if (trashRetentionDays == 0) "Items remain in Trash until you delete them permanently."
+                    else "Items in Trash are retained for $trashRetentionDays days before permanent deletion.",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted
@@ -404,12 +431,13 @@ fun PhotosScreen(
             confirmText = "Move to Trash",
             onConfirm = {
                 scope.launch {
-                    val ids = selectedMediaIds.keys.toList()
-                    selectedMediaIds.clear()
+                    val ids = selectedIds()
+                    clearSelection()
                     showDeleteConfirmDialog = false
-                    withContext(Dispatchers.IO) {
+                    val moved = withContext(Dispatchers.IO) {
                         container.database.mediaItemDao().softDeleteForVault(vaultId, ids, System.currentTimeMillis())
                     }
+                    statusMessage = "$moved moved to Trash${if (moved != ids.size) ", ${ids.size - moved} not moved" else ""}"
                 }
             }
         )
@@ -431,14 +459,17 @@ fun PhotosScreen(
             confirmText = "Restore",
             onConfirm = {
                 scope.launch {
-                    val ids = selectedMediaIds.keys.toList()
-                    selectedMediaIds.clear()
+                    val ids = selectedIds()
                     showRestoreConfirmDialog = false
-                    withContext(Dispatchers.IO) {
-                        for (id in ids) {
-                            container.restoreCoordinator.restoreItem(id, move = true)
-                        }
+                    val results = withContext(Dispatchers.IO) {
+                        ids.map { id -> id to container.restoreCoordinator.restoreItem(id, move = true) }
                     }
+                    val failed = results.filter { it.second is RestoreResult.Failure }.map { it.first }
+                    val pending = results.count { it.second is RestoreResult.SuccessWithCleanupPending }
+                    val completed = results.count { it.second is RestoreResult.Success }
+                    clearSelection()
+                    failed.forEach { selectedMediaIds[it] = Unit }
+                    statusMessage = "$completed moved to Gallery, $pending cleanup pending, ${failed.size} failed"
                 }
             }
         )

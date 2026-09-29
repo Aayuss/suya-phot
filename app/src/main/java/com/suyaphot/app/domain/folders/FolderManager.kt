@@ -27,7 +27,9 @@ class FolderManager(
     private val sessionManager: SessionManager? = null,
     private val folderDao: FolderDao,
     private val mediaItemDao: MediaItemDao? = null,
-    private val database: SuyaDatabase? = null
+    private val database: SuyaDatabase? = null,
+    private val privacyCoordinator: FolderPrivacyCoordinator? = null,
+    private val accessManager: FolderAccessManager? = null
 ) {
 
     private fun getCurrentSession(): VaultSession.Unlocked {
@@ -54,10 +56,9 @@ class FolderManager(
         val session = getCurrentSession()
         val cleanName = normalizeFolderName(name)
 
-        if (parentId != null) {
-            val parent = folderDao.getFolderForVault(parentId, session.vaultId)
-            requireNotNull(parent) { "Parent folder does not exist in current vault" }
-        }
+        val parent = parentId?.let { folderDao.getFolderForVault(it, session.vaultId) }
+        if (parentId != null) requireNotNull(parent) { "Parent folder does not exist in current vault" }
+        if (parentId != null) require(accessManager?.canOpen(session.vaultId, parentId) != false) { "Parent authorization required" }
 
         // Validate sibling names don't conflict case-insensitively
         val siblings = folderDao.getSubFoldersSync(session.vaultId, parentId)
@@ -87,7 +88,9 @@ class FolderManager(
             createdAt = now,
             updatedAt = now,
             coverMediaId = null,
-            sortOrder = 0L
+            sortOrder = 0L,
+            effectiveHidden = parent?.effectiveHidden ?: false,
+            effectiveProtected = parent?.effectiveProtected ?: false
         )
         folderDao.insert(entity)
         folderId
@@ -102,6 +105,7 @@ class FolderManager(
 
         val folder = folderDao.getFolderForVault(folderId, session.vaultId)
         requireNotNull(folder) { "Folder not found in current vault" }
+        require(accessManager?.canOpen(session.vaultId, folderId) != false) { "Folder authorization required" }
 
         val siblings = folderDao.getSubFoldersSync(session.vaultId, folder.parentId)
         val conflict = siblings.any { sibling ->
@@ -149,7 +153,14 @@ class FolderManager(
     suspend fun moveFolder(folderId: String, newParentId: String?): Boolean = withContext(Dispatchers.IO) {
         if (!canMoveFolder(folderId, newParentId)) return@withContext false
         val session = getCurrentSession()
-        folderDao.moveFolderForVault(session.vaultId, folderId, newParentId, System.currentTimeMillis()) == 1
+        if (accessManager?.canOpen(session.vaultId, folderId) == false) return@withContext false
+        if (newParentId != null && accessManager?.canOpen(session.vaultId, newParentId) == false) return@withContext false
+        val db = checkNotNull(database)
+        db.withTransaction {
+            val moved = folderDao.moveFolderForVault(session.vaultId, folderId, newParentId, System.currentTimeMillis()) == 1
+            if (moved) privacyCoordinator?.recomputeInsideTransaction(session.vaultId)
+            moved
+        }
     }
 
     /**
@@ -169,6 +180,7 @@ class FolderManager(
                 folderId = folderId,
                 vaultId = session.vaultId
             ) ?: return@withTransaction
+            require(accessManager?.canOpen(session.vaultId, folderId) != false) { "Folder authorization required" }
 
             val parentId = folder.parentId
             val now = System.currentTimeMillis()
@@ -204,6 +216,7 @@ class FolderManager(
             if (policy == FolderDeletePolicy.MOVE_CONTENTS_TO_PARENT) {
                 folderDao.deleteForVault(folderId = folderId, vaultId = session.vaultId)
             }
+            privacyCoordinator?.recomputeInsideTransaction(session.vaultId)
         }
     }
 
@@ -213,12 +226,26 @@ class FolderManager(
     suspend fun moveMediaToFolder(mediaIds: List<String>, targetFolderId: String?) = withContext(Dispatchers.IO) {
         val session = getCurrentSession()
         val mDao = checkNotNull(mediaItemDao) { "MediaItemDao is required" }
+        val target = targetFolderId?.let { folderDao.getFolderForVault(it, session.vaultId) }
         if (targetFolderId != null) {
-            requireNotNull(folderDao.getFolderForVault(targetFolderId, session.vaultId)) {
+            requireNotNull(target) {
                 "Target folder does not exist in current vault"
             }
+            require(accessManager?.canOpen(session.vaultId, targetFolderId) != false) { "Target authorization required" }
         }
-        val updated = mDao.moveItemsToFolderForVault(session.vaultId, mediaIds, targetFolderId, System.currentTimeMillis())
+        val selected = mDao.getItemsByIdsForVault(session.vaultId, mediaIds.distinct())
+        require(selected.size == mediaIds.distinct().size) { "Selected media missing" }
+        for (item in selected) {
+            val sourceFolder = item.folderId
+            require(!item.concealed || (sourceFolder != null && accessManager?.canOpen(session.vaultId, sourceFolder) != false)) {
+                "Source authorization required"
+            }
+        }
+        val updated = mDao.moveItemsToFolderForVault(
+            session.vaultId, mediaIds, targetFolderId,
+            target?.let { it.effectiveHidden || it.effectiveProtected } ?: false,
+            System.currentTimeMillis()
+        )
         require(updated == mediaIds.distinct().size) { "Some selected media did not belong to the active vault" }
     }
 
@@ -254,12 +281,41 @@ class FolderManager(
         listOf<Pair<String?, String>>(null to "All Photos") + trail
     }
 
+    suspend fun getMoveDestinations(hiddenMode: Boolean): List<Folder> = withContext(Dispatchers.IO) {
+        val session = getCurrentSession()
+        val folders = folderDao.getFoldersForVaultOnce(session.vaultId)
+        folders
+            .filter { if (hiddenMode) it.effectiveHidden else !it.effectiveHidden }
+            .filter { accessManager?.canOpen(session.vaultId, it.id) != false }
+            .map { entity ->
+                val decrypted = runCatching {
+                    val bytes = Aead.decryptWithPrependedNonce(session.metaSubkey, entity.encryptedName, entity.id.toByteArray())
+                    try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0) }
+                }.getOrDefault("Folder")
+                Folder(
+                    entity.id, entity.vaultId, entity.parentId, decrypted, entity.createdAt,
+                    entity.updatedAt, entity.coverMediaId, entity.sortOrder,
+                    directHidden = entity.directHidden, effectiveHidden = entity.effectiveHidden,
+                    lockId = entity.lockId, effectiveProtected = entity.effectiveProtected
+                )
+            }
+    }
+
     /**
      * Returns subfolders of [parentId] mapped to domain models.
      */
-    fun getSubFoldersFlow(parentId: String?): Flow<List<Folder>> {
+    fun getSubFoldersFlow(parentId: String?, hiddenMode: Boolean = false): Flow<List<Folder>> {
         val session = getCurrentSession()
-        return folderDao.getSubFoldersWithCount(session.vaultId, parentId).map { list ->
+        val source = if (hiddenMode && parentId == null) {
+            folderDao.getHiddenRoots(session.vaultId)
+        } else if (hiddenMode) {
+            folderDao.getAllSubFolders(session.vaultId, parentId).map { folders ->
+                folders.map { com.suyaphot.app.core.database.dao.FolderWithCount(it, 0) }
+            }
+        } else {
+            folderDao.getSubFoldersWithCount(session.vaultId, parentId)
+        }
+        return source.map { list ->
             list.map { item ->
                 val entity = item.folder
                 val name = try {
@@ -277,7 +333,11 @@ class FolderManager(
                     updatedAt = entity.updatedAt,
                     coverMediaId = entity.coverMediaId,
                     sortOrder = entity.sortOrder,
-                    itemCount = item.itemCount
+                    itemCount = item.itemCount,
+                    directHidden = entity.directHidden,
+                    effectiveHidden = entity.effectiveHidden,
+                    lockId = entity.lockId,
+                    effectiveProtected = entity.effectiveProtected
                 )
             }
         }

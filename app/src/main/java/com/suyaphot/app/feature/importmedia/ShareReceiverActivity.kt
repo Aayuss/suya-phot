@@ -88,12 +88,13 @@ class ShareReceiverActivity : ComponentActivity() {
 
     private fun extractUrisFromIntent(intent: Intent?): List<Uri> {
         if (intent == null) return emptyList()
-        val mime = intent.type ?: return emptyList()
-        if (!mime.startsWith("image/") && !mime.startsWith("video/")) return emptyList()
+        if (intent.action != Intent.ACTION_SEND && intent.action != Intent.ACTION_SEND_MULTIPLE) return emptyList()
         val out = LinkedHashSet<Uri>()
 
         fun addIfValid(uri: Uri?) {
-            if (uri?.scheme == "content" && out.size < 500) out.add(uri)
+            if (uri?.scheme != "content" || out.size >= 500) return
+            val mime = runCatching { contentResolver.getType(uri) }.getOrNull() ?: return
+            if (mime.startsWith("image/") || mime.startsWith("video/")) out.add(uri)
         }
 
         if (intent.action == Intent.ACTION_SEND) {
@@ -182,7 +183,7 @@ private fun ImportProgressView(
                 folderId = null,
                 mode = ImportMode.MOVE,
                 onItemComplete = { current, total, _ ->
-                    statusText = "Encrypting $current of $total items..."
+                    scope.launch { statusText = "Encrypting $current of $total items..." }
                 }
             )
 

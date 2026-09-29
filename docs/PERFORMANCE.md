@@ -3,7 +3,7 @@
 ## 1. Zero Background Footprint
 
 - **No Always-Running Services**: When the app is not actively performing a user-initiated import or restore, no background services or processes exist.
-- **No Wakeful Polling or Timers**: Timeout checks use `SystemClock.elapsedRealtime()` during app lifecycle transitions (`onStart` / `onStop`) rather than running background timer handlers.
+- **No Wakeful Background Polling**: Vault timeout checks use `SystemClock.elapsedRealtime()` during app lifecycle transitions. Protected foreground screens periodically re-check short-lived access grants so expired content closes while visible.
 - **No Periodic WorkManager Tasks**: Trash expiration is evaluated when the app or Trash screen is opened.
 
 ---

@@ -29,7 +29,7 @@ class GalleryRepository(private val dao: MediaItemDao) {
         return Pager(PagingConfig(pageSize = 60, prefetchDistance = 20, enablePlaceholders = false)) {
             dao.pagingSource(
                 SimpleSQLiteQuery(
-                    "SELECT * FROM media_items WHERE vaultId = ? AND deletedAt IS NULL$filterSql ORDER BY $orderSql",
+                    "SELECT * FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql ORDER BY $orderSql",
                     arrayOf(vaultId)
                 )
             )

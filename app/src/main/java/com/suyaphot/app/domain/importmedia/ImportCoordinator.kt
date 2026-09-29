@@ -19,9 +19,12 @@ import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.SessionManager
+import com.suyaphot.app.domain.folders.FolderAccessManager
 import com.suyaphot.app.domain.auth.VaultSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.ByteBuffer
@@ -31,16 +34,33 @@ data class ImportJobPayload(
     val sourceUri: String,
     val targetFolderId: String?,
     val itemId: String,
-    val mode: ImportMode
+    val mode: ImportMode,
+    val stagedMedia: StagedMedia? = null
 ) {
+    data class StagedMedia(
+        val mediaTypeCode: Int,
+        val plaintextSize: Long,
+        val sha256Hex: String,
+        val encryptedMetadata: ByteArray,
+        val thumbnailFileName: String?,
+        val dateTakenMs: Long?,
+        val importedAt: Long,
+        val concealed: Boolean
+    )
+
     fun serialize(): ByteArray {
         val uriBytes = sourceUri.toByteArray(Charsets.UTF_8)
         val folderBytes = (targetFolderId ?: "").toByteArray(Charsets.UTF_8)
         val itemBytes = itemId.toByteArray(Charsets.UTF_8)
         require(uriBytes.size <= MAX_URI_BYTES && folderBytes.size <= MAX_ID_BYTES && itemBytes.size <= MAX_ID_BYTES)
-        val buf = ByteBuffer.allocate(4 + 4 + 4 + uriBytes.size + 4 + folderBytes.size + 4 + itemBytes.size + 4)
+        val thumbBytes = stagedMedia?.thumbnailFileName?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+        val shaBytes = stagedMedia?.sha256Hex?.toByteArray(Charsets.US_ASCII) ?: ByteArray(0)
+        val stagedSize = stagedMedia?.let { 4 + 8 + 4 + shaBytes.size + 4 + it.encryptedMetadata.size + 4 + thumbBytes.size + 8 + 8 + 1 } ?: 0
+        require(thumbBytes.size <= MAX_ID_BYTES && shaBytes.size == 64 || stagedMedia == null)
+        require(stagedMedia == null || stagedMedia.encryptedMetadata.size in 1..MAX_METADATA_BYTES)
+        val buf = ByteBuffer.allocate(4 + 4 + 4 + uriBytes.size + 4 + folderBytes.size + 4 + itemBytes.size + 4 + stagedSize)
         buf.putInt(MAGIC)
-        buf.putInt(VERSION)
+        buf.putInt(if (stagedMedia == null) VERSION else STAGED_VERSION)
         buf.putInt(uriBytes.size)
         buf.put(uriBytes)
         buf.putInt(folderBytes.size)
@@ -48,15 +68,27 @@ data class ImportJobPayload(
         buf.putInt(itemBytes.size)
         buf.put(itemBytes)
         buf.putInt(mode.code)
+        stagedMedia?.let { staged ->
+            buf.putInt(staged.mediaTypeCode)
+            buf.putLong(staged.plaintextSize)
+            buf.putInt(shaBytes.size).put(shaBytes)
+            buf.putInt(staged.encryptedMetadata.size).put(staged.encryptedMetadata)
+            buf.putInt(thumbBytes.size).put(thumbBytes)
+            buf.putLong(staged.dateTakenMs ?: -1L)
+            buf.putLong(staged.importedAt)
+            buf.put(if (staged.concealed) 1.toByte() else 0.toByte())
+        }
         return buf.array()
     }
 
     companion object {
         private const val MAGIC = 0x534A5032 // SJP2
         private const val VERSION = 2
-        private const val MAX_PAYLOAD_BYTES = 64 * 1024
+        private const val STAGED_VERSION = 3
+        private const val MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
         private const val MAX_URI_BYTES = 32 * 1024
         private const val MAX_ID_BYTES = 256
+        private const val MAX_METADATA_BYTES = 1024 * 1024
 
         fun deserialize(bytes: ByteArray): ImportJobPayload {
             require(bytes.size in 28..MAX_PAYLOAD_BYTES) { "Invalid import job payload size" }
@@ -68,21 +100,47 @@ data class ImportJobPayload(
                 return length
             }
             require(buf.int == MAGIC) { "Unsupported legacy import job payload" }
-            require(buf.int == VERSION) { "Unsupported import job payload version" }
+            val version = buf.int
+            require(version == VERSION || version == STAGED_VERSION) { "Unsupported import job payload version" }
             val uriLen = readLength(MAX_URI_BYTES)
             val uriBytes = ByteArray(uriLen).also(buf::get)
             val folderLen = readLength(MAX_ID_BYTES)
             val folderBytes = ByteArray(folderLen).also(buf::get)
             val itemLen = readLength(MAX_ID_BYTES)
             val itemBytes = ByteArray(itemLen).also(buf::get)
-            require(buf.remaining() == 4) { "Trailing import job payload bytes" }
+            require(buf.remaining() >= 4) { "Truncated import mode" }
             val mode = ImportMode.fromCode(buf.int)
+            val staged = if (version == STAGED_VERSION) {
+                require(buf.remaining() >= 12) { "Truncated staged media" }
+                val mediaType = buf.int
+                val plaintextSize = buf.long
+                require(mediaType in 0..1 && plaintextSize >= 0L)
+                val shaLen = readLength(64)
+                require(shaLen == 64)
+                val sha = ByteArray(shaLen).also(buf::get)
+                val metaLen = readLength(MAX_METADATA_BYTES)
+                require(metaLen > 0)
+                val metadata = ByteArray(metaLen).also(buf::get)
+                val thumbLen = readLength(MAX_ID_BYTES)
+                val thumb = ByteArray(thumbLen).also(buf::get)
+                require(buf.remaining() == 17) { "Invalid staged media tail" }
+                val dateTaken = buf.long.let { if (it < 0L) null else it }
+                val importedAt = buf.long
+                val concealedByte = buf.get().toInt()
+                require(concealedByte in 0..1 && importedAt >= 0L)
+                StagedMedia(
+                    mediaType, plaintextSize, String(sha, Charsets.US_ASCII), metadata,
+                    String(thumb, Charsets.UTF_8).ifEmpty { null }, dateTaken, importedAt, concealedByte == 1
+                )
+            } else null
+            require(!buf.hasRemaining()) { "Trailing import job payload bytes" }
             val folderStr = String(folderBytes, Charsets.UTF_8)
             return ImportJobPayload(
                 sourceUri = String(uriBytes, Charsets.UTF_8),
                 targetFolderId = folderStr.ifEmpty { null },
                 itemId = String(itemBytes, Charsets.UTF_8),
-                mode = mode
+                mode = mode,
+                stagedMedia = staged
             )
         }
     }
@@ -105,6 +163,18 @@ sealed interface ImportResult {
     ) : ImportResult
 }
 
+enum class ImportErrorCode {
+    INVALID_TARGET_FOLDER,
+    SOURCE_UNAVAILABLE,
+    PERMISSION_DENIED,
+    UNSUPPORTED_MEDIA,
+    ENCRYPTION_FAILED,
+    VERIFY_FAILED,
+    DATABASE_FAILED,
+    CANCELLED,
+    UNKNOWN
+}
+
 /**
  * Transactional, crash-safe media import pipeline.
  */
@@ -117,7 +187,8 @@ class ImportCoordinator(
     private val metadataReader: MetadataReader,
     private val thumbnailGenerator: ThumbnailGenerator,
     private val vaultCrypto: VaultCrypto,
-    private val fileStore: VaultFileStore
+    private val fileStore: VaultFileStore,
+    private val folderAccessManager: FolderAccessManager
 ) {
 
     private fun bytesToHex(bytes: ByteArray): String =
@@ -131,15 +202,19 @@ class ImportCoordinator(
         onProgress: ((bytes: Long, total: Long) -> Unit)? = null
     ): ImportResult = withContext(Dispatchers.IO) {
         if (sessionManager.sessionState.value !is VaultSession.Unlocked) {
-            return@withContext ImportResult.Failure(uri, "Vault is locked", sourceUntouched = true)
+            return@withContext ImportResult.Failure(uri, "VAULT_LOCKED", sourceUntouched = true)
         }
         val session = sessionManager.acquireOperationKeyLease()
-            ?: return@withContext ImportResult.Failure(uri, "Vault is locked", sourceUntouched = true)
+            ?: return@withContext ImportResult.Failure(uri, "VAULT_LOCKED", sourceUntouched = true)
         try {
 
         val vaultId = session.vaultId
-        if (folderId != null && database.folderDao().getFolderForVault(folderId, vaultId) == null) {
+        val targetFolder = folderId?.let { database.folderDao().getFolderForVault(it, vaultId) }
+        if (folderId != null && targetFolder == null) {
             return@withContext ImportResult.Failure(uri, "INVALID_TARGET_FOLDER", sourceUntouched = true)
+        }
+        if (folderId != null && !folderAccessManager.canOpen(vaultId, folderId)) {
+            return@withContext ImportResult.Failure(uri, "TARGET_FOLDER_LOCKED", sourceUntouched = true)
         }
         val jobId = UUID.randomUUID().toString()
         val itemId = UUID.randomUUID().toString()
@@ -149,6 +224,7 @@ class ImportCoordinator(
 
         var finalCommitted = false
         var dbCommitted = false
+        var stagedPersisted = false
 
         // Section 12: Encrypt job payload with metaSubkey
         val rawPayload = ImportJobPayload(
@@ -190,19 +266,36 @@ class ImportCoordinator(
 
             // 2. Encrypting stream to .partial file
             vaultJobDao.updateState(jobId, JobState.ENCRYPTING.code, System.currentTimeMillis())
-            val verifyResult = context.contentResolver.openInputStream(resolvedSource.readUri).use { inputStream ->
-                checkNotNull(inputStream) { "Could not open source stream for URI: $uri" }
-                vaultCrypto.encryptStream(
-                    input = inputStream,
-                    outputFile = partialFile,
-                    mediaSubkey = session.mediaSubkey,
-                    itemId = itemId,
-                    isVideo = sourceMeta.mediaType == MediaType.VIDEO,
-                    plaintextSize = sourceMeta.size,
-                    onProgress = { current, total ->
-                        onProgress?.invoke(current, total)
+            val progressUpdates = Channel<Pair<Long, Long>>(Channel.CONFLATED)
+            val progressWriter = launch(Dispatchers.IO) {
+                var lastWriteAt = 0L
+                for ((current, total) in progressUpdates) {
+                    val nowProgress = System.currentTimeMillis()
+                    if (nowProgress - lastWriteAt >= 250L || current >= total) {
+                        vaultJobDao.updateProgress(jobId, current, total, nowProgress)
+                        lastWriteAt = nowProgress
                     }
-                )
+                }
+            }
+            val verifyResult = try {
+                context.contentResolver.openInputStream(resolvedSource.readUri).use { inputStream ->
+                    checkNotNull(inputStream) { "Could not open source stream for URI: $uri" }
+                    vaultCrypto.encryptStream(
+                        input = inputStream,
+                        outputFile = partialFile,
+                        mediaSubkey = session.mediaSubkey,
+                        itemId = itemId,
+                        isVideo = sourceMeta.mediaType == MediaType.VIDEO,
+                        plaintextSize = sourceMeta.size,
+                        onProgress = { current, total ->
+                            progressUpdates.trySend(current to total)
+                            onProgress?.invoke(current, total)
+                        }
+                    )
+                }
+            } finally {
+                progressUpdates.close()
+                progressWriter.join()
             }
 
             val sha256Hex = bytesToHex(verifyResult.sha256)
@@ -269,6 +362,24 @@ class ImportCoordinator(
 
             // 7. Transactional DB commit (Section 15)
             val now = System.currentTimeMillis()
+            val stagedRaw = ImportJobPayload(
+                sourceUri = uri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
+                stagedMedia = ImportJobPayload.StagedMedia(
+                    mediaTypeCode = sourceMeta.mediaType.code,
+                    plaintextSize = verifyResult.plaintextSize,
+                    sha256Hex = sha256Hex,
+                    encryptedMetadata = encryptedMeta,
+                    thumbnailFileName = if (thumbFile.exists()) thumbFile.name else null,
+                    dateTakenMs = sourceMeta.metadata.dateTakenMs,
+                    importedAt = now,
+                    concealed = targetFolder?.let { it.effectiveHidden || it.effectiveProtected } ?: false
+                )
+            ).serialize()
+            val stagedEncrypted = try {
+                Aead.encryptWithPrependedNonce(session.metaSubkey, stagedRaw, "job:$jobId:v1".toByteArray())
+            } finally { stagedRaw.fill(0) }
+            check(vaultJobDao.updateEncryptedPayload(jobId, vaultId, stagedEncrypted, now) == 1)
+            stagedPersisted = true
             val mediaEntity = MediaItemEntity(
                 id = itemId,
                 vaultId = vaultId,
@@ -285,11 +396,18 @@ class ImportCoordinator(
                 favorite = false,
                 deletedAt = null,
                 previousFolderId = null,
-                dateTakenMs = sourceMeta.metadata.dateTakenMs
+                dateTakenMs = sourceMeta.metadata.dateTakenMs,
+                concealed = targetFolder?.let { it.effectiveHidden || it.effectiveProtected } ?: false
             )
 
             database.withTransaction {
-                mediaItemDao.insert(mediaEntity)
+                val currentTarget = folderId?.let { database.folderDao().getFolderForVault(it, vaultId) }
+                check(folderId == null || (currentTarget != null && folderAccessManager.canOpen(vaultId, folderId))) {
+                    "Target folder no longer available"
+                }
+                mediaItemDao.insert(mediaEntity.copy(
+                    concealed = currentTarget?.let { it.effectiveHidden || it.effectiveProtected } ?: false
+                ))
                 val nextState = if (mode == ImportMode.COPY) JobState.COMPLETED else JobState.AWAITING_SOURCE_DELETE
                 vaultJobDao.updateState(jobId, nextState.code, now)
             }
@@ -310,17 +428,28 @@ class ImportCoordinator(
                 runCatching { if (finalMediaFile.exists()) finalMediaFile.delete() }
                 runCatching { if (thumbFile.exists()) thumbFile.delete() }
             }
-            vaultJobDao.updateState(jobId, JobState.CANCELLED.code, System.currentTimeMillis(), "Cancelled")
+            vaultJobDao.updateState(jobId, JobState.CANCELLED.code, System.currentTimeMillis(), ImportErrorCode.CANCELLED.name)
             throw ce
         } catch (e: Exception) {
-            SafeLog.e("ImportCoordinator", "Media import failed")
+            SafeLog.e("ImportCoordinator", "Media import failed", e)
             runCatching { if (partialFile.exists()) partialFile.delete() }
-            if (finalCommitted && !dbCommitted) {
+            if (finalCommitted && !dbCommitted && !stagedPersisted) {
                 runCatching { if (finalMediaFile.exists()) finalMediaFile.delete() }
                 runCatching { if (thumbFile.exists()) thumbFile.delete() }
             }
-            vaultJobDao.updateState(jobId, JobState.FAILED.code, System.currentTimeMillis(), e.message)
-            ImportResult.Failure(uri, e.message ?: "Unknown import error", sourceUntouched = true)
+            val safeCode = when (e) {
+                is SecurityException -> ImportErrorCode.PERMISSION_DENIED
+                is java.io.FileNotFoundException, is java.io.IOException -> ImportErrorCode.SOURCE_UNAVAILABLE
+                is IllegalArgumentException -> ImportErrorCode.UNSUPPORTED_MEDIA
+                is android.database.sqlite.SQLiteException -> ImportErrorCode.DATABASE_FAILED
+                else -> ImportErrorCode.UNKNOWN
+            }
+            vaultJobDao.updateState(
+                jobId, if (stagedPersisted && !dbCommitted) JobState.VERIFYING.code else JobState.FAILED.code,
+                System.currentTimeMillis(),
+                if (stagedPersisted && !dbCommitted) "DATABASE_RETRY_PENDING" else safeCode.name
+            )
+            ImportResult.Failure(uri, safeCode.name, sourceUntouched = true)
         }
         } finally {
             session.close()
