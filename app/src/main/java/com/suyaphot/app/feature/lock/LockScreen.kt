@@ -44,6 +44,7 @@ import com.suyaphot.app.R
 import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.auth.AuthResult
+import com.suyaphot.app.domain.auth.PatternCredential
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.PinDots
 import com.suyaphot.app.ui.components.PatternLockPad
@@ -78,6 +79,9 @@ fun LockScreen(
     var recoveryCodeInput by remember { mutableStateOf("") }
     var newPinInput by remember { mutableStateOf("") }
     var confirmNewPinInput by remember { mutableStateOf("") }
+    var recoveryCredentialType by remember { mutableIntStateOf(0) }
+    var firstRecoveryPattern by remember { mutableStateOf<IntArray?>(null) }
+    var recoveryPatternErrorTrigger by remember { mutableIntStateOf(0) }
     var recoveryError by remember { mutableStateOf<String?>(null) }
 
     // Check if biometric is enrolled for real vault
@@ -326,7 +330,7 @@ fun LockScreen(
                 onClick = { showForgotPinDialog = true }
             ) {
                 Text(
-                    text = if (showPatternInput) "Forgot pattern?" else "Forgot PIN?",
+                    text = "Forgot vault credential?",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted
@@ -337,6 +341,25 @@ fun LockScreen(
         }
     }
 
+    fun submitRecoveryCredential(chars: CharArray, typeCode: Int) {
+        if (recoveryCodeInput.trim().isEmpty()) {
+            chars.fill('\u0000')
+            recoveryError = "Please enter your recovery code"
+            return
+        }
+        scope.launch {
+            val success = container.pinAuthenticator.recoverWithCode(
+                recoveryCodeInput = recoveryCodeInput.trim(),
+                newPinChars = chars,
+                newTypeCode = typeCode
+            )
+            if (success) {
+                showForgotPinDialog = false
+                onUnlocked()
+            } else recoveryError = "Invalid recovery code or credential"
+        }
+    }
+
     if (showForgotPinDialog) {
         SuyaDialog(
             onDismissRequest = {
@@ -344,74 +367,78 @@ fun LockScreen(
                 recoveryCodeInput = ""
                 newPinInput = ""
                 confirmNewPinInput = ""
+                firstRecoveryPattern = null
                 recoveryError = null
             },
             title = "Recovery Kit",
-            confirmText = "Reset PIN",
-            onConfirm = {
+            confirmText = if (recoveryCredentialType == 0) "Reset PIN" else null,
+            onConfirm = if (recoveryCredentialType == 0) ({
                 val digits = newPinInput.filter(Char::isDigit)
-                if (recoveryCodeInput.trim().isEmpty()) {
-                    recoveryError = "Please enter your recovery code"
-                    return@SuyaDialog
-                }
                 if (digits.length != 6) {
                     recoveryError = "New PIN must be exactly 6 digits"
-                    return@SuyaDialog
-                }
-                if (newPinInput != confirmNewPinInput) {
+                } else if (newPinInput != confirmNewPinInput) {
                     recoveryError = "PIN confirmation does not match"
-                    return@SuyaDialog
-                }
-
-                scope.launch {
-                    val success = container.pinAuthenticator.recoverWithCode(
-                        recoveryCodeInput = recoveryCodeInput.trim(),
-                        newPinChars = digits.toCharArray()
-                    )
-                    if (success) {
-                        showForgotPinDialog = false
-                        onUnlocked()
-                    } else {
-                        recoveryError = "Invalid recovery code"
-                    }
-                }
-            }
+                } else submitRecoveryCredential(digits.toCharArray(), 0)
+            }) else null
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Enter your 26-character recovery code to reset your vault PIN.",
+                    text = "Enter your 26-character recovery code and choose a new vault credential.",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted
                 )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SuyaButton("New PIN", onClick = { recoveryCredentialType = 0; firstRecoveryPattern = null }, variant = ButtonVariant.Secondary)
+                    SuyaButton("New Pattern", onClick = { recoveryCredentialType = 1; firstRecoveryPattern = null }, variant = ButtonVariant.Secondary)
+                }
                 SuyaTextField(
                     value = recoveryCodeInput,
                     onValueChange = { recoveryCodeInput = it.uppercase() },
                     placeholder = "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX",
                     label = "Recovery Code"
                 )
-                SuyaTextField(
-                    value = newPinInput,
-                    onValueChange = { input ->
-                        val digits = input.filter(Char::isDigit)
-                        if (digits.length <= 6) newPinInput = digits
-                    },
-                    placeholder = "Enter new 6-digit PIN",
-                    label = "New PIN",
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
-                )
-                SuyaTextField(
-                    value = confirmNewPinInput,
-                    onValueChange = { input ->
-                        val digits = input.filter(Char::isDigit)
-                        if (digits.length <= 6) confirmNewPinInput = digits
-                    },
-                    placeholder = "Confirm new 6-digit PIN",
-                    label = "Confirm PIN",
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
-                )
+                if (recoveryCredentialType == 0) {
+                    SuyaTextField(
+                        value = newPinInput,
+                        onValueChange = { input ->
+                            val digits = input.filter(Char::isDigit)
+                            if (digits.length <= 6) newPinInput = digits
+                        },
+                        placeholder = "Enter new 6-digit PIN",
+                        label = "New PIN",
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                    )
+                    SuyaTextField(
+                        value = confirmNewPinInput,
+                        onValueChange = { input ->
+                            val digits = input.filter(Char::isDigit)
+                            if (digits.length <= 6) confirmNewPinInput = digits
+                        },
+                        placeholder = "Confirm new 6-digit PIN",
+                        label = "Confirm PIN",
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                    )
+                } else {
+                    Text(if (firstRecoveryPattern == null) "Draw a new pattern" else "Draw it again to confirm", color = SuyaColors.TextMuted)
+                    PatternLockPad(
+                        onPatternComplete = { raw ->
+                            val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
+                            if (normalized == null) { recoveryError = "Connect at least four dots"; recoveryPatternErrorTrigger++ }
+                            else if (firstRecoveryPattern == null) { firstRecoveryPattern = normalized; recoveryError = null }
+                            else if (!normalized.contentEquals(firstRecoveryPattern)) {
+                                firstRecoveryPattern = null
+                                recoveryError = "Patterns do not match"
+                                recoveryPatternErrorTrigger++
+                            } else submitRecoveryCredential(PatternCredential.canonicalChars(normalized), 1)
+                        },
+                        errorTrigger = recoveryPatternErrorTrigger,
+                        enabled = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
                 if (recoveryError != null) {
                     Text(
                         text = recoveryError!!,

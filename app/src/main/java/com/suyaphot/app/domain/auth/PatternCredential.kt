@@ -2,6 +2,17 @@ package com.suyaphot.app.domain.auth
 
 /** Canonical 3x3 credential path. Node IDs are row-major 0..8. */
 object PatternCredential {
+    fun isCanonical(chars: CharArray): Boolean {
+        if (chars.size !in 6..11 || chars[0] != 'P' || chars[1] != ':') return false
+        val nodes = IntArray(chars.size - 2)
+        for (index in nodes.indices) {
+            val value = chars[index + 2].digitToIntOrNull() ?: return false
+            if (value !in 0..8) return false
+            nodes[index] = value
+        }
+        return runCatching { canonicalChars(nodes).contentEquals(chars) }.getOrDefault(false)
+    }
+
     fun normalize(raw: IntArray): IntArray {
         val selected = BooleanArray(9)
         val result = ArrayList<Int>(9)

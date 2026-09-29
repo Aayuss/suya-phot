@@ -27,6 +27,26 @@ class TrashCoordinator(
     private val accessManager: FolderAccessManager? = null,
     private val sessionManager: SessionManager? = null
 ) {
+    companion object {
+        private const val PERMANENT_DELETE_PENDING = 1
+        private const val FILE_REMOVED_DB_PENDING = 2
+    }
+
+    /** Idempotent recovery for a process death between ciphertext removal and DB deletion. */
+    suspend fun reconcilePending(vaultId: String): PermanentDeleteSummary = withContext(Dispatchers.IO) {
+        var deleted = 0
+        val failed = ArrayList<String>()
+        while (true) {
+            val batch = database.mediaItemDao().getPendingTrashCleanup(vaultId)
+            if (batch.isEmpty()) break
+            val result = permanentDeleteEntities(vaultId, batch)
+            deleted += result.deleted
+            failed += result.failedIds
+            if (result.deleted == 0) break
+        }
+        PermanentDeleteSummary(deleted, failed.size, failed)
+    }
+
     private suspend fun authorized(vaultId: String, item: MediaItemEntity): Boolean {
         if (!item.concealed) return true
         val access = accessManager ?: return false
@@ -57,7 +77,7 @@ class TrashCoordinator(
         val allowed = mutableListOf<MediaItemEntity>()
         val denied = mutableListOf<String>()
         for (item in all) {
-            if (authorized(vaultId, item)) allowed += item else denied += item.id
+            if (item.deletedAt != null && authorized(vaultId, item)) allowed += item else denied += item.id
         }
         val result = permanentDeleteEntities(vaultId, allowed)
         result.copy(cleanupPending = result.cleanupPending + denied.size, failedIds = result.failedIds + denied)
@@ -70,6 +90,12 @@ class TrashCoordinator(
         var deleted = 0
         val failed = mutableListOf<String>()
         for (item in items) {
+            if (database.mediaItemDao().markTrashCleanupState(
+                    vaultId, item.id, PERMANENT_DELETE_PENDING, System.currentTimeMillis()
+                ) != 1) {
+                failed += item.id
+                continue
+            }
             val media = fileStore.getMediaFile(vaultId, item.id)
             val mediaRemoved = !media.exists() || media.delete()
             if (!mediaRemoved) {
@@ -77,7 +103,17 @@ class TrashCoordinator(
                 continue
             }
             runCatching { fileStore.getThumbFile(vaultId, item.id).delete() }
-            if (database.mediaItemDao().deleteForVault(item.id, vaultId) == 1) deleted++ else failed += item.id
+            runCatching { fileStore.getPreviewFile(vaultId, item.id).delete() }
+            if (database.mediaItemDao().markTrashCleanupState(
+                    vaultId, item.id, FILE_REMOVED_DB_PENDING, System.currentTimeMillis()
+                ) != 1) {
+                failed += item.id
+                continue
+            }
+            val removedRows = database.mediaItemDao().deleteForVault(item.id, vaultId)
+            if (removedRows == 1 || database.mediaItemDao().getItemForVault(item.id, vaultId) == null) {
+                deleted++
+            } else failed += item.id
         }
         return PermanentDeleteSummary(deleted, failed.size, failed)
     }

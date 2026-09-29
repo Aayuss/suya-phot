@@ -1,8 +1,13 @@
 package com.suyaphot.app.feature.folders
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -78,11 +83,15 @@ import com.suyaphot.app.core.model.Folder
 import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
+import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.auth.PatternCredential
 import com.suyaphot.app.domain.folders.FolderDeletePolicy
 import com.suyaphot.app.domain.folders.FolderManager
 import com.suyaphot.app.domain.folders.ViewerAccessScope
+import com.suyaphot.app.domain.gallery.ViewerCollection
+import androidx.compose.ui.platform.testTag
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.FolderTile
@@ -95,17 +104,17 @@ import com.suyaphot.app.ui.components.SuyaTextField
 import com.suyaphot.app.ui.components.SuyaTopBar
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
+import androidx.paging.LoadState
+import androidx.paging.compose.collectAsLazyPagingItems
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.flow.flowOf
 
 @Composable
 fun FoldersScreen(
     container: AppContainer,
     modifier: Modifier = Modifier,
-    onMediaClick: (itemId: String, scope: ViewerAccessScope?) -> Unit = { _, _ -> },
+    onMediaClick: (itemId: String, scope: ViewerAccessScope?, collection: ViewerCollection) -> Unit = { _, _, _ -> },
     onFolderOpened: (folderId: String) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -154,6 +163,19 @@ fun FoldersScreen(
     var enrollInput by remember { mutableStateOf("") }
     var enrollError by remember { mutableStateOf<String?>(null) }
     var enrollErrorTrigger by remember { mutableIntStateOf(0) }
+    var editLockFolderId by remember { mutableStateOf<String?>(null) }
+    var editLockFolderName by remember { mutableStateOf("") }
+    var editLockRecovery by remember { mutableStateOf(false) }
+    var editLockCurrentType by remember { mutableIntStateOf(0) }
+    var editLockTargetType by remember { mutableIntStateOf(0) }
+    var editLockCurrentPin by remember { mutableStateOf("") }
+    var editLockCurrentPattern by remember { mutableStateOf<CharArray?>(null) }
+    var editLockNewPin by remember { mutableStateOf("") }
+    var editLockConfirmPin by remember { mutableStateOf("") }
+    var editLockFirstPattern by remember { mutableStateOf<IntArray?>(null) }
+    var editLockRecoveryCode by remember { mutableStateOf("") }
+    var editLockError by remember { mutableStateOf<String?>(null) }
+    var editLockErrorTrigger by remember { mutableIntStateOf(0) }
 
     var showMoveFolderDialog by remember { mutableStateOf(false) }
     var targetParentFolderId by remember { mutableStateOf<String?>(null) }
@@ -164,6 +186,7 @@ fun FoldersScreen(
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
+    val retentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
 
     var showMoveMediaDialog by remember { mutableStateOf(false) }
     var moveMediaTargetFolderId by remember { mutableStateOf<String?>(null) }
@@ -173,14 +196,12 @@ fun FoldersScreen(
     // Import states
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
-
-    val pickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia()
-    ) { uris ->
+    var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
             scope.launch {
-                container.importCoordinator.importBatch(
+                val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = currentParentId,
                     mode = ImportMode.COPY,
@@ -190,8 +211,29 @@ fun FoldersScreen(
                 )
                 isImporting = false
                 importProgressText = ""
+                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
+                val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
+                val failed = results.count { it is ImportResult.Failure }
+                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
             }
         }
+    }
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val uris = pendingImportUris
+        pendingImportUris = emptyList()
+        if (!granted) folderActionStatus = "Location permission denied; GPS/original bytes may be redacted."
+        startImport(uris)
+    }
+    val pickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris ->
+        if (uris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            pendingImportUris = uris
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        } else startImport(uris)
     }
 
     // Subfolders flow for current parent
@@ -201,29 +243,11 @@ fun FoldersScreen(
     val folders by foldersFlow.collectAsState(initial = emptyList())
 
     // Media items flow for current parent folder
-    val mediaFlow = remember(vaultId, currentParentId, hiddenMode) {
-        if (hiddenMode && currentParentId == null) flowOf(emptyList())
-        else container.database.mediaItemDao().getByFolder(vaultId, currentParentId)
+    val mediaFlow = remember(vaultId, currentParentId, hiddenMode, accessRevision) {
+        if (hiddenMode && currentParentId == null) kotlinx.coroutines.flow.flowOf(androidx.paging.PagingData.empty())
+        else container.galleryRepository.pagedFolder(vaultId, currentParentId)
     }
-    val rawMediaEntities by mediaFlow.collectAsState(initial = emptyList())
-    val mediaItems = remember(rawMediaEntities) {
-        rawMediaEntities.map { entity ->
-            MediaItem(
-                id = entity.id,
-                vaultId = entity.vaultId,
-                folderId = entity.folderId,
-                type = MediaType.fromCode(entity.mediaTypeCode),
-                plaintextSize = entity.plaintextSize,
-                cipherSize = entity.cipherSize,
-                sha256Hex = entity.sha256Hex,
-                importedAt = entity.importedAt,
-                updatedAt = entity.updatedAt,
-                favorite = entity.favorite,
-                deletedAt = entity.deletedAt,
-                previousFolderId = entity.previousFolderId
-            )
-        }
-    }
+    val pagedMedia = mediaFlow.collectAsLazyPagingItems()
 
     LaunchedEffect(currentParentId) {
         selectedMediaIds.clear()
@@ -244,6 +268,24 @@ fun FoldersScreen(
         }
     }
 
+    fun navigateUp() {
+        if (currentParentId == null) {
+            hiddenMode = false
+            container.folderAccessManager.clear()
+            return
+        }
+        val parentIdx = breadcrumbs.indexOfLast { it.first == currentParentId } - 1
+        val parent = if (parentIdx >= 0) breadcrumbs[parentIdx].first else null
+        scope.launch {
+            if (parent != null && !container.folderAccessManager.canOpen(vaultId, parent)) return@launch
+            if (hiddenMode && !container.folderAccessManager.hasHiddenGrant(vaultId)) return@launch
+            container.folderAccessManager.retainLocksForFolder(vaultId, parent)
+            currentParentId = parent
+        }
+    }
+
+    BackHandler(currentParentId != null || hiddenMode) { navigateUp() }
+
     fun attemptOpenFolder(folderId: String) {
         pendingFolderId = folderId
         scope.launch {
@@ -258,6 +300,7 @@ fun FoldersScreen(
                 return@launch
             }
             val missing = container.folderAccessManager.missingLockIds(vaultId, folderId)
+                ?: run { pendingFolderId = null; return@launch }
             if (missing.isNotEmpty()) {
                 pendingLockId = missing.first()
                 val lock = container.database.folderLockDao().getForVault(vaultId, missing.first())
@@ -297,6 +340,63 @@ fun FoldersScreen(
                 pendingLockId = null
             }
             pendingFolderId?.let { attemptOpenFolder(it) }
+        }
+    }
+
+    fun submitEditedLock(replacement: CharArray) {
+        val folderId = editLockFolderId ?: run { replacement.fill('\u0000'); return }
+        val current = if (editLockCurrentType == 1) editLockCurrentPattern?.copyOf()
+            else editLockCurrentPin.toCharArray()
+        if (!editLockRecovery && (current == null || current.isEmpty())) {
+            replacement.fill('\u0000')
+            editLockError = "Enter the current folder credential"
+            return
+        }
+        scope.launch {
+            val changed = if (editLockRecovery) {
+                container.folderLockManager.resetWithRecovery(folderId, editLockRecoveryCode.trim(), replacement, editLockTargetType)
+            } else {
+                container.folderLockManager.change(folderId, current!!, editLockCurrentType, replacement, editLockTargetType)
+            }
+            if (changed) {
+                editLockFolderId = null
+                editLockCurrentPin = ""
+                editLockCurrentPattern?.fill('\u0000')
+                editLockCurrentPattern = null
+                editLockNewPin = ""
+                editLockConfirmPin = ""
+                editLockFirstPattern = null
+                editLockRecoveryCode = ""
+                folderActionStatus = "Folder lock updated"
+            } else {
+                editLockError = if (editLockRecovery) "Recovery failed or unavailable for this folder" else "Current credential was incorrect"
+                editLockErrorTrigger++
+            }
+        }
+    }
+
+    fun openLockEdit(target: Folder, recovery: Boolean) {
+        scope.launch {
+            val lock = container.database.folderLockDao().getForFolder(vaultId, target.id) ?: return@launch
+            if (recovery && lock.recoveryEnvelope == null) {
+                folderActionStatus = "This older lock has no recovery envelope. Unlock it and change the lock first."
+                selectedFolderForAction = null
+                return@launch
+            }
+            editLockFolderId = target.id
+            editLockFolderName = target.name
+            editLockRecovery = recovery
+            editLockCurrentType = lock.credentialTypeCode
+            editLockTargetType = lock.credentialTypeCode
+            editLockCurrentPin = ""
+            editLockCurrentPattern?.fill('\u0000')
+            editLockCurrentPattern = null
+            editLockNewPin = ""
+            editLockConfirmPin = ""
+            editLockFirstPattern = null
+            editLockRecoveryCode = ""
+            editLockError = null
+            selectedFolderForAction = null
         }
     }
 
@@ -406,24 +506,6 @@ fun FoldersScreen(
         }
     }
 
-    LaunchedEffect(hiddenMode, currentParentId, vaultId) {
-        while (hiddenMode || currentParentId != null) {
-            delay(1_000)
-            if (hiddenMode && !container.folderAccessManager.hasHiddenGrant(vaultId)) {
-                container.folderAccessManager.clear()
-                hiddenMode = false
-                currentParentId = null
-                break
-            }
-            currentParentId?.let {
-                if (!container.folderAccessManager.canOpen(vaultId, it)) {
-                    container.folderAccessManager.retainLocksForFolder(vaultId, null)
-                    currentParentId = null
-                }
-            }
-        }
-    }
-
     val currentTitle = if (currentParentId == null) {
         if (hiddenMode) "Hidden folders" else "Folders"
     } else {
@@ -465,8 +547,11 @@ fun FoldersScreen(
                         icon = Icons.Default.SelectAll,
                         contentDescription = "Select all",
                         onClick = {
-                            selectedMediaIds.clear()
-                            mediaItems.forEach { selectedMediaIds[it.id] = Unit }
+                            scope.launch {
+                                val ids = container.galleryRepository.authorizedFolderIds(vaultId, currentParentId)
+                                selectedMediaIds.clear()
+                                ids.forEach { selectedMediaIds[it] = Unit }
+                            }
                         },
                         size = 38
                     )
@@ -476,19 +561,7 @@ fun FoldersScreen(
                     title = currentTitle,
                     navigationIcon = if (currentParentId != null || hiddenMode) Icons.AutoMirrored.Filled.ArrowBack else null,
                     onNavigationClick = if (currentParentId != null || hiddenMode) {
-                        {
-                            if (currentParentId == null) {
-                                hiddenMode = false
-                                container.folderAccessManager.clear()
-                            } else {
-                                val parentIdx = breadcrumbs.indexOfLast { it.first == currentParentId } - 1
-                                val parent = if (parentIdx >= 0) breadcrumbs[parentIdx].first else null
-                                scope.launch {
-                                    container.folderAccessManager.retainLocksForFolder(vaultId, parent)
-                                    currentParentId = parent
-                                }
-                            }
-                        }
+                        { navigateUp() }
                     } else null,
                     actions = {
                         if (currentParentId == null && !hiddenMode) {
@@ -551,6 +624,8 @@ fun FoldersScreen(
                             color = if (isLast) SuyaColors.White else SuyaColors.Accent,
                             modifier = Modifier.clickable {
                                 scope.launch {
+                                    if (crumb.first != null && !container.folderAccessManager.canOpen(vaultId, crumb.first!!)) return@launch
+                                    if (hiddenMode && !container.folderAccessManager.hasHiddenGrant(vaultId)) return@launch
                                     container.folderAccessManager.retainLocksForFolder(vaultId, crumb.first)
                                     currentParentId = crumb.first
                                 }
@@ -569,7 +644,8 @@ fun FoldersScreen(
             }
 
             // Main Content: Folders and Media in Folder
-            if (folders.isEmpty() && mediaItems.isEmpty() && !isImporting) {
+            if (folders.isEmpty() && pagedMedia.itemCount == 0 &&
+                pagedMedia.loadState.refresh is LoadState.NotLoading && !isImporting) {
                 EmptyState(
                     icon = Icons.Default.Folder,
                     title = if (currentParentId == null) "No folders created" else "This folder is empty",
@@ -588,7 +664,7 @@ fun FoldersScreen(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f).testTag("folder_grid")
                 ) {
                     // Child Folders section
                     if (folders.isNotEmpty()) {
@@ -618,10 +694,10 @@ fun FoldersScreen(
                     }
 
                     // Media items section
-                    if (mediaItems.isNotEmpty()) {
+                    if (pagedMedia.itemCount > 0) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             Text(
-                                text = "MEDIA (${mediaItems.size})",
+                                text = "MEDIA",
                                 fontFamily = SoraFontFamily,
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 11.sp,
@@ -630,9 +706,18 @@ fun FoldersScreen(
                             )
                         }
                         items(
-                            items = mediaItems,
-                            key = { "m_" + it.id }
-                        ) { item ->
+                            count = pagedMedia.itemCount,
+                            key = { index -> "m_" + (pagedMedia.peek(index)?.id ?: "placeholder_$index") }
+                        ) { index ->
+                            val entity = pagedMedia[index] ?: return@items
+                            val item = MediaItem(
+                                id = entity.id, vaultId = entity.vaultId, folderId = entity.folderId,
+                                type = MediaType.fromCode(entity.mediaTypeCode),
+                                plaintextSize = entity.plaintextSize, cipherSize = entity.cipherSize,
+                                sha256Hex = entity.sha256Hex, importedAt = entity.importedAt,
+                                updatedAt = entity.updatedAt, favorite = entity.favorite,
+                                deletedAt = entity.deletedAt, previousFolderId = entity.previousFolderId
+                            )
                             val isSelected = selectedMediaIds.containsKey(item.id)
                             MediaTile(
                                 item = item,
@@ -644,10 +729,10 @@ fun FoldersScreen(
                                         else selectedMediaIds[item.id] = Unit
                                     } else {
                                         val folderId = currentParentId
-                                        if (folderId == null) onMediaClick(item.id, null)
+                                        if (folderId == null) onMediaClick(item.id, null, ViewerCollection.Folder(null))
                                         else scope.launch {
                                             val viewerScope = container.folderAccessManager.scopeForFolder(vaultId, folderId)
-                                            if (viewerScope != null) onMediaClick(item.id, viewerScope)
+                                            if (viewerScope != null) onMediaClick(item.id, viewerScope, ViewerCollection.Folder(folderId))
                                         }
                                     }
                                 },
@@ -686,7 +771,13 @@ fun FoldersScreen(
                     SuyaIconButton(
                         icon = Icons.AutoMirrored.Filled.DriveFileMove,
                         contentDescription = "Move to folder",
-                        onClick = { showMoveMediaDialog = true }
+                        onClick = {
+                            scope.launch {
+                                allFoldersInVault = container.folderManager.getMoveDestinations(hiddenMode)
+                                moveMediaTargetFolderId = null
+                                showMoveMediaDialog = true
+                            }
+                        }
                     )
                     SuyaIconButton(
                         icon = Icons.Default.Restore,
@@ -905,6 +996,12 @@ fun FoldersScreen(
                     )
                     if (targetFolder.lockId != null && container.folderAccessManager.hasLockGrant(vaultId, targetFolder.lockId)) {
                         SuyaButton(
+                            text = "Change Folder Lock",
+                            onClick = { openLockEdit(targetFolder, false) },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        SuyaButton(
                             text = "Allow fingerprint for folder",
                             onClick = {
                                 scope.launch {
@@ -918,6 +1015,26 @@ fun FoldersScreen(
                                     }
                                 }
                             },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        SuyaButton(
+                            text = "Disable folder fingerprint",
+                            onClick = {
+                                scope.launch {
+                                    val disabled = container.folderLockManager.disableBiometric(targetFolder.lockId)
+                                    folderActionStatus = if (disabled) "Folder fingerprint disabled" else "Unlock this folder first"
+                                    selectedFolderForAction = null
+                                }
+                            },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    if (targetFolder.lockId != null && (session as? VaultSession.Unlocked)?.kind == com.suyaphot.app.core.model.VaultKind.REAL) {
+                        SuyaButton(
+                            text = "Forgot Folder Lock? Use Recovery Kit",
+                            onClick = { openLockEdit(targetFolder, true) },
                             variant = ButtonVariant.Secondary,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -1030,8 +1147,8 @@ fun FoldersScreen(
                         SuyaButton("Pattern", onClick = { lockTypeCode = 1; newLockInput = ""; confirmLockInput = "" }, variant = if (lockTypeCode == 1) ButtonVariant.Primary else ButtonVariant.Secondary)
                     }
                     if (lockTypeCode == 0) {
-                        SuyaTextField(newLockInput, onValueChange = { newLockInput = it.take(12) }, label = "New PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
-                        SuyaTextField(confirmLockInput, onValueChange = { confirmLockInput = it.take(12) }, label = "Confirm PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                        SuyaTextField(newLockInput, onValueChange = { newLockInput = it.filter(Char::isDigit).take(12) }, label = "New PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                        SuyaTextField(confirmLockInput, onValueChange = { confirmLockInput = it.filter(Char::isDigit).take(12) }, label = "Confirm PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
                     } else {
                         Text(if (firstLockPattern == null) "Draw a pattern" else "Draw it again to confirm", color = SuyaColors.TextMuted, fontSize = 13.sp)
                         PatternLockPad(
@@ -1055,6 +1172,87 @@ fun FoldersScreen(
                     }
                     lockError?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
                     Text("Folder locks guard access inside an unlocked vault; they are not separate encryption keys for media.", color = SuyaColors.TextMuted, fontSize = 11.sp)
+                    if ((session as? VaultSession.Unlocked)?.kind == com.suyaphot.app.core.model.VaultKind.SECONDARY) {
+                        Text("Secondary-vault folder locks have no Recovery Kit reset. Losing this credential may permanently block the folder in the app.", color = SuyaColors.Negative, fontSize = 11.sp)
+                    }
+                }
+            }
+        )
+    }
+
+    if (editLockFolderId != null) {
+        SuyaDialog(
+            onDismissRequest = {
+                editLockFolderId = null
+                editLockCurrentPin = ""
+                editLockCurrentPattern?.fill('\u0000')
+                editLockCurrentPattern = null
+                editLockNewPin = ""
+                editLockConfirmPin = ""
+                editLockFirstPattern = null
+                editLockRecoveryCode = ""
+            },
+            title = if (editLockRecovery) "Recover $editLockFolderName" else "Change lock for $editLockFolderName",
+            confirmText = if (editLockTargetType == 0) "Save new PIN" else null,
+            onConfirm = if (editLockTargetType == 0) ({
+                if (editLockNewPin.length !in 4..12 || editLockNewPin != editLockConfirmPin) {
+                    editLockError = "Enter and confirm 4–12 digits"
+                } else submitEditedLock(editLockNewPin.toCharArray())
+            }) else null,
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (editLockRecovery) {
+                        Text("Recovery Kit resets this folder lock without changing its media encryption.", color = SuyaColors.TextMuted, fontSize = 12.sp)
+                        SuyaTextField(editLockRecoveryCode,
+                            onValueChange = { editLockRecoveryCode = it.uppercase() }, label = "Recovery Code")
+                    } else if (editLockCurrentType == 0) {
+                        SuyaTextField(editLockCurrentPin,
+                            onValueChange = { editLockCurrentPin = it.filter(Char::isDigit).take(12) },
+                            label = "Current folder PIN", visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                    } else if (editLockCurrentPattern == null) {
+                        Text("Draw current folder pattern", color = SuyaColors.TextMuted, fontSize = 12.sp)
+                        PatternLockPad(
+                            onPatternComplete = { raw ->
+                                editLockCurrentPattern = runCatching { PatternCredential.canonicalChars(raw) }.getOrNull()
+                                if (editLockCurrentPattern == null) { editLockError = "Connect at least four dots"; editLockErrorTrigger++ }
+                            },
+                            errorTrigger = editLockErrorTrigger, enabled = true,
+                            modifier = Modifier.fillMaxWidth())
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SuyaButton("New PIN", onClick = { editLockTargetType = 0; editLockFirstPattern = null },
+                            variant = if (editLockTargetType == 0) ButtonVariant.Primary else ButtonVariant.Secondary)
+                        SuyaButton("New Pattern", onClick = { editLockTargetType = 1; editLockNewPin = ""; editLockConfirmPin = "" },
+                            variant = if (editLockTargetType == 1) ButtonVariant.Primary else ButtonVariant.Secondary)
+                    }
+                    if (editLockTargetType == 0) {
+                        SuyaTextField(editLockNewPin,
+                            onValueChange = { editLockNewPin = it.filter(Char::isDigit).take(12) },
+                            label = "New folder PIN", visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                        SuyaTextField(editLockConfirmPin,
+                            onValueChange = { editLockConfirmPin = it.filter(Char::isDigit).take(12) },
+                            label = "Confirm new PIN", visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                    } else {
+                        Text(if (editLockFirstPattern == null) "Draw new pattern" else "Draw it again to confirm",
+                            color = SuyaColors.TextMuted, fontSize = 12.sp)
+                        PatternLockPad(
+                            onPatternComplete = { raw ->
+                                val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
+                                if (normalized == null) { editLockError = "Connect at least four dots"; editLockErrorTrigger++ }
+                                else if (editLockFirstPattern == null) { editLockFirstPattern = normalized; editLockError = null }
+                                else if (!normalized.contentEquals(editLockFirstPattern)) {
+                                    editLockFirstPattern = null
+                                    editLockError = "Patterns do not match"
+                                    editLockErrorTrigger++
+                                } else submitEditedLock(PatternCredential.canonicalChars(normalized))
+                            },
+                            errorTrigger = editLockErrorTrigger, enabled = true,
+                            modifier = Modifier.fillMaxWidth())
+                    }
+                    editLockError?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
                 }
             }
         )
@@ -1237,7 +1435,18 @@ fun FoldersScreen(
                     }
 
                     // Available folders
-                    folders.forEach { f ->
+                    val byId = allFoldersInVault.associateBy { it.id }
+                    fun pathFor(folder: Folder): String {
+                        val parts = ArrayList<String>()
+                        val seen = HashSet<String>()
+                        var cursor: Folder? = folder
+                        while (cursor != null && seen.add(cursor.id)) {
+                            parts.add(0, cursor.name)
+                            cursor = cursor.parentId?.let(byId::get)
+                        }
+                        return parts.joinToString(" / ")
+                    }
+                    allFoldersInVault.forEach { f ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -1251,7 +1460,7 @@ fun FoldersScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = f.name,
+                                text = pathFor(f),
                                 fontFamily = SoraFontFamily,
                                 fontSize = 13.sp,
                                 color = SuyaColors.White
@@ -1279,7 +1488,8 @@ fun FoldersScreen(
             title = "Move to Vault Trash?",
             content = {
                 Text(
-                    text = "Items in Trash are retained for 30 days before permanent deletion.",
+                    text = if (retentionDays == 0) "Items remain in Trash until permanently deleted."
+                        else "Items in Trash are retained for $retentionDays days before permanent deletion.",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted
@@ -1310,7 +1520,7 @@ fun FoldersScreen(
             title = "Restore to Public Gallery?",
             content = {
                 Text(
-                    text = "These items will be decrypted and returned to your public Samsung Gallery.",
+                    text = "These items will be decrypted and returned to your public Gallery. Hidden or locked-folder media will become visible to other Gallery apps.",
                     fontFamily = SoraFontFamily,
                     fontSize = 13.sp,
                     color = SuyaColors.TextMuted
@@ -1320,13 +1530,15 @@ fun FoldersScreen(
             onConfirm = {
                 scope.launch {
                     val ids = selectedMediaIds.keys.toList()
-                    selectedMediaIds.clear()
                     showRestoreConfirmDialog = false
-                    withContext(Dispatchers.IO) {
-                        for (id in ids) {
-                            container.restoreCoordinator.restoreItem(id, move = true)
-                        }
+                    val results = withContext(Dispatchers.IO) {
+                        ids.map { it to container.restoreCoordinator.restoreItem(it, move = true) }
                     }
+                    val failed = results.filter { it.second is RestoreResult.Failure }.map { it.first }.toSet()
+                    val pending = results.count { it.second is RestoreResult.SuccessWithCleanupPending }
+                    val completed = results.count { it.second is RestoreResult.Success }
+                    selectedMediaIds.keys.toList().filterNot { it in failed }.forEach(selectedMediaIds::remove)
+                    folderActionStatus = "Restore: $completed complete, $pending cleanup pending, ${failed.size} failed"
                 }
             }
         )

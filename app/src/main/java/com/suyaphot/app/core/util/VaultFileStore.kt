@@ -62,6 +62,13 @@ class VaultFileStore(private val context: Context) {
         return File(dir, "$itemId.sth")
     }
 
+    fun getPreviewFile(vaultId: String, itemId: String): File {
+        requireInternalId(itemId, "item id")
+        val prefix = if (itemId.length >= 2) itemId.substring(0, 2) else "xx"
+        val dir = File(File(getVaultDir(vaultId), "previews"), prefix).apply { mkdirs() }
+        return File(dir, "$itemId.spr")
+    }
+
     fun getSecurityFile(vaultId: String, eventId: String): File {
         requireInternalId(eventId, "event id")
         val dir = File(getVaultDir(vaultId), "security").apply { mkdirs() }

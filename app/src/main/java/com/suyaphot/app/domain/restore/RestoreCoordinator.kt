@@ -256,6 +256,10 @@ class RestoreCoordinator(
                 if (thumbFile.exists() && !thumbFile.delete()) {
                     SafeLog.w("RestoreCoordinator", "Thumbnail cleanup pending for restored media")
                 }
+                val previewFile = fileStore.getPreviewFile(session.vaultId, itemId)
+                if (previewFile.exists() && !previewFile.delete()) {
+                    SafeLog.w("RestoreCoordinator", "Preview cleanup pending for restored media")
+                }
 
                 if (!mediaDeleted) {
                     database.restoreJobDao().updatePhase(
@@ -266,7 +270,13 @@ class RestoreCoordinator(
 
                 database.restoreJobDao().updatePhase(jobId, RestorePhase.VAULT_MEDIA_REMOVED.code, null, System.currentTimeMillis())
 
-                mediaItemDao.deleteForVault(itemId, session.vaultId)
+                val deletedRows = mediaItemDao.deleteForVault(itemId, session.vaultId)
+                if (deletedRows != 1 && mediaItemDao.getItemForVault(itemId, session.vaultId) != null) {
+                    database.restoreJobDao().updatePhase(
+                        jobId, RestorePhase.CLEANUP_PENDING.code, null, System.currentTimeMillis(), "DB_DELETE_PENDING"
+                    )
+                    return@withContext RestoreResult.SuccessWithCleanupPending(itemId, insertedUri)
+                }
             }
 
             database.restoreJobDao().updatePhase(jobId, RestorePhase.DB_FINALIZED.code, null, System.currentTimeMillis())

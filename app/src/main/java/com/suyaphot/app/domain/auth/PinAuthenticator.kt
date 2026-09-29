@@ -38,6 +38,12 @@ class PinAuthenticator(
     private val preferences: SecurityPreferences
 ) {
 
+    private fun validCredential(chars: CharArray, typeCode: Int): Boolean = when (typeCode) {
+        0 -> chars.size == 6 && chars.all(Char::isDigit)
+        1 -> PatternCredential.isCanonical(chars)
+        else -> false
+    }
+
     @Volatile
     private var monotonicLockoutDeadlineMs: Long = 0L
     private var reauthFailures = 0
@@ -152,6 +158,7 @@ class PinAuthenticator(
 
     suspend fun changeCurrentCredential(current: CharArray, currentType: Int, replacement: CharArray, replacementType: Int): Boolean {
         return try {
+            if (!validCredential(replacement, replacementType)) return false
             val session = sessionManager.sessionState.value as? VaultSession.Unlocked ?: return false
             val vault = vaultDao.getVault(session.vaultId) ?: return false
             if (vault.credentialTypeCode != currentType || replacementType !in 0..1) return false
@@ -271,23 +278,32 @@ class PinAuthenticator(
     /**
      * Unwraps master key via recovery code and sets a new PIN.
      */
-    suspend fun recoverWithCode(recoveryCodeInput: String, newPinChars: CharArray): Boolean {
-        val realVault = vaultDao.getVaultByKind(VaultKind.REAL.code) ?: return false
-        val recoveryEnvelopeBytes = realVault.recoveryEnvelope ?: return false
+    suspend fun recoverWithCode(recoveryCodeInput: String, newPinChars: CharArray, newTypeCode: Int = 0): Boolean {
+        if (!validCredential(newPinChars, newTypeCode)) {
+            newPinChars.fill('\u0000')
+            return false
+        }
+        val realVault = vaultDao.getVaultByKind(VaultKind.REAL.code)
+            ?: run { newPinChars.fill('\u0000'); return false }
+        val recoveryEnvelopeBytes = realVault.recoveryEnvelope
+            ?: run { newPinChars.fill('\u0000'); return false }
         val envelope = runCatching { KeyManager.RecoveryEnvelope.deserialize(recoveryEnvelopeBytes) }.getOrNull()
-            ?: return false
-        val masterKey = keyManager.unwrapRecoveryEnvelope(envelope, recoveryCodeInput) ?: return false
+            ?: run { newPinChars.fill('\u0000'); return false }
+        val masterKey = keyManager.unwrapRecoveryEnvelope(envelope, recoveryCodeInput)
+            ?: run { newPinChars.fill('\u0000'); return false }
 
         try {
             // Re-wrap master key with new PIN
             val newPinEnvelope = keyManager.createPinEnvelope(masterKey, newPinChars)
-            vaultDao.updateCredential(realVault.id, newPinEnvelope.serialize(), 0)
+            vaultDao.updateCredential(realVault.id, newPinEnvelope.serialize(), newTypeCode)
             preferences.resetFailedAttempts()
             establishSession(realVault.id, VaultKind.REAL, masterKey)
             return true
         } catch (e: Exception) {
             SafeLog.e("PinAuthenticator", "Recovery reset failed", e)
             return false
+        } finally {
+            newPinChars.fill('\u0000')
         }
     }
 

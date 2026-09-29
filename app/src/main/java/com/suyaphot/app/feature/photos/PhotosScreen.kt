@@ -2,6 +2,12 @@ package com.suyaphot.app.feature.photos
 
 import android.graphics.Bitmap
 import android.net.Uri
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -64,6 +70,7 @@ import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.gallery.GalleryFilter
+import com.suyaphot.app.domain.gallery.ViewerCollection
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
@@ -88,10 +95,11 @@ import androidx.paging.compose.itemKey
 @Composable
 fun PhotosScreen(
     container: AppContainer,
-    onMediaClick: (itemId: String) -> Unit,
+    onMediaClick: (itemId: String, collection: ViewerCollection) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
 
@@ -117,10 +125,8 @@ fun PhotosScreen(
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
-    // Multi-picker launcher
-    val pickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia()
-    ) { uris ->
+    var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
             scope.launch {
@@ -140,6 +146,23 @@ fun PhotosScreen(
                 statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
             }
         }
+    }
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val uris = pendingImportUris
+        pendingImportUris = emptyList()
+        if (!granted) statusMessage = "Location permission denied; import continues, but GPS/original bytes may be redacted."
+        startImport(uris)
+    }
+    val pickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris ->
+        if (uris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            pendingImportUris = uris
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        } else startImport(uris)
     }
 
     val galleryFilter = when (selectedFilter) {
@@ -297,7 +320,7 @@ fun PhotosScreen(
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f).testTag("photos_grid")
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
@@ -311,7 +334,7 @@ fun PhotosScreen(
                                     if (isInSelectionMode) {
                                         if (allMatchingIds != null) allMatchingIds = if (isSelected) allMatchingIds!! - item.id else allMatchingIds!! + item.id
                                         else if (isSelected) selectedMediaIds.remove(item.id) else selectedMediaIds[item.id] = Unit
-                                    } else onMediaClick(item.id)
+                                    } else onMediaClick(item.id, ViewerCollection.Gallery(galleryFilter, sortOrder, searchEntities.map { it.id }))
                                 },
                                 onLongClick = { if (allMatchingIds == null) selectedMediaIds[item.id] = Unit },
                                 thumbLoader = { itemId ->
@@ -336,7 +359,7 @@ fun PhotosScreen(
                                     else if (isSelected) selectedMediaIds.remove(item.id)
                                     else selectedMediaIds[item.id] = Unit
                                 } else {
-                                    onMediaClick(item.id)
+                                    onMediaClick(item.id, ViewerCollection.Gallery(galleryFilter, sortOrder))
                                 }
                             },
                             onLongClick = {

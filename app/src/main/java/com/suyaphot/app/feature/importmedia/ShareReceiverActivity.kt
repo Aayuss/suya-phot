@@ -1,6 +1,8 @@
 package com.suyaphot.app.feature.importmedia
 
 import android.app.Activity
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -18,9 +20,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
@@ -35,6 +40,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -42,10 +48,20 @@ import com.suyaphot.app.app.SuyaApp
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.feature.lock.LockScreen
 import com.suyaphot.app.ui.components.SuyaButton
+import com.suyaphot.app.ui.components.SuyaDialog
+import com.suyaphot.app.ui.components.SuyaTextField
+import com.suyaphot.app.ui.components.PatternLockPad
+import com.suyaphot.app.ui.components.ButtonVariant
+import com.suyaphot.app.domain.auth.PatternCredential
+import com.suyaphot.app.core.model.Folder
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import com.suyaphot.app.ui.theme.SuyaTheme
 import com.suyaphot.app.core.model.ImportMode
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
 
 class ShareReceiverActivity : ComponentActivity() {
@@ -67,6 +83,8 @@ class ShareReceiverActivity : ComponentActivity() {
             SuyaTheme {
                 val session by container.sessionManager.sessionState.collectAsState()
                 val isUnlocked = session is VaultSession.Unlocked
+                var destinationChosen by remember { mutableStateOf(false) }
+                var destinationFolderId by remember { mutableStateOf<String?>(null) }
 
                 if (!isUnlocked) {
                     LockScreen(
@@ -75,9 +93,15 @@ class ShareReceiverActivity : ComponentActivity() {
                             // Session unlocked, composable will recompose and proceed with import
                         }
                     )
+                } else if (!destinationChosen) {
+                    ImportDestinationPicker(container, (session as VaultSession.Unlocked).vaultId) { chosen ->
+                        destinationFolderId = chosen
+                        destinationChosen = true
+                    }
                 } else {
                     ImportProgressView(
                         uris = sharedUris,
+                        folderId = destinationFolderId,
                         container = container,
                         onFinish = { finish() }
                     )
@@ -131,17 +155,168 @@ class ShareReceiverActivity : ComponentActivity() {
 }
 
 @Composable
+private fun ImportDestinationPicker(
+    container: com.suyaphot.app.app.AppContainer,
+    vaultId: String,
+    onChosen: (String?) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val accessRevision by container.folderAccessManager.revision.collectAsState()
+    var hiddenMode by remember { mutableStateOf(false) }
+    var candidates by remember { mutableStateOf<List<Folder>>(emptyList()) }
+    var pendingFolderId by remember { mutableStateOf<String?>(null) }
+    var pendingLockId by remember { mutableStateOf<String?>(null) }
+    var hiddenGate by remember { mutableStateOf(false) }
+    var gateType by remember { mutableIntStateOf(0) }
+    var gateInput by remember { mutableStateOf("") }
+    var gateError by remember { mutableStateOf<String?>(null) }
+    var patternErrorTrigger by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(vaultId, hiddenMode, accessRevision) {
+        if (hiddenMode && !container.folderAccessManager.hasHiddenGrant(vaultId)) hiddenMode = false
+        candidates = container.folderManager.getDestinationCandidates(hiddenMode)
+    }
+
+    fun chooseFolder(id: String) {
+        scope.launch {
+            if (container.folderAccessManager.canOpen(vaultId, id)) {
+                onChosen(id)
+                return@launch
+            }
+            val missing = container.folderAccessManager.missingLockIds(vaultId, id) ?: return@launch
+            val lockId = missing.firstOrNull() ?: return@launch
+            pendingFolderId = id
+            pendingLockId = lockId
+            gateType = container.database.folderLockDao().getForVault(vaultId, lockId)?.credentialTypeCode ?: 0
+            gateInput = ""
+            gateError = null
+        }
+    }
+
+    fun submitGate(chars: CharArray) {
+        scope.launch {
+            val success = if (hiddenGate) {
+                container.pinAuthenticator.verifyCurrentCredential(chars, gateType)
+            } else {
+                container.folderLockManager.unlock(pendingLockId ?: return@launch, chars, gateType)
+            }
+            chars.fill('\u0000')
+            gateInput = ""
+            if (!success) {
+                gateError = "Incorrect credential"
+                patternErrorTrigger++
+                return@launch
+            }
+            gateError = null
+            if (hiddenGate) {
+                container.folderAccessManager.grantHidden(vaultId)
+                hiddenMode = true
+                hiddenGate = false
+            } else {
+                pendingLockId = null
+                pendingFolderId?.let { chooseFolder(it) }
+            }
+        }
+    }
+
+    val byId = candidates.associateBy { it.id }
+    fun pathFor(folder: Folder): String {
+        val parts = ArrayList<String>()
+        val seen = HashSet<String>()
+        var cursor: Folder? = folder
+        while (cursor != null && seen.add(cursor.id)) {
+            parts.add(0, cursor.name)
+            cursor = cursor.parentId?.let(byId::get)
+        }
+        return parts.joinToString(" / ")
+    }
+
+    Column(Modifier.fillMaxSize().background(SuyaColors.Background).padding(18.dp)) {
+        Text("Move to Suya Phot", color = SuyaColors.White, fontSize = 20.sp)
+        Text("Choose where to import before Android asks to delete the public originals.",
+            color = SuyaColors.TextMuted, fontSize = 13.sp)
+        Spacer(Modifier.height(16.dp))
+        SuyaButton("Root (All Photos)", onClick = { onChosen(null) }, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(8.dp))
+        SuyaButton(if (hiddenMode) "Ordinary folders" else "Open Hidden folders",
+            onClick = {
+                if (hiddenMode) hiddenMode = false
+                else scope.launch {
+                    val vault = container.database.vaultDao().getVault(vaultId)
+                    gateType = vault?.credentialTypeCode ?: 0
+                    gateInput = ""
+                    gateError = null
+                    hiddenGate = true
+                }
+            }, variant = ButtonVariant.Secondary, modifier = Modifier.fillMaxWidth())
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(candidates, key = { it.id }) { folder ->
+                SuyaButton(
+                    text = pathFor(folder) + if (folder.lockId != null) "  • Locked" else "",
+                    onClick = { chooseFolder(folder.id) },
+                    variant = ButtonVariant.Secondary,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+
+    if (hiddenGate || pendingLockId != null) {
+        SuyaDialog(
+            onDismissRequest = { hiddenGate = false; pendingLockId = null; pendingFolderId = null; gateInput = "" },
+            title = if (hiddenGate) "Open Hidden folders" else "Unlock folder",
+            confirmText = if (gateType == 0) "Unlock" else null,
+            onConfirm = if (gateType == 0) ({ submitGate(gateInput.toCharArray()) }) else null,
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (gateType == 0) {
+                        SuyaTextField(gateInput,
+                            onValueChange = { gateInput = it.filter(Char::isDigit).take(12) },
+                            label = if (hiddenGate) "Vault PIN" else "Folder PIN",
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                    } else {
+                        PatternLockPad(onPatternComplete = { raw ->
+                            val chars = runCatching { PatternCredential.canonicalChars(raw) }.getOrNull()
+                            if (chars == null) { gateError = "Connect at least four dots"; patternErrorTrigger++ }
+                            else submitGate(chars)
+                        }, errorTrigger = patternErrorTrigger, enabled = true, modifier = Modifier.fillMaxWidth())
+                    }
+                    gateError?.let { Text(it, color = SuyaColors.Negative) }
+                }
+            }
+        )
+    }
+}
+
+@Composable
 private fun ImportProgressView(
     uris: List<Uri>,
+    folderId: String?,
     container: com.suyaphot.app.app.AppContainer,
     onFinish: () -> Unit
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var statusText by remember { mutableStateOf("Preparing import...") }
     var isDone by remember { mutableStateOf(false) }
     var pendingSuccesses by remember { mutableStateOf<List<com.suyaphot.app.domain.importmedia.ImportResult.Success>>(emptyList()) }
     var consentSuccesses by remember { mutableStateOf<List<com.suyaphot.app.domain.importmedia.ImportResult.Success>>(emptyList()) }
+    var consentMode by remember { mutableStateOf<com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeleteConsentMode?>(null) }
     var deletionTrigger by remember { mutableIntStateOf(0) }
+    var locationPermissionResolved by remember {
+        mutableStateOf(Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED)
+    }
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) statusText = "Location permission denied; GPS/original bytes may be redacted. Importing safely..."
+        locationPermissionResolved = true
+    }
+    LaunchedEffect(Unit) {
+        if (!locationPermissionResolved) locationPermissionLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
+    }
 
     fun markJobsTerminal(
         results: List<com.suyaphot.app.domain.importmedia.ImportResult.Success>,
@@ -163,24 +338,36 @@ private fun ImportProgressView(
     val deleteRequestLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            markJobsTerminal(consentSuccesses, "SOURCE_DELETE_APPROVED")
-        } else {
-            markJobsTerminal(consentSuccesses, "ORIGINAL_RETAINED_BY_USER")
+        scope.launch {
+            val currentConsent = consentSuccesses
+            if (result.resultCode == Activity.RESULT_OK && consentMode != null) {
+                val verified = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    container.sourceDeletionCoordinator.completeConsent(currentConsent.map { it.uri }, consentMode!!)
+                }
+                markJobsTerminal(currentConsent.filter { it.uri in verified.deletedUris }, "SOURCE_DELETED")
+                markJobsTerminal(currentConsent.filter { it.uri in verified.retainedUris }, "SOURCE_DELETE_FAILED_VAULT_SAFE")
+                if (verified.retainedUris.isNotEmpty()) {
+                    statusText = "Imported safely. Some originals remain in Gallery."
+                }
+            } else {
+                markJobsTerminal(currentConsent, "ORIGINAL_RETAINED_BY_USER")
+            }
+            pendingSuccesses = pendingSuccesses.filterNot { pending ->
+                currentConsent.any { it.jobId == pending.jobId }
+            }
+            consentSuccesses = emptyList()
+            consentMode = null
+            deletionTrigger++
         }
-        pendingSuccesses = pendingSuccesses.filterNot { pending ->
-            consentSuccesses.any { it.jobId == pending.jobId }
-        }
-        consentSuccesses = emptyList()
-        deletionTrigger++
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(locationPermissionResolved) {
+        if (!locationPermissionResolved) return@LaunchedEffect
         scope.launch {
             statusText = "Moving ${uris.size} items to Suya Phot..."
             val results = container.importCoordinator.importBatch(
                 uris = uris,
-                folderId = null,
+                folderId = folderId,
                 mode = ImportMode.MOVE,
                 onItemComplete = { current, total, _ ->
                     scope.launch { statusText = "Encrypting $current of $total items..." }
@@ -222,6 +409,7 @@ private fun ImportProgressView(
                 markJobsTerminal(directlyDeleted, "SOURCE_DELETED")
                 pendingSuccesses = current.filterNot { it.uri in outcome.deletedUris }
                 consentSuccesses = pendingSuccesses.filter { it.uri in outcome.uris }
+                consentMode = outcome.mode
                 deleteRequestLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
             }
             is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.Failed -> {

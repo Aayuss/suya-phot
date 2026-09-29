@@ -221,6 +221,7 @@ class ImportCoordinator(
         val partialFile = fileStore.getPartialFile(vaultId, jobId)
         val finalMediaFile = fileStore.getMediaFile(vaultId, itemId)
         val thumbFile = fileStore.getThumbFile(vaultId, itemId)
+        val previewFile = fileStore.getPreviewFile(vaultId, itemId)
 
         var finalCommitted = false
         var dbCommitted = false
@@ -339,6 +340,13 @@ class ImportCoordinator(
                     outputThumbFile = thumbFile,
                     orientation = sourceMeta.metadata.orientation ?: 0
                 )
+                thumbnailGenerator.generateAndEncryptImagePreview(
+                    imageUri = resolvedSource.readUri,
+                    itemId = itemId,
+                    thumbSubkey = session.thumbSubkey,
+                    outputPreviewFile = previewFile,
+                    orientation = sourceMeta.metadata.orientation ?: 0
+                )
             } else {
                 thumbnailGenerator.generateAndEncryptVideoThumbnail(
                     videoUri = resolvedSource.readUri,
@@ -397,6 +405,7 @@ class ImportCoordinator(
                 deletedAt = null,
                 previousFolderId = null,
                 dateTakenMs = sourceMeta.metadata.dateTakenMs,
+                encryptedPreviewRelativePath = previewFile.name.takeIf { previewFile.exists() },
                 concealed = targetFolder?.let { it.effectiveHidden || it.effectiveProtected } ?: false
             )
 
@@ -427,6 +436,7 @@ class ImportCoordinator(
             if (finalCommitted && !dbCommitted) {
                 runCatching { if (finalMediaFile.exists()) finalMediaFile.delete() }
                 runCatching { if (thumbFile.exists()) thumbFile.delete() }
+                runCatching { if (previewFile.exists()) previewFile.delete() }
             }
             vaultJobDao.updateState(jobId, JobState.CANCELLED.code, System.currentTimeMillis(), ImportErrorCode.CANCELLED.name)
             throw ce
@@ -436,6 +446,7 @@ class ImportCoordinator(
             if (finalCommitted && !dbCommitted && !stagedPersisted) {
                 runCatching { if (finalMediaFile.exists()) finalMediaFile.delete() }
                 runCatching { if (thumbFile.exists()) thumbFile.delete() }
+                runCatching { if (previewFile.exists()) previewFile.delete() }
             }
             val safeCode = when (e) {
                 is SecurityException -> ImportErrorCode.PERMISSION_DENIED

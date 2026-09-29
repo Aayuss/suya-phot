@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Suya Phot"
 include(":app")
+include(":benchmark")

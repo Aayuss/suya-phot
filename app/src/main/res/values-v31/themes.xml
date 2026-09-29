@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SuyaPhot" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/suya_bg</item>
+        <item name="android:statusBarColor">@color/suya_bg</item>
+        <item name="android:navigationBarColor">@color/suya_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowSplashScreenBackground">@color/suya_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_suya_logo</item>
+    </style>
+</resources>

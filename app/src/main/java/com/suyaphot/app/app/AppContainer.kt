@@ -46,7 +46,7 @@ class AppContainer(val context: Context) {
     val metadataReader: MetadataReader by lazy { MetadataReader(context) }
     val thumbnailGenerator: ThumbnailGenerator by lazy { ThumbnailGenerator(context) }
     val conflictResolver: ConflictResolver by lazy { ConflictResolver(context.contentResolver) }
-    val galleryRepository: GalleryRepository by lazy { GalleryRepository(database.mediaItemDao()) }
+    val galleryRepository: GalleryRepository by lazy { GalleryRepository(database.mediaItemDao(), folderAccessManager) }
     val vaultSearchIndex: VaultSearchIndex by lazy { VaultSearchIndex() }
     val encryptedThumbnailRepository: EncryptedThumbnailRepository by lazy {
         EncryptedThumbnailRepository(sessionManager, vaultFileStore, thumbnailGenerator)
@@ -54,12 +54,18 @@ class AppContainer(val context: Context) {
     val shareCoordinator: ShareCoordinator by lazy {
         ShareCoordinator(context, database, sessionManager, folderAccessManager, vaultFileStore, vaultCrypto)
     }
-    val folderPrivacyCoordinator: FolderPrivacyCoordinator by lazy { FolderPrivacyCoordinator(database) }
+    val folderPrivacyCoordinator: FolderPrivacyCoordinator by lazy {
+        FolderPrivacyCoordinator(database) {
+            folderAccessManager.onPrivacyMutation()
+            encryptedThumbnailRepository.clear()
+            vaultSearchIndex.clear()
+        }
+    }
 
     val sessionManager: SessionManager by lazy { SessionManager(preferences) }
     val folderAccessManager: FolderAccessManager by lazy { FolderAccessManager(database, sessionManager) }
     val folderLockManager: FolderLockManager by lazy {
-        FolderLockManager(database, keyManager, sessionManager, folderAccessManager, folderPrivacyCoordinator)
+        FolderLockManager(database, keyManager, sessionManager, folderAccessManager, folderPrivacyCoordinator, context)
     }
     val pinAuthenticator: PinAuthenticator by lazy {
         PinAuthenticator(

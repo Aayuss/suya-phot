@@ -2,11 +2,15 @@ package com.suyaphot.app.core.media
 
 import android.content.ContentResolver
 import android.content.Context
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.exifinterface.media.ExifInterface
+import androidx.core.content.ContextCompat
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.util.SafeLog
@@ -29,7 +33,12 @@ class MetadataReader(private val context: Context) {
     )
 
     fun resolve(rawUri: Uri): ResolvedMediaSource {
-        val readUri = if (rawUri.authority == MediaStore.AUTHORITY) {
+        val canReadOriginal = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED
+        // Android Photo Picker URIs are mediated by the picker even though their authority is
+        // "media". Its provider rejects ?requireOriginal=1, including after permission grant.
+        val isPickerUri = rawUri.pathSegments.firstOrNull() == "picker"
+        val readUri = if (rawUri.authority == MediaStore.AUTHORITY && !isPickerUri && canReadOriginal) {
             runCatching { MediaStore.setRequireOriginal(rawUri) }.getOrDefault(rawUri)
         } else {
             rawUri

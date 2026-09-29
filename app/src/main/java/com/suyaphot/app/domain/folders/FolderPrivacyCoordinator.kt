@@ -7,7 +7,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /** Materializes inherited privacy once per hierarchy change, never per gallery page. */
-class FolderPrivacyCoordinator(private val database: SuyaDatabase) {
+class FolderPrivacyCoordinator(
+    private val database: SuyaDatabase,
+    private val onPrivacyChanged: () -> Unit = {}
+) {
     suspend fun setHidden(vaultId: String, folderId: String, hidden: Boolean) = withContext(Dispatchers.IO) {
         database.withTransaction {
             check(database.folderDao().setDirectHidden(vaultId, folderId, hidden, System.currentTimeMillis()) == 1)
@@ -38,5 +41,7 @@ class FolderPrivacyCoordinator(private val database: SuyaDatabase) {
         byParent[null].orEmpty().forEach { walk(it, false, false) }
         check(visited.size == folders.size) { "Orphaned or cyclic folder hierarchy" }
         database.mediaItemDao().recomputeActiveConcealment(vaultId)
+        database.mediaItemDao().recomputeTrashConcealment(vaultId)
+        onPrivacyChanged()
     }
 }

@@ -101,6 +101,8 @@ class ImportRecoveryManager(
                                             sha256Hex = staged.sha256Hex, importedAt = staged.importedAt,
                                             updatedAt = now, favorite = false, deletedAt = null,
                                             previousFolderId = null, dateTakenMs = staged.dateTakenMs,
+                                            encryptedPreviewRelativePath = fileStore.getPreviewFile(session.vaultId, payload.itemId)
+                                                .takeIf { it.exists() }?.name,
                                             concealed = currentTarget?.let { it.effectiveHidden || it.effectiveProtected } ?: false
                                         )
                                     )

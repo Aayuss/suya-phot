@@ -12,6 +12,7 @@ import com.suyaphot.app.domain.auth.VaultSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
@@ -285,7 +286,7 @@ class FolderManager(
         val session = getCurrentSession()
         val folders = folderDao.getFoldersForVaultOnce(session.vaultId)
         folders
-            .filter { if (hiddenMode) it.effectiveHidden else !it.effectiveHidden }
+            .filter { hiddenMode || !it.effectiveHidden }
             .filter { accessManager?.canOpen(session.vaultId, it.id) != false }
             .map { entity ->
                 val decrypted = runCatching {
@@ -298,6 +299,28 @@ class FolderManager(
                     directHidden = entity.directHidden, effectiveHidden = entity.effectiveHidden,
                     lockId = entity.lockId, effectiveProtected = entity.effectiveProtected
                 )
+            }
+    }
+
+    /** Picker rows may expose a locked folder's own name, but never its children before ancestor unlock. */
+    suspend fun getDestinationCandidates(includeHidden: Boolean): List<Folder> = withContext(Dispatchers.IO) {
+        val session = getCurrentSession()
+        val vaultId = session.vaultId
+        val access = accessManager ?: return@withContext emptyList()
+        folderDao.getFoldersForVaultOnce(vaultId)
+            .filter { !it.effectiveHidden || (includeHidden && access.hasHiddenGrant(vaultId)) }
+            .filter { it.parentId == null || access.canOpen(vaultId, it.parentId) }
+            .map { entity ->
+                val name = runCatching {
+                    val bytes = Aead.decryptWithPrependedNonce(
+                        session.metaSubkey, entity.encryptedName, entity.id.toByteArray()
+                    )
+                    try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0) }
+                }.getOrDefault("Folder")
+                Folder(entity.id, entity.vaultId, entity.parentId, name, entity.createdAt,
+                    entity.updatedAt, entity.coverMediaId, entity.sortOrder,
+                    directHidden = entity.directHidden, effectiveHidden = entity.effectiveHidden,
+                    lockId = entity.lockId, effectiveProtected = entity.effectiveProtected)
             }
     }
 
@@ -340,6 +363,6 @@ class FolderManager(
                     effectiveProtected = entity.effectiveProtected
                 )
             }
-        }
+        }.flowOn(Dispatchers.Default)
     }
 }

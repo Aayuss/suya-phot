@@ -31,7 +31,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         IntruderEventEntity::class,
         RestoreJobEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class SuyaDatabase : RoomDatabase() {
@@ -57,7 +57,7 @@ abstract class SuyaDatabase : RoomDatabase() {
                     SuyaDatabase::class.java,
                     DB_NAME
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { instance = it }
             }
@@ -116,6 +116,34 @@ abstract class SuyaDatabase : RoomDatabase() {
                         FOREIGN KEY(folderId) REFERENCES folders(id) ON UPDATE NO ACTION ON DELETE CASCADE
                     )""".trimIndent()
                 )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_folder_locks_folderId ON folder_locks(folderId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_folder_locks_vaultId ON folder_locks(vaultId)")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS folder_locks_v4 (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    vaultId TEXT NOT NULL,
+                    folderId TEXT NOT NULL,
+                    credentialTypeCode INTEGER NOT NULL,
+                    credentialEnvelope BLOB NOT NULL,
+                    biometricEnvelope BLOB,
+                    biometricIv BLOB,
+                    recoveryEnvelope BLOB,
+                    createdAt INTEGER NOT NULL,
+                    updatedAt INTEGER NOT NULL,
+                    FOREIGN KEY(vaultId) REFERENCES vaults(id) ON UPDATE NO ACTION ON DELETE CASCADE,
+                    FOREIGN KEY(folderId) REFERENCES folders(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                )""".trimIndent())
+                db.execSQL("""INSERT INTO folder_locks_v4 (
+                    id, vaultId, folderId, credentialTypeCode, credentialEnvelope,
+                    biometricEnvelope, biometricIv, recoveryEnvelope, createdAt, updatedAt
+                ) SELECT id, vaultId, folderId, credentialTypeCode, credentialEnvelope,
+                    biometricEnvelope, biometricIv, NULL, createdAt, updatedAt FROM folder_locks""".trimIndent())
+                db.execSQL("DROP TABLE folder_locks")
+                db.execSQL("ALTER TABLE folder_locks_v4 RENAME TO folder_locks")
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_folder_locks_folderId ON folder_locks(folderId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_folder_locks_vaultId ON folder_locks(vaultId)")
             }

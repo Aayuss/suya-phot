@@ -21,6 +21,7 @@ Optimized for the **Samsung Galaxy S23 Ultra** and modern Android devices (API 2
    - Master keys (256-bit random) derived using domain-separated HKDF-SHA256 (`mediaSubkey`, `metaSubkey`, `thumbSubkey`).
    - Streaming AES-256-GCM authenticated encryption for photos and videos using the versioned `SUPH` v1 binary container format (authenticated header and bounded 256 KiB I/O buffers; the complete media file is never buffered in memory).
    - PIN or 3×3 pattern credential envelope combining PBKDF2-HMAC-SHA256 (a fixed, envelope-recorded work factor) with an Android Keystore-backed HMAC pepper. Existing PIN envelopes remain readable.
+   - The real vault supports PIN or pattern. The optional secondary vault is deliberately PIN-only; its setup, unlock, and PIN-change UI do not offer a pattern.
    - Biometric unwrap via `BiometricPrompt` with an Android Keystore authenticated `CryptoObject` (AES-256-GCM). Plaintext key material is kept only in the active in-memory session and is never persisted.
    - 128-bit emergency Recovery Kit formatted as a 26-character Base32 code (`XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX`), normalized and validated for exact 26-character input.
 

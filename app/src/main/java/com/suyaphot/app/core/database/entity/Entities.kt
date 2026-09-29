@@ -163,7 +163,7 @@ data class FolderLockEntity(
     val credentialEnvelope: ByteArray,
     val biometricEnvelope: ByteArray?,
     val biometricIv: ByteArray?,
-    val relockPolicyCode: Int,
+    val recoveryEnvelope: ByteArray? = null,
     val createdAt: Long,
     val updatedAt: Long
 )

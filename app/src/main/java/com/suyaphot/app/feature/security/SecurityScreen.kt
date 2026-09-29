@@ -96,6 +96,7 @@ fun SecurityScreen(
     var secondaryPinError by remember { mutableStateOf<String?>(null) }
     var showIntruderPermissionDialog by remember { mutableStateOf(false) }
     var showChangeCredentialDialog by remember { mutableStateOf(false) }
+    var targetCredentialType by remember { mutableIntStateOf(0) }
     var currentCredentialInput by remember { mutableStateOf("") }
     var currentPatternCredential by remember { mutableStateOf<CharArray?>(null) }
     var newCredentialInput by remember { mutableStateOf("") }
@@ -137,7 +138,7 @@ fun SecurityScreen(
             return
         }
         scope.launch {
-            val changed = container.pinAuthenticator.changeCurrentCredential(oldChars, oldType, newChars, 1 - oldType)
+            val changed = container.pinAuthenticator.changeCurrentCredential(oldChars, oldType, newChars, targetCredentialType)
             if (changed) {
                 currentPatternCredential?.fill('\u0000')
                 currentPatternCredential = null
@@ -226,8 +227,26 @@ fun SecurityScreen(
                 )
 
                 SuyaButton(
-                    text = if (realVault?.credentialTypeCode == 1) "Change Pattern to PIN" else "Change PIN to Pattern",
+                    text = if (realVault?.credentialTypeCode == 1) "Change Pattern" else "Change PIN",
                     onClick = {
+                        targetCredentialType = realVault?.credentialTypeCode ?: 0
+                        currentCredentialInput = ""
+                        currentPatternCredential?.fill('\u0000')
+                        currentPatternCredential = null
+                        newCredentialInput = ""
+                        confirmCredentialInput = ""
+                        firstNewPattern = null
+                        changeCredentialError = null
+                        showChangeCredentialDialog = true
+                    },
+                    variant = ButtonVariant.Secondary,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                SuyaButton(
+                    text = if (realVault?.credentialTypeCode == 1) "Switch to PIN" else "Switch to Pattern",
+                    onClick = {
+                        targetCredentialType = 1 - (realVault?.credentialTypeCode ?: 0)
                         currentCredentialInput = ""
                         currentPatternCredential?.fill('\u0000')
                         currentPatternCredential = null
@@ -433,9 +452,11 @@ fun SecurityScreen(
                 confirmCredentialInput = ""
                 firstNewPattern = null
             },
-            title = if (oldType == 0) "Change PIN to Pattern" else "Change Pattern to PIN",
-            confirmText = if (oldType == 1) "Change to PIN" else null,
-            onConfirm = if (oldType == 1) ({
+            title = if (targetCredentialType == oldType) {
+                if (oldType == 0) "Change PIN" else "Change Pattern"
+            } else if (targetCredentialType == 0) "Switch to PIN" else "Switch to Pattern",
+            confirmText = if (targetCredentialType == 0) "Save PIN" else null,
+            onConfirm = if (targetCredentialType == 0) ({
                 if (newCredentialInput.length != 6 || newCredentialInput != confirmCredentialInput) {
                     changeCredentialError = "Enter and confirm a new 6-digit PIN"
                 } else submitChangedCredential(newCredentialInput.toCharArray())
@@ -445,23 +466,10 @@ fun SecurityScreen(
                     if (oldType == 0) {
                         SuyaTextField(
                             currentCredentialInput,
-                            onValueChange = { currentCredentialInput = it.take(6); changeCredentialError = null },
+                            onValueChange = { currentCredentialInput = it.filter(Char::isDigit).take(6); changeCredentialError = null },
                             label = "Current PIN",
                             visualTransformation = PasswordVisualTransformation(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
-                        )
-                        Text(if (firstNewPattern == null) "Draw a new pattern" else "Draw the new pattern again", color = SuyaColors.TextMuted, fontSize = 13.sp)
-                        PatternLockPad(
-                            onPatternComplete = { raw ->
-                                val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
-                                if (normalized == null) { changeCredentialError = "Connect at least four dots"; changePatternErrorTrigger++ }
-                                else if (firstNewPattern == null) { firstNewPattern = normalized; changeCredentialError = null }
-                                else if (!normalized.contentEquals(firstNewPattern)) { firstNewPattern = null; changeCredentialError = "Patterns do not match"; changePatternErrorTrigger++ }
-                                else submitChangedCredential(PatternCredential.canonicalChars(normalized))
-                            },
-                            errorTrigger = changePatternErrorTrigger,
-                            enabled = true,
-                            modifier = Modifier.fillMaxWidth()
                         )
                     } else {
                         Text(if (currentPatternCredential == null) "Draw your current pattern" else "Current pattern captured", color = SuyaColors.TextMuted, fontSize = 13.sp)
@@ -477,8 +485,24 @@ fun SecurityScreen(
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
-                        SuyaTextField(newCredentialInput, onValueChange = { newCredentialInput = it.take(6) }, label = "New PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
-                        SuyaTextField(confirmCredentialInput, onValueChange = { confirmCredentialInput = it.take(6) }, label = "Confirm PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                    }
+                    if (targetCredentialType == 1) {
+                        Text(if (firstNewPattern == null) "Draw a new pattern" else "Draw the new pattern again", color = SuyaColors.TextMuted, fontSize = 13.sp)
+                        PatternLockPad(
+                            onPatternComplete = { raw ->
+                                val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
+                                if (normalized == null) { changeCredentialError = "Connect at least four dots"; changePatternErrorTrigger++ }
+                                else if (firstNewPattern == null) { firstNewPattern = normalized; changeCredentialError = null }
+                                else if (!normalized.contentEquals(firstNewPattern)) { firstNewPattern = null; changeCredentialError = "Patterns do not match"; changePatternErrorTrigger++ }
+                                else submitChangedCredential(PatternCredential.canonicalChars(normalized))
+                            },
+                            errorTrigger = changePatternErrorTrigger,
+                            enabled = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        SuyaTextField(newCredentialInput, onValueChange = { newCredentialInput = it.filter(Char::isDigit).take(6) }, label = "New PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                        SuyaTextField(confirmCredentialInput, onValueChange = { confirmCredentialInput = it.filter(Char::isDigit).take(6) }, label = "Confirm PIN", visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
                     }
                     changeCredentialError?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
                 }

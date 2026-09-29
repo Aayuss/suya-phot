@@ -32,8 +32,7 @@ class RestoreRecoveryManager(
                     RestorePhase.PUBLIC_PUBLISHED,
                     RestorePhase.CLEANUP_PENDING -> reconcilePublished(job.id, job.mediaId, job.vaultId, job.move, uri)
                     RestorePhase.VAULT_MEDIA_REMOVED -> {
-                        database.mediaItemDao().deleteForVault(job.mediaId, job.vaultId)
-                        complete(job.id)
+                        finalizeDatabaseRow(job.id, job.mediaId, job.vaultId)
                     }
                     RestorePhase.DB_FINALIZED -> complete(job.id)
                     RestorePhase.COMPLETED,
@@ -85,8 +84,19 @@ class RestoreRecoveryManager(
             return
         }
         runCatching { fileStore.getThumbFile(vaultId, mediaId).delete() }
-        database.mediaItemDao().deleteForVault(mediaId, vaultId)
-        complete(jobId)
+        runCatching { fileStore.getPreviewFile(vaultId, mediaId).delete() }
+        finalizeDatabaseRow(jobId, mediaId, vaultId)
+    }
+
+    private suspend fun finalizeDatabaseRow(jobId: String, mediaId: String, vaultId: String) {
+        val deleted = database.mediaItemDao().deleteForVault(mediaId, vaultId)
+        if (deleted == 1 || database.mediaItemDao().getItemForVault(mediaId, vaultId) == null) {
+            complete(jobId)
+        } else {
+            database.restoreJobDao().updatePhase(
+                jobId, RestorePhase.CLEANUP_PENDING.code, null, System.currentTimeMillis(), "DB_DELETE_PENDING"
+            )
+        }
     }
 
     private fun publicHashMatches(uri: Uri, expected: String): Boolean = runCatching {

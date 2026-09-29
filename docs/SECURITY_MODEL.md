@@ -62,6 +62,8 @@ Using domain separation info strings:
 
 Room schema v3 stores direct and inherited hidden/protected folder flags and a materialized media `concealed` flag. Ordinary gallery, search, favorites, and Trash queries exclude concealed media. Entering Hidden folders requires a short-lived vault re-authentication grant; folder PIN/pattern locks require separate, short-lived grants for every locked ancestor. Grants are in memory and cleared on vault lock or app background. Folder locks do not create an independent media-encryption domain: media remains encrypted by its vault key, and the extra lock is an application access gate. Deleted protected media stays classified as private; if its original folder is gone, restore uses a hidden recovery folder rather than visible root.
 
+The real vault supports either a six-digit PIN or a canonical 3×3 pattern. The optional secondary vault is intentionally PIN-only; no secondary pattern setup or recovery flow is advertised.
+
 ---
 
 ## 4. Encrypted File Format (SUPH v1)

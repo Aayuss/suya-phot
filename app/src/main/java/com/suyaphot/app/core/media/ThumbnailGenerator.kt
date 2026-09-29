@@ -7,6 +7,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
 import com.suyaphot.app.core.crypto.Aead
+import com.suyaphot.app.core.crypto.HkdfSha256
 import com.suyaphot.app.core.util.SafeLog
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -20,6 +21,71 @@ class ThumbnailGenerator(private val context: Context) {
     companion object {
         const val TARGET_THUMB_SIZE = 360
         const val JPEG_QUALITY = 80
+        const val TARGET_PREVIEW_SIZE = 2560
+    }
+
+    private fun previewKey(thumbSubkey: ByteArray): ByteArray = HkdfSha256.derive(
+        thumbSubkey, salt = ByteArray(0), info = "suya-phot-preview-key-v1".toByteArray(), length = 32
+    )
+
+    fun generateAndEncryptImagePreview(
+        imageUri: Uri, itemId: String, thumbSubkey: ByteArray, outputPreviewFile: File,
+        orientation: Int = ExifInterface.ORIENTATION_NORMAL
+    ): Boolean {
+        outputPreviewFile.parentFile?.mkdirs()
+        val partial = File(outputPreviewFile.parentFile, "${outputPreviewFile.name}.partial")
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            val boundsStream = context.contentResolver.openInputStream(imageUri) ?: return false
+            boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return false
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > TARGET_PREVIEW_SIZE) sample *= 2
+            var bitmap = context.contentResolver.openInputStream(imageUri)?.use {
+                BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply {
+                    inSampleSize = sample
+                    inPreferredConfig = Bitmap.Config.RGB_565
+                })
+            } ?: return false
+            if (orientation != ExifInterface.ORIENTATION_NORMAL && orientation != ExifInterface.ORIENTATION_UNDEFINED) {
+                bitmap = applyExifOrientation(bitmap, orientation)
+            }
+            val out = ByteArrayOutputStream()
+            try { check(bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)) }
+            finally { bitmap.recycle() }
+            val plaintext = out.toByteArray()
+            val key = previewKey(thumbSubkey)
+            val encrypted = try {
+                Aead.encryptWithPrependedNonce(key, plaintext, "suya-phot:preview:v1:$itemId".toByteArray())
+            } finally { plaintext.fill(0); key.fill(0) }
+            try {
+                FileOutputStream(partial).use { output ->
+                    output.write(encrypted)
+                    output.flush()
+                    output.fd.sync()
+                }
+                commitDerivative(partial, outputPreviewFile)
+            } finally { encrypted.fill(0) }
+            true
+        } catch (e: Exception) {
+            SafeLog.w("ThumbnailGenerator", "Could not generate encrypted viewer preview")
+            partial.delete()
+            false
+        }
+    }
+
+    fun decryptImagePreview(file: File, thumbSubkey: ByteArray, itemId: String): Bitmap? {
+        if (!file.exists() || file.length() > 32L * 1024 * 1024) return null
+        val key = previewKey(thumbSubkey)
+        return try {
+            val encrypted = file.readBytes()
+            val plain = try {
+                Aead.decryptWithPrependedNonce(key, encrypted, "suya-phot:preview:v1:$itemId".toByteArray())
+            } finally { encrypted.fill(0) }
+            try { BitmapFactory.decodeByteArray(plain, 0, plain.size) }
+            finally { plain.fill(0) }
+        } catch (_: Exception) { null }
+        finally { key.fill(0) }
     }
 
     /**

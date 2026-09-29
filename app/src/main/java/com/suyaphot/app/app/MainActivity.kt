@@ -3,6 +3,7 @@ package com.suyaphot.app.app
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
@@ -21,12 +22,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.Image
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.ViewerAccessScope
+import com.suyaphot.app.domain.gallery.ViewerCollection
 import com.suyaphot.app.feature.folders.FoldersScreen
 import com.suyaphot.app.feature.intruder.IntruderLogsScreen
 import com.suyaphot.app.feature.lock.LockScreen
@@ -42,7 +46,6 @@ import com.suyaphot.app.ui.theme.SuyaColors
 import com.suyaphot.app.ui.theme.SuyaTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 class MainActivity : FragmentActivity() {
@@ -70,7 +73,9 @@ class MainActivity : FragmentActivity() {
             }
 
             SuyaTheme {
-                MainAppHost(container = container)
+                Box(Modifier.fillMaxSize().semantics { testTagsAsResourceId = true }) {
+                    MainAppHost(container = container)
+                }
             }
         }
     }
@@ -85,14 +90,8 @@ fun MainAppHost(container: AppContainer) {
     var activeTab by remember { mutableStateOf(SuyaNavTab.PHOTOS) }
     var activeViewerItemId by remember { mutableStateOf<String?>(null) }
     var activeViewerScope by remember { mutableStateOf<ViewerAccessScope?>(null) }
-    var viewerAccessTick by remember { mutableStateOf(0L) }
+    var activeViewerCollection by remember { mutableStateOf<ViewerCollection?>(null) }
     val accessRevision by container.folderAccessManager.revision.collectAsState()
-    LaunchedEffect(activeViewerScope) {
-        while (activeViewerScope != null) {
-            delay(1_000)
-            viewerAccessTick++
-        }
-    }
     var showTrashScreen by remember { mutableStateOf(false) }
     var showPrivateTrashScreen by remember { mutableStateOf(false) }
     var showIntruderLogsScreen by remember { mutableStateOf(false) }
@@ -103,6 +102,7 @@ fun MainAppHost(container: AppContainer) {
         if (s is VaultSession.Unlocked) {
             container.importRecoveryManager.reconcileActiveJobs(s)
             container.restoreRecoveryManager.reconcile(s)
+            container.trashCoordinator.reconcilePending(s.vaultId)
         } else {
             container.vaultSearchIndex.clear()
             container.encryptedThumbnailRepository.clear()
@@ -166,18 +166,26 @@ fun MainAppHost(container: AppContainer) {
 
     // Vault is unlocked: display media viewer or navigation tab
     val viewerAllowed = run {
-        viewerAccessTick
         accessRevision
         activeViewerScope?.let(container.folderAccessManager::isScopeValid) ?: true
     }
-    LaunchedEffect(accessRevision, viewerAccessTick, viewerAllowed) {
+    LaunchedEffect(accessRevision, viewerAllowed) {
         if (!viewerAllowed) { activeViewerItemId = null; activeViewerScope = null }
+    }
+    BackHandler(activeViewerItemId != null || showTrashScreen || showPrivateTrashScreen || showIntruderLogsScreen) {
+        when {
+            activeViewerItemId != null -> { activeViewerItemId = null; activeViewerScope = null }
+            showTrashScreen -> showTrashScreen = false
+            showPrivateTrashScreen -> showPrivateTrashScreen = false
+            showIntruderLogsScreen -> showIntruderLogsScreen = false
+        }
     }
     if (activeViewerItemId != null && !viewerAllowed) {
         Box(modifier = Modifier.fillMaxSize().background(SuyaColors.Background))
     } else if (activeViewerItemId != null) {
         MediaViewerScreen(
             itemId = activeViewerItemId!!,
+            collection = activeViewerCollection ?: ViewerCollection.Gallery(com.suyaphot.app.domain.gallery.GalleryFilter.ALL, "DATE_TAKEN_DESC"),
             container = container,
             onBack = { activeViewerItemId = null; activeViewerScope = null }
         )
@@ -222,13 +230,13 @@ fun MainAppHost(container: AppContainer) {
                         SuyaNavTab.PHOTOS -> {
                             PhotosScreen(
                                 container = container,
-                                onMediaClick = { itemId -> activeViewerScope = null; activeViewerItemId = itemId }
+                                onMediaClick = { itemId, collection -> activeViewerScope = null; activeViewerCollection = collection; activeViewerItemId = itemId }
                             )
                         }
                         SuyaNavTab.FOLDERS -> {
                             FoldersScreen(
                                 container = container,
-                                onMediaClick = { itemId, viewerScope -> activeViewerScope = viewerScope; activeViewerItemId = itemId },
+                                onMediaClick = { itemId, viewerScope, collection -> activeViewerScope = viewerScope; activeViewerCollection = collection; activeViewerItemId = itemId },
                                 onFolderOpened = { /* folder traversal handled internally */ }
                             )
                         }

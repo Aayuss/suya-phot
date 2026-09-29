@@ -1,5 +1,7 @@
 package com.suyaphot.app.feature.trash
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,6 +15,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.paging.LoadState
+import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
@@ -31,6 +35,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
@@ -51,8 +56,9 @@ import com.suyaphot.app.ui.components.SuyaDialog
 import com.suyaphot.app.ui.components.SuyaIconButton
 import com.suyaphot.app.ui.components.SuyaTopBar
 import com.suyaphot.app.ui.theme.SuyaColors
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -67,14 +73,6 @@ fun TrashScreen(
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
     val accessRevision by container.folderAccessManager.revision.collectAsState()
-    var accessTick by remember { mutableIntStateOf(0) }
-    LaunchedEffect(privateMode) {
-        while (privateMode) {
-            delay(1_000)
-            accessTick++
-        }
-    }
-    accessTick
     if (privateMode && !container.folderAccessManager.hasHiddenGrant(vaultId)) {
         PrivateTrashGate(container, vaultId, onBack)
         return
@@ -89,46 +87,22 @@ fun TrashScreen(
         }
     }
 
-    val trashFlow = remember(vaultId, privateMode) {
-        if (privateMode) container.database.mediaItemDao().getPrivateTrashItems(vaultId)
-        else container.database.mediaItemDao().getTrashItems(vaultId)
+    val trashFlow = remember(vaultId, privateMode, accessRevision) {
+        container.galleryRepository.pagedTrash(vaultId, privateMode)
     }
-    val rawEntities by trashFlow.collectAsState(initial = emptyList())
-    var authorizedEntities by remember { mutableStateOf(rawEntities) }
+    val pagedEntities = trashFlow.collectAsLazyPagingItems()
     var missingLockIds by remember { mutableStateOf<List<String>>(emptyList()) }
-    LaunchedEffect(rawEntities, accessRevision, privateMode) {
-        if (!privateMode) { authorizedEntities = rawEntities; missingLockIds = emptyList(); return@LaunchedEffect }
-        val allowed = ArrayList<com.suyaphot.app.core.database.entity.MediaItemEntity>()
+    LaunchedEffect(pagedEntities.itemCount, accessRevision, privateMode) {
+        if (!privateMode) { missingLockIds = emptyList(); return@LaunchedEffect }
         val missing = LinkedHashSet<String>()
-        for (entity in rawEntities) {
-            val folderId = entity.previousFolderId
-            if (folderId != null && container.database.folderDao().getFolderForVault(folderId, vaultId) != null) {
+        for (folderId in container.database.mediaItemDao().getPrivateTrashFolderIds(vaultId)) {
+            if (container.database.folderDao().getFolderForVault(folderId, vaultId) != null) {
                 val locks = container.folderAccessManager.missingLockIds(vaultId, folderId)
+                    ?: continue
                 if (locks.isNotEmpty()) { missing += locks.first(); continue }
             }
-            allowed += entity
         }
-        authorizedEntities = allowed
         missingLockIds = missing.toList()
-    }
-
-    val items = remember(authorizedEntities) {
-        authorizedEntities.map { entity ->
-            MediaItem(
-                id = entity.id,
-                vaultId = entity.vaultId,
-                folderId = entity.folderId,
-                type = MediaType.fromCode(entity.mediaTypeCode),
-                plaintextSize = entity.plaintextSize,
-                cipherSize = entity.cipherSize,
-                sha256Hex = entity.sha256Hex,
-                importedAt = entity.importedAt,
-                updatedAt = entity.updatedAt,
-                favorite = entity.favorite,
-                deletedAt = entity.deletedAt,
-                previousFolderId = entity.previousFolderId
-            )
-        }
     }
 
     val selectedIds = remember { mutableStateMapOf<String, Unit>() }
@@ -152,7 +126,7 @@ fun TrashScreen(
                 navigationIcon = Icons.AutoMirrored.Filled.ArrowBack,
                 onNavigationClick = onBack,
                 actions = {
-                    if (items.isNotEmpty()) {
+                    if (pagedEntities.itemCount > 0) {
                         SuyaButton(
                             text = "Empty",
                             onClick = { showEmptyTrashDialog = true },
@@ -179,7 +153,7 @@ fun TrashScreen(
                 )
             }
 
-            if (items.isEmpty()) {
+            if (pagedEntities.itemCount == 0 && pagedEntities.loadState.refresh is LoadState.NotLoading) {
                 EmptyState(
                     icon = Icons.Default.Delete,
                     title = "Trash is empty",
@@ -198,7 +172,17 @@ fun TrashScreen(
                     contentPadding = PaddingValues(2.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    items(items, key = { it.id }) { item ->
+                    items(count = pagedEntities.itemCount,
+                        key = { index -> pagedEntities.peek(index)?.id ?: "placeholder_$index" }) { index ->
+                        val entity = pagedEntities[index] ?: return@items
+                        val item = MediaItem(
+                            id = entity.id, vaultId = entity.vaultId, folderId = entity.folderId,
+                            type = MediaType.fromCode(entity.mediaTypeCode),
+                            plaintextSize = entity.plaintextSize, cipherSize = entity.cipherSize,
+                            sha256Hex = entity.sha256Hex, importedAt = entity.importedAt,
+                            updatedAt = entity.updatedAt, favorite = entity.favorite,
+                            deletedAt = entity.deletedAt, previousFolderId = entity.previousFolderId
+                        )
                         val isSelected = selectedIds.containsKey(item.id)
                         MediaTile(
                             item = item,
@@ -319,7 +303,8 @@ fun TrashScreen(
             onConfirm = {
                 scope.launch {
                     showEmptyTrashDialog = false
-                    container.trashCoordinator.permanentDelete(vaultId, items.map { it.id })
+                    val ids = container.database.mediaItemDao().getAllTrashIds(vaultId, privateMode)
+                    container.trashCoordinator.permanentDelete(vaultId, ids)
                 }
             }
         )
@@ -329,12 +314,16 @@ fun TrashScreen(
 @Composable
 private fun PrivateTrashGate(container: AppContainer, vaultId: String, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var credentialTypeCode by remember(vaultId) { mutableIntStateOf(-1) }
+    var biometricIv by remember(vaultId) { mutableStateOf<ByteArray?>(null) }
     var pinInput by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var errorTrigger by remember { mutableIntStateOf(0) }
     LaunchedEffect(vaultId) {
-        credentialTypeCode = container.database.vaultDao().getVault(vaultId)?.credentialTypeCode ?: -1
+        val vault = container.database.vaultDao().getVault(vaultId)
+        credentialTypeCode = vault?.credentialTypeCode ?: -1
+        biometricIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
     }
     fun submit(chars: CharArray) {
         scope.launch {
@@ -344,6 +333,34 @@ private fun PrivateTrashGate(container: AppContainer, vaultId: String, onBack: (
             if (valid) container.folderAccessManager.grantHidden(vaultId)
             else { error = "Incorrect vault credential"; errorTrigger++ }
         }
+    }
+    fun submitBiometric() {
+        val iv = biometricIv ?: return
+        val activity = context as? FragmentActivity ?: return
+        try {
+            val cipher = container.keyManager.createBiometricDecryptCipher(vaultId, iv)
+            val prompt = BiometricPrompt(
+                activity, ContextCompat.getMainExecutor(activity),
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        val authorized = result.cryptoObject?.cipher ?: return
+                        scope.launch {
+                            if (container.pinAuthenticator.verifyCurrentBiometric(authorized)) {
+                                container.folderAccessManager.grantHidden(vaultId)
+                            } else error = "Fingerprint unavailable; use your vault credential"
+                        }
+                    }
+                }
+            )
+            prompt.authenticate(
+                BiometricPrompt.PromptInfo.Builder()
+                    .setTitle("Open Private Trash")
+                    .setNegativeButtonText("Use vault credential")
+                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                    .build(),
+                BiometricPrompt.CryptoObject(cipher)
+            )
+        } catch (_: Exception) { error = "Fingerprint unavailable; use your vault credential" }
     }
     Column(modifier = Modifier.fillMaxSize().background(SuyaColors.Background).padding(18.dp)) {
         SuyaTopBar("Private Trash", navigationIcon = Icons.AutoMirrored.Filled.ArrowBack, onNavigationClick = onBack)
@@ -361,6 +378,9 @@ private fun PrivateTrashGate(container: AppContainer, vaultId: String, onBack: (
                 errorTrigger = errorTrigger,
                 enabled = true
             )
+        }
+        if (biometricIv != null) {
+            SuyaButton("Use vault fingerprint", onClick = ::submitBiometric, variant = ButtonVariant.Secondary)
         }
         error?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
     }

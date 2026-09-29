@@ -52,6 +52,15 @@ data class FolderWithCount(
     val itemCount: Int
 )
 
+data class VisibleSearchHeader(
+    val id: String,
+    val mediaTypeCode: Int,
+    val favorite: Boolean,
+    val importedAt: Long,
+    val dateTakenMs: Long?,
+    val plaintextSize: Long
+)
+
 @Dao
 interface FolderDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
@@ -142,6 +151,9 @@ interface FolderLockDao {
     @Query("UPDATE folder_locks SET biometricEnvelope = :envelope, biometricIv = :iv, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
     suspend fun updateBiometric(vaultId: String, lockId: String, envelope: ByteArray?, iv: ByteArray?, now: Long): Int
 
+    @Query("UPDATE folder_locks SET credentialEnvelope = :envelope, credentialTypeCode = :typeCode, recoveryEnvelope = :recoveryEnvelope, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
+    suspend fun updateCredential(vaultId: String, lockId: String, envelope: ByteArray, typeCode: Int, recoveryEnvelope: ByteArray?, now: Long): Int
+
     @Query("DELETE FROM folder_locks WHERE vaultId = :vaultId AND id = :lockId")
     suspend fun delete(vaultId: String, lockId: String): Int
 }
@@ -163,6 +175,9 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items WHERE id = :id AND vaultId = :vaultId LIMIT 1")
     suspend fun getItemForVault(id: String, vaultId: String): MediaItemEntity?
 
+    @Query("UPDATE media_items SET encryptedPreviewRelativePath = :path WHERE id = :id AND vaultId = :vaultId AND deletedAt IS NULL")
+    suspend fun setPreviewPathForVault(vaultId: String, id: String, path: String): Int
+
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND id IN (:ids)")
     suspend fun getItemsByIdsForVault(vaultId: String, ids: List<String>): List<MediaItemEntity>
 
@@ -183,11 +198,20 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC LIMIT :limit OFFSET :offset")
     suspend fun getSearchBatch(vaultId: String, limit: Int, offset: Int): List<MediaItemEntity>
 
+    @Query("SELECT id, mediaTypeCode, favorite, importedAt, dateTakenMs, plaintextSize FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0")
+    suspend fun getVisibleSearchHeaders(vaultId: String): List<VisibleSearchHeader>
+
     @RawQuery(observedEntities = [MediaItemEntity::class])
     fun pagingSource(query: SupportSQLiteQuery): PagingSource<Int, MediaItemEntity>
 
+    @RawQuery
+    suspend fun viewerIds(query: SupportSQLiteQuery): List<String>
+
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC")
-    fun getByFolder(vaultId: String, folderId: String?): Flow<List<MediaItemEntity>>
+    fun getByFolderPrivileged(vaultId: String, folderId: String?): Flow<List<MediaItemEntity>>
+
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC")
+    suspend fun getAllIdsInFolder(vaultId: String, folderId: String?): List<String>
 
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND favorite = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
     fun getFavorites(vaultId: String): Flow<List<MediaItemEntity>>
@@ -203,6 +227,12 @@ interface MediaItemDao {
 
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 1 ORDER BY deletedAt DESC")
     fun getPrivateTrashItems(vaultId: String): Flow<List<MediaItemEntity>>
+
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = :concealed")
+    suspend fun getAllTrashIds(vaultId: String, concealed: Boolean): List<String>
+
+    @Query("SELECT DISTINCT previousFolderId FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 1 AND previousFolderId IS NOT NULL")
+    suspend fun getPrivateTrashFolderIds(vaultId: String): List<String>
 
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND deletedAt < :cutoffTimestamp LIMIT :limit")
     suspend fun getExpiredTrash(vaultId: String, cutoffTimestamp: Long, limit: Int = 100): List<MediaItemEntity>
@@ -239,6 +269,25 @@ interface MediaItemDao {
          FROM folders f WHERE f.id = media_items.folderId AND f.vaultId = media_items.vaultId), 0)
         WHERE vaultId = :vaultId AND deletedAt IS NULL""")
     suspend fun recomputeActiveConcealment(vaultId: String): Int
+
+    @Query("""UPDATE media_items SET concealed =
+        CASE WHEN EXISTS (
+            SELECT 1 FROM folders f
+            WHERE f.id = media_items.previousFolderId AND f.vaultId = media_items.vaultId
+        ) THEN COALESCE((
+            SELECT CASE WHEN f.effectiveHidden = 1 OR f.effectiveProtected = 1 THEN 1 ELSE 0 END
+            FROM folders f
+            WHERE f.id = media_items.previousFolderId AND f.vaultId = media_items.vaultId
+            LIMIT 1
+        ), concealed) ELSE concealed END
+        WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND previousFolderId IS NOT NULL""")
+    suspend fun recomputeTrashConcealment(vaultId: String): Int
+
+    @Query("UPDATE media_items SET cleanupStateCode = :stateCode, updatedAt = :now WHERE id = :id AND vaultId = :vaultId AND deletedAt IS NOT NULL")
+    suspend fun markTrashCleanupState(vaultId: String, id: String, stateCode: Int, now: Long): Int
+
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND cleanupStateCode != 0 LIMIT :limit")
+    suspend fun getPendingTrashCleanup(vaultId: String, limit: Int = 100): List<MediaItemEntity>
 
     @Query("UPDATE media_items SET favorite = :favorite, updatedAt = :now WHERE id = :id AND vaultId = :vaultId AND deletedAt IS NULL")
     suspend fun updateFavoriteForVault(vaultId: String, id: String, favorite: Boolean, now: Long): Int

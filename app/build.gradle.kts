@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.ksp)
+    alias(libs.plugins.androidx.baselineprofile)
 }
 
 android {
@@ -53,6 +54,11 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             isDebuggable = true
+        }
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
         }
     }
 
@@ -137,6 +143,8 @@ dependencies {
     // Coroutines
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidx.profileinstaller)
+    baselineProfile(project(":benchmark"))
 
     // Testing
     testImplementation(libs.junit)

@@ -25,6 +25,8 @@
         android:theme="@style/Theme.SuyaPhot"
         tools:targetApi="35">
 
+        <profileable android:shell="true" />
+
         <!-- Main Vault Gallery Activity -->
         <activity
             android:name=".app.MainActivity"
