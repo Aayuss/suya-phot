@@ -58,6 +58,97 @@ class GalleryRepository(private val dao: MediaItemDao, private val access: Folde
         return dao.getAllIdsInFolder(vaultId, folderId)
     }
 
+data class ViewerWindow(
+    val ids: List<String>,
+    val currentIndex: Int,
+    val totalCount: Int
+)
+
+    suspend fun viewerWindow(
+        vaultId: String,
+        collection: ViewerCollection,
+        aroundId: String,
+        windowSize: Int = 100
+    ): ViewerWindow = when (collection) {
+        is ViewerCollection.Folder -> {
+            if (collection.folderId != null && !access.canOpen(vaultId, collection.folderId)) {
+                ViewerWindow(emptyList(), 0, 0)
+            } else {
+                val total = dao.countAuthorizedInFolder(vaultId, collection.folderId)
+                if (total <= windowSize) {
+                    val all = dao.getAllIdsInFolder(vaultId, collection.folderId)
+                    val idx = all.indexOf(aroundId).coerceAtLeast(0)
+                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total)
+                } else {
+                    val targetEntity = dao.getItemForVault(aroundId, vaultId)
+                    val offset = if (targetEntity != null) {
+                        val rank = dao.rawCount(SimpleSQLiteQuery(
+                            "SELECT COUNT(*) FROM media_items WHERE vaultId = ? AND folderId IS ? AND deletedAt IS NULL AND (? IS NOT NULL OR concealed = 0) AND (importedAt > ? OR (importedAt = ? AND id > ?))",
+                            arrayOf(vaultId, collection.folderId, collection.folderId, targetEntity.importedAt, targetEntity.importedAt, aroundId)
+                        ))
+                        (rank - windowSize / 2).coerceIn(0, (total - windowSize).coerceAtLeast(0))
+                    } else 0
+                    val slice = dao.getPagedIdsInFolder(vaultId, collection.folderId, windowSize, offset)
+                    val finalSlice = if (aroundId in slice) slice else listOf(aroundId) + slice
+                    val idx = finalSlice.indexOf(aroundId).coerceAtLeast(0)
+                    ViewerWindow(finalSlice, idx, total)
+                }
+            }
+        }
+        is ViewerCollection.Gallery -> {
+            val searchIds = collection.searchIds
+            if (searchIds != null) {
+                val visible = dao.getAllVisibleIdsForFilter(vaultId, collection.filter.ordinal).toHashSet()
+                val all = searchIds.filter { it in visible }
+                val total = all.size
+                if (total <= windowSize) {
+                    val idx = all.indexOf(aroundId).coerceAtLeast(0)
+                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total)
+                } else {
+                    val idx = all.indexOf(aroundId).coerceAtLeast(0)
+                    val start = (idx - windowSize / 2).coerceIn(0, (total - windowSize).coerceAtLeast(0))
+                    val slice = all.subList(start, start + windowSize)
+                    val finalSlice = if (aroundId in slice) slice else listOf(aroundId) + slice
+                    ViewerWindow(finalSlice, finalSlice.indexOf(aroundId).coerceAtLeast(0), total)
+                }
+            } else {
+                val filterSql = when (collection.filter) {
+                    GalleryFilter.ALL -> ""
+                    GalleryFilter.PHOTOS -> " AND mediaTypeCode = 0"
+                    GalleryFilter.VIDEOS -> " AND mediaTypeCode = 1"
+                    GalleryFilter.FAVORITES -> " AND favorite = 1"
+                }
+                val orderSql = orderSql(collection.sort)
+                val total = dao.rawCount(SimpleSQLiteQuery(
+                    "SELECT COUNT(*) FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql",
+                    arrayOf(vaultId)
+                ))
+                if (total <= windowSize) {
+                    val all = dao.viewerIds(SimpleSQLiteQuery(
+                        "SELECT id FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql ORDER BY $orderSql",
+                        arrayOf(vaultId)
+                    ))
+                    val idx = all.indexOf(aroundId).coerceAtLeast(0)
+                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total)
+                } else {
+                    val rowNumRows = dao.viewerIds(SimpleSQLiteQuery(
+                        "SELECT CAST(row_num AS TEXT) FROM (SELECT id, (ROW_NUMBER() OVER (ORDER BY $orderSql)) - 1 AS row_num FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql) WHERE id = ?",
+                        arrayOf(vaultId, aroundId)
+                    ))
+                    val rowNum = rowNumRows.firstOrNull()?.toIntOrNull() ?: 0
+                    val offset = (rowNum - windowSize / 2).coerceIn(0, (total - windowSize).coerceAtLeast(0))
+                    val slice = dao.viewerIds(SimpleSQLiteQuery(
+                        "SELECT id FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql ORDER BY $orderSql LIMIT ? OFFSET ?",
+                        arrayOf(vaultId, windowSize, offset)
+                    ))
+                    val finalSlice = if (aroundId in slice) slice else listOf(aroundId) + slice
+                    val idx = finalSlice.indexOf(aroundId).coerceAtLeast(0)
+                    ViewerWindow(finalSlice, idx, total)
+                }
+            }
+        }
+    }
+
     suspend fun viewerIds(vaultId: String, collection: ViewerCollection): List<String> = when (collection) {
         is ViewerCollection.Folder -> authorizedFolderIds(vaultId, collection.folderId)
         is ViewerCollection.Gallery -> {

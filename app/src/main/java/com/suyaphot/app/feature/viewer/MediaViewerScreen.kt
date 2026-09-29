@@ -27,14 +27,19 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
@@ -124,13 +129,18 @@ fun MediaViewerScreen(
     var ids by remember(itemId, collection) { mutableStateOf(listOf(itemId)) }
     val pager = rememberPagerState { ids.size }
     var zoomed by remember { mutableStateOf(false) }
+
     LaunchedEffect(vaultId, itemId, collection) {
         val id = vaultId ?: return@LaunchedEffect
-        val available = withContext(Dispatchers.IO) { container.galleryRepository.viewerIds(id, collection) }
-        ids = if (itemId in available) available else listOf(itemId)
-        pager.scrollToPage(ids.indexOf(itemId).coerceAtLeast(0))
+        val window = withContext(Dispatchers.IO) {
+            container.galleryRepository.viewerWindow(id, collection, itemId, windowSize = 80)
+        }
+        ids = if (window.ids.isNotEmpty()) window.ids else listOf(itemId)
+        pager.scrollToPage(window.currentIndex.coerceIn(0, (ids.size - 1).coerceAtLeast(0)))
     }
+
     LaunchedEffect(pager.settledPage) { zoomed = false }
+
     HorizontalPager(
         state = pager,
         key = { ids[it] },
@@ -141,8 +151,94 @@ fun MediaViewerScreen(
         if (index == pager.settledPage) {
             MediaViewerPage(pageId, container, onBack, onZoomChanged = { zoomed = it })
         } else {
-            // Neighbors render no original or video plaintext. Only the settled page owns a player.
-            Box(Modifier.fillMaxSize().background(Color.Black))
+            ViewerPreviewPage(pageId, container)
+        }
+    }
+}
+
+@Composable
+private fun ViewerPreviewPage(
+    itemId: String,
+    container: AppContainer
+) {
+    val sessionState by container.sessionManager.sessionState.collectAsState()
+    val vaultId = (sessionState as? VaultSession.Unlocked)?.vaultId
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var isVideo by remember { mutableStateOf(false) }
+    var isAllowed by remember { mutableStateOf(true) }
+
+    LaunchedEffect(itemId, vaultId) {
+        val id = vaultId ?: return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            val entity = container.database.mediaItemDao().getItemForVault(itemId, id)
+            if (entity == null || entity.deletedAt != null ||
+                (entity.concealed && (entity.folderId == null || !container.folderAccessManager.canOpen(id, entity.folderId)))) {
+                withContext(Dispatchers.Main) {
+                    isAllowed = false
+                    previewBitmap = null
+                }
+                return@withContext
+            }
+
+            isVideo = entity.mediaTypeCode == MediaType.VIDEO.code
+            val lease = container.sessionManager.acquireOperationKeyLease() ?: return@withContext
+            try {
+                val previewFile = container.vaultFileStore.getPreviewFile(id, itemId)
+                val bmp = if (previewFile.exists()) {
+                    container.thumbnailGenerator.decryptImagePreview(previewFile, lease.thumbSubkey, itemId)
+                } else null
+
+                val finalBmp = bmp ?: container.thumbnailGenerator.decryptThumbnail(
+                    container.vaultFileStore.getThumbFile(id, itemId),
+                    lease.thumbSubkey,
+                    itemId
+                )
+                withContext(Dispatchers.Main) {
+                    previewBitmap = finalBmp
+                    isAllowed = true
+                }
+            } finally {
+                lease.close()
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black),
+        contentAlignment = Alignment.Center
+    ) {
+        if (!isAllowed) {
+            Icon(
+                imageVector = Icons.Default.Lock,
+                contentDescription = "Protected item",
+                tint = SuyaColors.TextMuted,
+                modifier = Modifier.size(48.dp)
+            )
+        } else if (previewBitmap != null) {
+            Image(
+                bitmap = previewBitmap!!.asImageBitmap(),
+                contentDescription = "Preview",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+            if (isVideo) {
+                Surface(
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.5f),
+                    modifier = Modifier.size(56.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Video",
+                            tint = Color.White,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -504,7 +600,9 @@ private fun MediaViewerPage(
         ) {
             Surface(
                 color = Color.Black.copy(alpha = 0.5f),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
             ) {
                 Row(
                     modifier = Modifier
@@ -573,7 +671,9 @@ private fun MediaViewerPage(
         ) {
             Surface(
                 color = Color.Black.copy(alpha = 0.5f),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
             ) {
                 Row(
                     modifier = Modifier
@@ -812,16 +912,8 @@ private fun decodeRegionTile(file: File, viewport: IntSize, scale: Float, pan: O
         val top = (height / 2f + (-viewport.height / 2f - pan.y) / pixelsPerImagePixel).coerceIn(0f, height.toFloat())
         val bottom = (height / 2f + (viewport.height / 2f - pan.y) / pixelsPerImagePixel).coerceIn(0f, height.toFloat())
         if (right - left < 1f || bottom - top < 1f) return null
-        fun toRaw(x: Float, y: Float): Pair<Float, Float> = when (orientation) {
-            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> rawW - x to y
-            ExifInterface.ORIENTATION_ROTATE_180 -> rawW - x to rawH - y
-            ExifInterface.ORIENTATION_FLIP_VERTICAL -> x to rawH - y
-            ExifInterface.ORIENTATION_TRANSPOSE -> y to x
-            ExifInterface.ORIENTATION_ROTATE_90 -> y to rawH - x
-            ExifInterface.ORIENTATION_TRANSVERSE -> rawW - y to rawH - x
-            ExifInterface.ORIENTATION_ROTATE_270 -> rawW - y to x
-            else -> x to y
-        }
+        fun toRaw(x: Float, y: Float): Pair<Float, Float> =
+            com.suyaphot.app.core.media.DeepZoomOrientationMapper.toRaw(x, y, rawW.toFloat(), rawH.toFloat(), orientation)
         val corners = listOf(toRaw(left, top), toRaw(right, top), toRaw(left, bottom), toRaw(right, bottom))
         val rect = Rect(
             floor(corners.minOf { it.first }).toInt().coerceIn(0, rawW - 1),

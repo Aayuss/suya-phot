@@ -1,6 +1,7 @@
 package com.suyaphot.app.domain.folders
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.KeyManager
@@ -25,22 +26,29 @@ class FolderLockManager(
     private val privacyCoordinator: FolderPrivacyCoordinator,
     context: Context? = null
 ) {
-    private data class FailureState(val attempts: Int, val blockedUntil: Long)
+    private data class FailureState(val attempts: Int, val wallDeadlineMs: Long, val monotonicDeadlineMs: Long)
     private val failures = HashMap<String, FailureState>()
     private val failurePrefs = context?.getSharedPreferences("folder_lock_rate_limit_v1", Context.MODE_PRIVATE)
 
     @Synchronized private fun failureState(lockId: String): FailureState {
         failures[lockId]?.let { return it }
-        val saved = FailureState(
-            failurePrefs?.getInt("$lockId.attempts", 0) ?: 0,
-            failurePrefs?.getLong("$lockId.blockedUntil", 0L) ?: 0L
-        )
+        val savedAttempts = failurePrefs?.getInt("$lockId.attempts", 0) ?: 0
+        val savedWall = failurePrefs?.getLong("$lockId.wallDeadline", 0L) ?: 0L
+        val nowWall = System.currentTimeMillis()
+        val remainingWall = (savedWall - nowWall).coerceAtLeast(0L)
+        val nowMonotonic = SystemClock.elapsedRealtime()
+        val monotonicUntil = if (remainingWall > 0L) nowMonotonic + remainingWall else 0L
+        val saved = FailureState(savedAttempts, savedWall, monotonicUntil)
         failures[lockId] = saved
         return saved
     }
 
-    @Synchronized private fun blocked(lockId: String): Boolean =
-        failureState(lockId).blockedUntil > System.currentTimeMillis()
+    @Synchronized private fun blocked(lockId: String): Boolean {
+        val state = failureState(lockId)
+        val nowWall = System.currentTimeMillis()
+        val nowMonotonic = SystemClock.elapsedRealtime()
+        return state.monotonicDeadlineMs > nowMonotonic || state.wallDeadlineMs > nowWall
+    }
 
     @Synchronized private fun recordFailure(lockId: String) {
         val count = (failureState(lockId).attempts + 1).coerceAtMost(7)
@@ -50,13 +58,20 @@ class FolderLockManager(
             count == 6 -> 30_000L
             else -> 60_000L
         }
-        val until = System.currentTimeMillis() + delayMs
-        failures[lockId] = FailureState(count, until)
-        failurePrefs?.edit()?.putInt("$lockId.attempts", count)?.putLong("$lockId.blockedUntil", until)?.commit()
+        val nowWall = System.currentTimeMillis()
+        val nowMonotonic = SystemClock.elapsedRealtime()
+        val wallUntil = nowWall + delayMs
+        val monotonicUntil = nowMonotonic + delayMs
+        failures[lockId] = FailureState(count, wallUntil, monotonicUntil)
+        failurePrefs?.edit()
+            ?.putInt("$lockId.attempts", count)
+            ?.putLong("$lockId.wallDeadline", wallUntil)
+            ?.commit()
     }
+
     @Synchronized private fun resetFailures(lockId: String) {
         failures.remove(lockId)
-        failurePrefs?.edit()?.remove("$lockId.attempts")?.remove("$lockId.blockedUntil")?.commit()
+        failurePrefs?.edit()?.remove("$lockId.attempts")?.remove("$lockId.wallDeadline")?.commit()
     }
     private fun validateCredential(chars: CharArray, typeCode: Int) {
         require(when (typeCode) {
@@ -175,7 +190,16 @@ class FolderLockManager(
                 ?: return@withContext false
             val token = keyManager.unwrapFolderLockEnvelope(envelope, credential, lock.id)
                 ?: run { recordFailure(lockId); return@withContext false }
-            token.fill(0)
+            try {
+                if (lock.recoveryEnvelope == null) {
+                    val backfilled = recoveryEnvelope(lockId, token)
+                    if (backfilled != null) {
+                        database.folderLockDao().updateRecovery(vaultId, lockId, backfilled, System.currentTimeMillis())
+                    }
+                }
+            } finally {
+                token.fill(0)
+            }
             resetFailures(lockId)
             accessManager.grantLock(vaultId, lockId)
             true
@@ -228,7 +252,16 @@ class FolderLockManager(
         try {
             val token = cipher.doFinal(envelope)
             if (token.size != 32) { token.fill(0); return@withContext false }
-            token.fill(0)
+            try {
+                if (lock.recoveryEnvelope == null) {
+                    val backfilled = recoveryEnvelope(lockId, token)
+                    if (backfilled != null) {
+                        database.folderLockDao().updateRecovery(vaultId, lockId, backfilled, System.currentTimeMillis())
+                    }
+                }
+            } finally {
+                token.fill(0)
+            }
             accessManager.grantLock(vaultId, lockId)
             true
         } catch (_: Exception) { false }

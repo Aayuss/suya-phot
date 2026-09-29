@@ -40,6 +40,13 @@ class ImportRecoveryManager(
                     // Source was untouched; clean up partial file if any and mark failed
                     val partialFile = fileStore.getPartialFile(session.vaultId, job.id)
                     if (partialFile.exists()) partialFile.delete()
+                    val payload = tryDecryptPayload(metaKey, job)
+                    if (payload != null) {
+                        val thumb = fileStore.getThumbFile(session.vaultId, payload.itemId)
+                        if (thumb.exists()) thumb.delete()
+                        val preview = fileStore.getPreviewFile(session.vaultId, payload.itemId)
+                        if (preview.exists()) preview.delete()
+                    }
                     database.vaultJobDao().updateState(
                         id = job.id,
                         stateCode = JobState.FAILED.code,
@@ -113,12 +120,16 @@ class ImportRecoveryManager(
                             }
                         } else {
                             val partialFile = fileStore.getPartialFile(session.vaultId, job.id)
+                            val thumbFile = fileStore.getThumbFile(session.vaultId, payload.itemId)
+                            val previewFile = fileStore.getPreviewFile(session.vaultId, payload.itemId)
                             // Without the encrypted metadata row there is no safe way to finalize
                             // this ciphertext. The source has not been deleted yet, so remove the
                             // orphan and leave an active retry marker if filesystem cleanup fails.
                             val finalRemoved = !finalFile.exists() || finalFile.delete()
                             val partialRemoved = !partialFile.exists() || partialFile.delete()
-                            if (finalRemoved && partialRemoved) {
+                            val thumbRemoved = !thumbFile.exists() || thumbFile.delete()
+                            val previewRemoved = !previewFile.exists() || previewFile.delete()
+                            if (finalRemoved && partialRemoved && thumbRemoved && previewRemoved) {
                                 database.vaultJobDao().updateState(
                                     id = job.id,
                                     stateCode = JobState.FAILED.code,
@@ -145,8 +156,15 @@ class ImportRecoveryManager(
                 }
 
                 JobState.AWAITING_SOURCE_DELETE.code -> {
-                    // Vault copy is valid, awaiting confirmation of source deletion
-                    SafeLog.d("ImportRecoveryManager", "Import awaits source deletion confirmation")
+                    // Vault copy is valid, awaiting confirmation of source deletion.
+                    // On app restart, resolve to COMPLETED so the job does not hang indefinitely.
+                    SafeLog.d("ImportRecoveryManager", "Resolving AWAITING_SOURCE_DELETE job on restart")
+                    database.vaultJobDao().updateState(
+                        id = job.id,
+                        stateCode = JobState.COMPLETED.code,
+                        now = now,
+                        errorCode = "SOURCE_DELETE_TERMINATED_ON_RESTART"
+                    )
                 }
             }
         }

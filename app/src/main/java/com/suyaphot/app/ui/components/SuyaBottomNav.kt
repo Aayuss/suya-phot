@@ -32,6 +32,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.suyaphot.app.ui.theme.SuyaColors
 
+import androidx.compose.foundation.layout.navigationBarsPadding
+
 enum class SuyaNavTab(val title: String, val icon: ImageVector) {
     PHOTOS("Photos", Icons.Default.PhotoLibrary),
     FOLDERS("Folders", Icons.Default.Folder),
@@ -49,6 +51,7 @@ fun SuyaBottomNav(
         shape = RoundedCornerShape(30.dp),
         color = SuyaColors.Fill07,
         modifier = modifier
+            .navigationBarsPadding()
             .fillMaxWidth()
             .padding(horizontal = 24.dp, vertical = 8.dp)
     ) {

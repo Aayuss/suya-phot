@@ -10,11 +10,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
@@ -56,6 +60,7 @@ import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaTextField
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
+import com.suyaphot.app.feature.settings.BackupRestoreScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -95,6 +100,7 @@ fun SetupScreen(
     var recoveryErrorMessage by remember { mutableStateOf<String?>(null) }
 
     var createdVaultId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showRestoreScreen by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -107,6 +113,22 @@ fun SetupScreen(
         }
     }
 
+    if (showRestoreScreen) {
+        BackupRestoreScreen(
+            container = container,
+            onBack = {
+                showRestoreScreen = false
+                scope.launch {
+                    val vaults = withContext(Dispatchers.IO) { container.database.vaultDao().getAllVaults() }
+                    if (vaults.isNotEmpty()) {
+                        onSetupComplete()
+                    }
+                }
+            }
+        )
+        return
+    }
+
     // Check biometric support
     val canEnrollBiometrics = remember {
         val bm = BiometricManager.from(context)
@@ -117,6 +139,8 @@ fun SetupScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(SuyaColors.Background)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .imePadding()
             .padding(18.dp)
     ) {
         AnimatedContent(targetState = currentStep, label = "setup_step") { step ->
@@ -155,6 +179,13 @@ fun SetupScreen(
                         SuyaButton(
                             text = "Create Vault",
                             onClick = { currentStep = SetupStep.CHOOSE_CREDENTIAL },
+                            modifier = Modifier.fillMaxWidth(0.8f)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        SuyaButton(
+                            text = "Restore from Backup",
+                            onClick = { showRestoreScreen = true },
+                            variant = ButtonVariant.Secondary,
                             modifier = Modifier.fillMaxWidth(0.8f)
                         )
                     }

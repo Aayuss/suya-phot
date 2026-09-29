@@ -80,3 +80,21 @@ Biometric PIN reset and recovery-code rotation are not exposed as completed prod
 - No unencrypted media files remain permanently on disk:
   - Bound to the Compose lifecycle (`DisposableEffect`), the temporary file is unlinked immediately when the user navigates away or closes the media viewer.
   - Any background transition or session lock automatically destroys the active player and deletes all files in `playback_cache/`.
+
+---
+
+## 6. Portable Encrypted Backup & Restore (.suyavault)
+
+Suya Phot provides a fully self-contained, portable encrypted backup and migration system using the `.suyavault` archive specification.
+
+### 6.1 Archive Format & Encryption
+- **Magic Header & Trailer**: `SYPB` (0x53595042) magic header, `SYED` (0x53594544) end trailer.
+- **Portable Master Key Unwrapping**: Encrypted using a KEK derived via HKDF-SHA256 from the user's 26-character Recovery Code (`info = "suya-vault-backup-kek:v1"`).
+- **Zero Hardware Pepper Dependency**: The backup is completely decoupled from the originating device's Android Keystore and hardware pepper, allowing seamless restore onto completely fresh devices, new Android versions, or replacement hardware without risk of permanent lock-out.
+- **Authenticated Entries**: Manifest JSON, media items, thumbnails, and previews are individually encrypted with AES-256-GCM using derived subkeys and authenticated with AADs bound to the archive ID.
+
+### 6.2 Streaming & Realistic Hardware Constraints
+- **Low-Memory Streaming**: File transfers use fixed 128 KB streaming buffers directly between private storage and Android Storage Access Framework (SAF) `OutputStream`/`InputStream`, operating safely under strict Android heap limits even with multi-gigabyte vaults containing tens of thousands of items.
+- **Keyset Paging & Windowing**: Database export and viewer navigation leverage windowed keyset queries (`ViewerWindow`) rather than loading 50k–100k item IDs into JVM memory at once.
+- **Fail-Safe Atomic Staging**: During restore, entries are extracted to an isolated staging directory (`staging_<archiveId>`). All SHA-256 checksums are verified before creating a new device-bound `PinEnvelope` and committing Room DB entities inside a transaction. In the event of an I/O error or hash mismatch, staging files are pruned cleanly and existing vault contents remain unmodified.
+

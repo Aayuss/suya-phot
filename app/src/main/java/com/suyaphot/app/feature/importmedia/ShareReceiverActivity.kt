@@ -1,23 +1,23 @@
 package com.suyaphot.app.feature.importmedia
 
-import android.app.Activity
 import android.Manifest
-import android.content.pm.PackageManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
-import kotlinx.coroutines.Dispatchers
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,37 +34,37 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.suyaphot.app.app.SuyaApp
+import com.suyaphot.app.core.model.Folder
+import com.suyaphot.app.domain.auth.PatternCredential
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.feature.lock.LockScreen
+import com.suyaphot.app.ui.components.ButtonVariant
+import com.suyaphot.app.ui.components.PatternLockPad
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
 import com.suyaphot.app.ui.components.SuyaTextField
-import com.suyaphot.app.ui.components.PatternLockPad
-import com.suyaphot.app.ui.components.ButtonVariant
-import com.suyaphot.app.domain.auth.PatternCredential
-import com.suyaphot.app.core.model.Folder
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.foundation.text.KeyboardOptions
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import com.suyaphot.app.ui.theme.SuyaTheme
-import com.suyaphot.app.core.model.ImportMode
-import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
 
 class ShareReceiverActivity : ComponentActivity() {
+
+    private val viewModel: ShareImportViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,32 +79,78 @@ class ShareReceiverActivity : ComponentActivity() {
             return
         }
 
+        viewModel.init(sharedUris, container)
+
         setContent {
             SuyaTheme {
                 val session by container.sessionManager.sessionState.collectAsState()
                 val isUnlocked = session is VaultSession.Unlocked
-                var destinationChosen by remember { mutableStateOf(false) }
-                var destinationFolderId by remember { mutableStateOf<String?>(null) }
+                val stage by viewModel.stage.collectAsState()
 
                 if (!isUnlocked) {
                     LockScreen(
                         container = container,
                         onUnlocked = {
-                            // Session unlocked, composable will recompose and proceed with import
+                            // Unlocked: recompose and proceed with stage
                         }
                     )
-                } else if (!destinationChosen) {
-                    ImportDestinationPicker(container, (session as VaultSession.Unlocked).vaultId) { chosen ->
-                        destinationFolderId = chosen
-                        destinationChosen = true
-                    }
                 } else {
-                    ImportProgressView(
-                        uris = sharedUris,
-                        folderId = destinationFolderId,
-                        container = container,
-                        onFinish = { finish() }
-                    )
+                    when (val currentStage = stage) {
+                        is ShareStage.DestinationSelection -> {
+                            ImportDestinationPicker(
+                                container = container,
+                                vaultId = (session as VaultSession.Unlocked).vaultId,
+                                onChosen = { folderId ->
+                                    viewModel.selectDestination(folderId)
+                                }
+                            )
+                        }
+
+                        is ShareStage.ContextualLocationPrompt -> {
+                            ContextualLocationDialog(
+                                onGrant = {
+                                    viewModel.onLocationPromptDismissed()
+                                },
+                                onSkip = {
+                                    viewModel.onLocationPromptDismissed()
+                                }
+                            )
+                        }
+
+                        is ShareStage.Importing -> {
+                            ImportProgressDialog(
+                                statusText = currentStage.status,
+                                isDone = false,
+                                onFinish = { finish() }
+                            )
+                        }
+
+                        is ShareStage.DeleteConsent -> {
+                            val deleteConsentLauncher = rememberLauncherForActivityResult(
+                                contract = ActivityResultContracts.StartIntentSenderForResult()
+                            ) { result ->
+                                viewModel.onConsentResult(result.resultCode)
+                            }
+                            LaunchedEffect(currentStage.intentSender) {
+                                deleteConsentLauncher.launch(
+                                    IntentSenderRequest.Builder(currentStage.intentSender).build()
+                                )
+                            }
+                            ImportProgressDialog(
+                                statusText = "Requesting permission to delete originals...",
+                                isDone = false,
+                                onFinish = { finish() }
+                            )
+                        }
+
+                        is ShareStage.Completed -> {
+                            ImportProgressDialog(
+                                statusText = currentStage.summaryText,
+                                isDone = true,
+                                onFinish = { finish() }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -152,6 +198,54 @@ class ShareReceiverActivity : ComponentActivity() {
         }
         return out.toList()
     }
+}
+
+@Composable
+private fun ContextualLocationDialog(
+    onGrant: () -> Unit,
+    onSkip: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        onGrant()
+    }
+
+    SuyaDialog(
+        onDismissRequest = onSkip,
+        title = "Preserve Photo Location?",
+        confirmText = "Allow",
+        dismissText = "Skip",
+        onConfirm = {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    onGrant()
+                } else {
+                    permissionLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
+                }
+            } else {
+                onGrant()
+            }
+        },
+        content = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Android redacts GPS coordinates from shared gallery photos unless granted location access.",
+                    fontFamily = SoraFontFamily,
+                    fontSize = 13.sp,
+                    color = SuyaColors.White
+                )
+                Text(
+                    text = "Suya Phot only uses this permission during import to store your camera coordinates locally and encrypted inside your vault. No location is transmitted or shared.",
+                    fontFamily = SoraFontFamily,
+                    fontSize = 12.sp,
+                    color = SuyaColors.TextMuted,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+    )
 }
 
 @Composable
@@ -232,13 +326,18 @@ private fun ImportDestinationPicker(
     }
 
     Column(Modifier.fillMaxSize().background(SuyaColors.Background).padding(18.dp)) {
-        Text("Move to Suya Phot", color = SuyaColors.White, fontSize = 20.sp)
-        Text("Choose where to import before Android asks to delete the public originals.",
-            color = SuyaColors.TextMuted, fontSize = 13.sp)
+        Text("Move to Suya Phot", color = SuyaColors.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Choose where to import before Android asks to delete the public originals.",
+            color = SuyaColors.TextMuted,
+            fontSize = 13.sp
+        )
         Spacer(Modifier.height(16.dp))
         SuyaButton("Root (All Photos)", onClick = { onChosen(null) }, modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(8.dp))
-        SuyaButton(if (hiddenMode) "Ordinary folders" else "Open Hidden folders",
+        SuyaButton(
+            if (hiddenMode) "Ordinary folders" else "Open Hidden folders",
             onClick = {
                 if (hiddenMode) hiddenMode = false
                 else scope.launch {
@@ -248,7 +347,11 @@ private fun ImportDestinationPicker(
                     gateError = null
                     hiddenGate = true
                 }
-            }, variant = ButtonVariant.Secondary, modifier = Modifier.fillMaxWidth())
+            },
+            variant = ButtonVariant.Secondary,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(8.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             items(candidates, key = { it.id }) { folder ->
                 SuyaButton(
@@ -270,17 +373,28 @@ private fun ImportDestinationPicker(
             content = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (gateType == 0) {
-                        SuyaTextField(gateInput,
+                        SuyaTextField(
+                            value = gateInput,
                             onValueChange = { gateInput = it.filter(Char::isDigit).take(12) },
                             label = if (hiddenGate) "Vault PIN" else "Folder PIN",
                             visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                        )
                     } else {
-                        PatternLockPad(onPatternComplete = { raw ->
-                            val chars = runCatching { PatternCredential.canonicalChars(raw) }.getOrNull()
-                            if (chars == null) { gateError = "Connect at least four dots"; patternErrorTrigger++ }
-                            else submitGate(chars)
-                        }, errorTrigger = patternErrorTrigger, enabled = true, modifier = Modifier.fillMaxWidth())
+                        PatternLockPad(
+                            onPatternComplete = { raw ->
+                                val chars = runCatching { PatternCredential.canonicalChars(raw) }.getOrNull()
+                                if (chars == null) {
+                                    gateError = "Connect at least four dots"
+                                    patternErrorTrigger++
+                                } else {
+                                    submitGate(chars)
+                                }
+                            },
+                            errorTrigger = patternErrorTrigger,
+                            enabled = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                     gateError?.let { Text(it, color = SuyaColors.Negative) }
                 }
@@ -290,140 +404,11 @@ private fun ImportDestinationPicker(
 }
 
 @Composable
-private fun ImportProgressView(
-    uris: List<Uri>,
-    folderId: String?,
-    container: com.suyaphot.app.app.AppContainer,
+private fun ImportProgressDialog(
+    statusText: String,
+    isDone: Boolean,
     onFinish: () -> Unit
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var statusText by remember { mutableStateOf("Preparing import...") }
-    var isDone by remember { mutableStateOf(false) }
-    var pendingSuccesses by remember { mutableStateOf<List<com.suyaphot.app.domain.importmedia.ImportResult.Success>>(emptyList()) }
-    var consentSuccesses by remember { mutableStateOf<List<com.suyaphot.app.domain.importmedia.ImportResult.Success>>(emptyList()) }
-    var consentMode by remember { mutableStateOf<com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeleteConsentMode?>(null) }
-    var deletionTrigger by remember { mutableIntStateOf(0) }
-    var locationPermissionResolved by remember {
-        mutableStateOf(Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED)
-    }
-    val locationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (!granted) statusText = "Location permission denied; GPS/original bytes may be redacted. Importing safely..."
-        locationPermissionResolved = true
-    }
-    LaunchedEffect(Unit) {
-        if (!locationPermissionResolved) locationPermissionLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
-    }
-
-    fun markJobsTerminal(
-        results: List<com.suyaphot.app.domain.importmedia.ImportResult.Success>,
-        disposition: String? = null
-    ) {
-        scope.launch(Dispatchers.IO) {
-            val now = System.currentTimeMillis()
-            for (res in results) {
-                container.database.vaultJobDao().updateState(
-                    res.jobId,
-                    com.suyaphot.app.core.model.JobState.COMPLETED.code,
-                    now,
-                    disposition
-                )
-            }
-        }
-    }
-
-    val deleteRequestLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        scope.launch {
-            val currentConsent = consentSuccesses
-            if (result.resultCode == Activity.RESULT_OK && consentMode != null) {
-                val verified = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                    container.sourceDeletionCoordinator.completeConsent(currentConsent.map { it.uri }, consentMode!!)
-                }
-                markJobsTerminal(currentConsent.filter { it.uri in verified.deletedUris }, "SOURCE_DELETED")
-                markJobsTerminal(currentConsent.filter { it.uri in verified.retainedUris }, "SOURCE_DELETE_FAILED_VAULT_SAFE")
-                if (verified.retainedUris.isNotEmpty()) {
-                    statusText = "Imported safely. Some originals remain in Gallery."
-                }
-            } else {
-                markJobsTerminal(currentConsent, "ORIGINAL_RETAINED_BY_USER")
-            }
-            pendingSuccesses = pendingSuccesses.filterNot { pending ->
-                currentConsent.any { it.jobId == pending.jobId }
-            }
-            consentSuccesses = emptyList()
-            consentMode = null
-            deletionTrigger++
-        }
-    }
-
-    LaunchedEffect(locationPermissionResolved) {
-        if (!locationPermissionResolved) return@LaunchedEffect
-        scope.launch {
-            statusText = "Moving ${uris.size} items to Suya Phot..."
-            val results = container.importCoordinator.importBatch(
-                uris = uris,
-                folderId = folderId,
-                mode = ImportMode.MOVE,
-                onItemComplete = { current, total, _ ->
-                    scope.launch { statusText = "Encrypting $current of $total items..." }
-                }
-            )
-
-            val successfulResults = results.filterIsInstance<com.suyaphot.app.domain.importmedia.ImportResult.Success>()
-            val successfulUris = successfulResults.map { it.uri }
-            pendingSuccesses = successfulResults
-
-            if (successfulUris.isNotEmpty()) {
-                deletionTrigger++
-            } else {
-                isDone = true
-                statusText = "No new items imported."
-            }
-        }
-    }
-
-    LaunchedEffect(deletionTrigger) {
-        if (deletionTrigger == 0 || pendingSuccesses.isEmpty()) {
-            if (deletionTrigger > 0) {
-                isDone = true
-                statusText = "Move complete. Any originals Android retained are shown accurately above."
-            }
-            return@LaunchedEffect
-        }
-        statusText = "Requesting deletion of originals..."
-        val current = pendingSuccesses
-        when (val outcome = container.sourceDeletionCoordinator.deleteSources(current.map { it.uri })) {
-            is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
-                val completed = current.filter { it.uri in outcome.deletedUris }
-                markJobsTerminal(completed, "SOURCE_DELETED")
-                pendingSuccesses = current.filterNot { it.uri in outcome.deletedUris }
-                deletionTrigger++
-            }
-            is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
-                val directlyDeleted = current.filter { it.uri in outcome.deletedUris }
-                markJobsTerminal(directlyDeleted, "SOURCE_DELETED")
-                pendingSuccesses = current.filterNot { it.uri in outcome.deletedUris }
-                consentSuccesses = pendingSuccesses.filter { it.uri in outcome.uris }
-                consentMode = outcome.mode
-                deleteRequestLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
-            }
-            is com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator.DeletionOutcome.Failed -> {
-                val directlyDeleted = current.filter { it.uri in outcome.deletedUris }
-                markJobsTerminal(directlyDeleted, "SOURCE_DELETED")
-                val retained = current.filter { it.uri in outcome.uris }
-                markJobsTerminal(retained, "SOURCE_DELETE_FAILED_VAULT_SAFE")
-                pendingSuccesses = emptyList()
-                isDone = true
-                statusText = "Imported safely. Some originals remain in Gallery."
-            }
-        }
-    }
-
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier

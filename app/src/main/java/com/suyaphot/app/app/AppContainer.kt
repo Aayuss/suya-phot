@@ -28,6 +28,9 @@ import com.suyaphot.app.domain.importmedia.ImportRecoveryManager
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.domain.restore.RestoreCoordinator
 import com.suyaphot.app.domain.restore.RestoreRecoveryManager
+import com.suyaphot.app.domain.backup.BackupVerifier
+import com.suyaphot.app.domain.backup.VaultBackupExporter
+import com.suyaphot.app.domain.backup.VaultBackupImporter
 import com.suyaphot.app.domain.trash.TrashCoordinator
 import com.suyaphot.app.feature.intruder.IntruderCaptureManager
 
@@ -144,5 +147,17 @@ class AppContainer(val context: Context) {
             vaultDao = database.vaultDao(),
             intruderKeyProvider = intruderKeyProvider
         )
+    }
+
+    val backupVerifier: BackupVerifier by lazy {
+        BackupVerifier(keyManager)
+    }
+
+    val vaultBackupExporter: VaultBackupExporter by lazy {
+        VaultBackupExporter(database, vaultFileStore, keyManager, sessionManager)
+    }
+
+    val vaultBackupImporter: VaultBackupImporter by lazy {
+        VaultBackupImporter(context, database, vaultFileStore, keyManager, folderPrivacyCoordinator)
     }
 }

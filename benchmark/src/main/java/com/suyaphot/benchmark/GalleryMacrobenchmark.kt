@@ -15,11 +15,22 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Run only on a disposable, seeded, unlocked physical device for meaningful frame data. */
+/** Run only on a disposable, seeded physical device for meaningful frame data. */
 @RunWith(AndroidJUnit4::class)
 class GalleryMacrobenchmark {
     @get:Rule val rule = MacrobenchmarkRule()
     private val target = "com.suyaphot.app"
+
+    private fun ensureVaultUnlocked(device: UiDevice) {
+        if (device.hasObject(By.res("photos_grid"))) return
+        if (device.hasObject(By.desc("Digit 1"))) {
+            listOf("1", "2", "3", "4", "5", "6").forEach { digit ->
+                device.findObject(By.desc("Digit $digit"))?.click()
+                Thread.sleep(100)
+            }
+            device.wait(Until.hasObject(By.res("photos_grid")), 5_000)
+        }
+    }
 
     @Test fun coldStartup() = rule.measureRepeated(
         packageName = target,
@@ -36,6 +47,7 @@ class GalleryMacrobenchmark {
     ) {
         startActivityAndWait()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        ensureVaultUnlocked(device)
         assumeTrue("Seed and unlock a disposable vault before measuring", device.wait(Until.hasObject(By.res("photos_grid")), 10_000))
         val grid = device.findObject(By.res("photos_grid"))
         grid.setGestureMargin(device.displayWidth / 5)
@@ -50,6 +62,7 @@ class GalleryMacrobenchmark {
     ) {
         startActivityAndWait()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        ensureVaultUnlocked(device)
         assumeTrue("Seed two media items and unlock first", device.wait(Until.hasObject(By.desc("Media item")), 10_000))
         device.findObject(By.desc("Media item")).click()
         device.wait(Until.hasObject(By.desc("Back")), 10_000)

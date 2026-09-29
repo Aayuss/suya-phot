@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -20,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Lock
@@ -79,6 +81,7 @@ fun SettingsScreen(
     var showSortDialog by remember { mutableStateOf(false) }
     var showRetentionDialog by remember { mutableStateOf(false) }
     var showAutoLockDialog by remember { mutableStateOf(false) }
+    var showBackupRestore by remember { mutableStateOf(false) }
 
     LaunchedEffect(vaultId) {
         storageBytes = withContext(Dispatchers.IO) {
@@ -86,10 +89,19 @@ fun SettingsScreen(
         }
     }
 
+    if (showBackupRestore) {
+        BackupRestoreScreen(
+            container = container,
+            onBack = { showBackupRestore = false }
+        )
+        return
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(SuyaColors.Background)
+            .imePadding()
     ) {
         Column(
             modifier = Modifier
@@ -126,7 +138,7 @@ fun SettingsScreen(
                         Text(text = "Encrypted local data & thumbnails", fontFamily = SoraFontFamily, fontSize = 12.sp, color = SuyaColors.TextMuted)
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "Uninstalling Suya Phot removes this device's local vault. Encrypted export is not available yet; keep your original files.",
+                            text = "Export an encrypted .suyavault archive anytime to back up or migrate your media across devices.",
                             fontFamily = SoraFontFamily,
                             fontSize = 12.sp,
                             color = SuyaColors.TextMuted
@@ -146,6 +158,14 @@ fun SettingsScreen(
                         )
                     }
                 }
+
+                // Backup & Restore Action
+                SettingRowItem(
+                    title = "Backup & Restore",
+                    subtitle = "Export or restore portable encrypted .suyavault archive",
+                    icon = Icons.Default.CloudUpload,
+                    onClick = { showBackupRestore = true }
+                )
 
                 // Trash Action
                 SettingRowItem(

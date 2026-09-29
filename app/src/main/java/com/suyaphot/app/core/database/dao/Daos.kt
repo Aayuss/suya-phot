@@ -154,6 +154,12 @@ interface FolderLockDao {
     @Query("UPDATE folder_locks SET credentialEnvelope = :envelope, credentialTypeCode = :typeCode, recoveryEnvelope = :recoveryEnvelope, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
     suspend fun updateCredential(vaultId: String, lockId: String, envelope: ByteArray, typeCode: Int, recoveryEnvelope: ByteArray?, now: Long): Int
 
+    @Query("UPDATE folder_locks SET recoveryEnvelope = :recoveryEnvelope, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
+    suspend fun updateRecovery(vaultId: String, lockId: String, recoveryEnvelope: ByteArray, now: Long): Int
+
+    @Query("SELECT * FROM folder_locks WHERE vaultId = :vaultId")
+    suspend fun getAllForVault(vaultId: String): List<FolderLockEntity>
+
     @Query("DELETE FROM folder_locks WHERE vaultId = :vaultId AND id = :lockId")
     suspend fun delete(vaultId: String, lockId: String): Int
 }
@@ -207,11 +213,20 @@ interface MediaItemDao {
     @RawQuery
     suspend fun viewerIds(query: SupportSQLiteQuery): List<String>
 
+    @RawQuery
+    suspend fun rawCount(query: SupportSQLiteQuery): Int
+
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC")
     fun getByFolderPrivileged(vaultId: String, folderId: String?): Flow<List<MediaItemEntity>>
 
     @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC")
     suspend fun getAllIdsInFolder(vaultId: String, folderId: String?): List<String>
+
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC LIMIT :limit OFFSET :offset")
+    suspend fun getPagedIdsInFolder(vaultId: String, folderId: String?, limit: Int, offset: Int): List<String>
+
+    @Query("SELECT COUNT(*) FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0)")
+    suspend fun countAuthorizedInFolder(vaultId: String, folderId: String?): Int
 
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND favorite = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
     fun getFavorites(vaultId: String): Flow<List<MediaItemEntity>>
