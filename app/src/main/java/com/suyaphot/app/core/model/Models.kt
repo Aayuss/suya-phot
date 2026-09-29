@@ -63,6 +63,15 @@ enum class ImportMode(val code: Int) {
     }
 }
 
+enum class SourceDisposition {
+    NOT_APPLICABLE,
+    PENDING_DELETE,
+    DELETED,
+    RETAINED_BY_USER,
+    RETAINED_AFTER_INTERRUPTION,
+    DELETE_FAILED
+}
+
 data class PrivateMediaMetadata(
     val originalDisplayName: String,
     val originalRelativePath: String?,

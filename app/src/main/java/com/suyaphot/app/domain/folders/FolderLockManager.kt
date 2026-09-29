@@ -162,7 +162,7 @@ class FolderLockManager(
                     try {
                         if (token.size != 32) return@withContext false
                         val newEnvelope = keyManager.createFolderLockEnvelope(token, replacement, lock.id).serialize()
-                        val updated = database.folderLockDao().updateCredential(
+                        val updated = database.folderLockDao().resetCredentialFromRecovery(
                             session.vaultId, lock.id, newEnvelope, replacementType, encryptedToken, System.currentTimeMillis()
                         ) == 1
                         if (updated) { resetFailures(lock.id); accessManager.grantLock(session.vaultId, lock.id) }
@@ -185,6 +185,7 @@ class FolderLockManager(
         try {
             if (blocked(lockId)) return@withContext false
             val lock = database.folderLockDao().getForVault(vaultId, lockId) ?: return@withContext false
+            if (lock.requiresCredentialReset) return@withContext false
             if (lock.credentialTypeCode != typeCode) { recordFailure(lockId); return@withContext false }
             val envelope = runCatching { KeyManager.PinEnvelope.deserialize(lock.credentialEnvelope) }.getOrNull()
                 ?: return@withContext false

@@ -42,6 +42,19 @@ class KeyManagerTest {
 
         val normalized = keyManager.normalizeRecoverySecret(secret)
         assertEquals(26, normalized.length)
+        assertTrue(keyManager.isValidRecoverySecret(secret))
+        assertTrue(keyManager.isValidRecoverySecret(normalized))
+
+        // Rejects invalid characters like 0, 1, I, O
+        assertFalse(keyManager.isValidRecoverySecret(normalized.substring(0, 25) + "0"))
+        assertFalse(keyManager.isValidRecoverySecret(normalized.substring(0, 25) + "1"))
+        assertFalse(keyManager.isValidRecoverySecret(normalized.substring(0, 25) + "I"))
+        assertFalse(keyManager.isValidRecoverySecret(normalized.substring(0, 25) + "O"))
+        assertFalse(keyManager.isValidRecoverySecret(normalized.substring(0, 25) + "!"))
+
+        // Rejects wrong lengths
+        assertFalse(keyManager.isValidRecoverySecret(normalized.substring(0, 25)))
+        assertFalse(keyManager.isValidRecoverySecret(normalized + "A"))
     }
 
     @Test

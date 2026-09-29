@@ -7,6 +7,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,18 +32,22 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,11 +55,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.suyaphot.app.app.AppContainer
+import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.auth.PatternCredential
+import com.suyaphot.app.domain.auth.VaultSession
+import com.suyaphot.app.domain.backup.BackupError
+import com.suyaphot.app.domain.backup.BackupException
 import com.suyaphot.app.domain.backup.BackupSummary
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.PinDots
@@ -69,6 +81,7 @@ import com.suyaphot.app.ui.theme.SuyaColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -81,6 +94,8 @@ fun BackupRestoreScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val sessionState by container.sessionManager.sessionState.collectAsState()
+    val isRealVault = (sessionState as? VaultSession.Unlocked)?.kind == VaultKind.REAL
 
     var isExporting by remember { mutableStateOf(false) }
     var exportProgressText by remember { mutableStateOf("") }
@@ -88,6 +103,7 @@ fun BackupRestoreScreen(
 
     var showExportSecretDialog by remember { mutableStateOf(false) }
     var exportRecoveryCode by remember { mutableStateOf("") }
+    var exportCodeRevealed by remember { mutableStateOf(false) }
     var exportTargetUri by remember { mutableStateOf<Uri?>(null) }
 
     var isRestoring by remember { mutableStateOf(false) }
@@ -97,6 +113,7 @@ fun BackupRestoreScreen(
     var restoreUri by remember { mutableStateOf<Uri?>(null) }
     var showRestoreSecretDialog by remember { mutableStateOf(false) }
     var restoreRecoveryCode by remember { mutableStateOf("") }
+    var restoreCodeRevealed by remember { mutableStateOf(false) }
     var restoreSummary by remember { mutableStateOf<BackupSummary?>(null) }
     var restoreError by remember { mutableStateOf<String?>(null) }
 
@@ -110,12 +127,25 @@ fun BackupRestoreScreen(
     var patternErrorTrigger by remember { mutableIntStateOf(0) }
     var credentialError by remember { mutableStateOf<String?>(null) }
 
+    DisposableEffect(Unit) {
+        onDispose {
+            exportRecoveryCode = ""
+            restoreRecoveryCode = ""
+            newPin = ""
+            confirmPin = ""
+            patternFirst?.fill('\u0000')
+            patternFirst = null
+        }
+    }
+
     // SAF Document Launchers
     val exportDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri ->
         if (uri != null) {
             exportTargetUri = uri
+            exportRecoveryCode = ""
+            exportCodeRevealed = false
             showExportSecretDialog = true
         }
     }
@@ -126,6 +156,7 @@ fun BackupRestoreScreen(
         if (uri != null) {
             restoreUri = uri
             restoreRecoveryCode = ""
+            restoreCodeRevealed = false
             restoreSummary = null
             restoreError = null
             credentialStep = false
@@ -140,29 +171,54 @@ fun BackupRestoreScreen(
         exportProgressText = "Preparing archive..."
         scope.launch(Dispatchers.IO) {
             try {
-                val outputStream = context.contentResolver.openOutputStream(uri)
-                    ?: throw IllegalStateException("Could not open destination file")
-                outputStream.use { os ->
-                    val result = container.vaultBackupExporter.exportVault(
-                        outputStream = os,
-                        recoveryCodeInput = code,
-                        onProgress = { bytesWritten, totalEstimated, itemsWritten, totalItems ->
-                            scope.launch(Dispatchers.Main) {
-                                val fraction = if (totalEstimated > 0) (bytesWritten.toFloat() / totalEstimated).coerceIn(0f, 1f) else 0f
-                                exportProgressFraction = fraction
-                                exportProgressText = "Exported $itemsWritten of $totalItems items (${bytesWritten / (1024 * 1024)} MB)"
+                val pfd = context.contentResolver.openFileDescriptor(uri, "w")
+                    ?: throw BackupException(BackupError.DESTINATION_UNAVAILABLE)
+                pfd.use { fd ->
+                    val outputStream = FileOutputStream(fd.fileDescriptor)
+                    outputStream.use { os ->
+                        container.vaultBackupExporter.exportVault(
+                            outputStream = os,
+                            recoveryCodeInput = code,
+                            onProgress = { bytesWritten, totalEstimated, itemsWritten, totalItems ->
+                                scope.launch(Dispatchers.Main) {
+                                    val fraction = if (totalEstimated > 0) (bytesWritten.toFloat() / totalEstimated).coerceIn(0f, 1f) else 0f
+                                    exportProgressFraction = fraction
+                                    exportProgressText = "Exported $itemsWritten of $totalItems items (${bytesWritten / (1024 * 1024)} MB)"
+                                }
                             }
-                        }
-                    )
-                    withContext(Dispatchers.Main) {
-                        isExporting = false
-                        Toast.makeText(context, "Exported ${result.mediaCount} items successfully", Toast.LENGTH_LONG).show()
+                        )
+                        os.flush()
+                        try {
+                            fd.fileDescriptor.sync()
+                        } catch (_: Exception) {}
                     }
+                }
+
+                // Post-write verification of the written SAF file
+                withContext(Dispatchers.Main) {
+                    exportProgressText = "Verifying written archive..."
+                }
+                val verifyInputStream = context.contentResolver.openInputStream(uri)
+                    ?: throw BackupException(BackupError.SOURCE_UNAVAILABLE, "Could not reopen exported archive for verification")
+                val verifiedSummary = verifyInputStream.use { ins ->
+                    container.backupVerifier.verifyFullArchive(ins, code)
+                }
+
+                withContext(Dispatchers.Main) {
+                    isExporting = false
+                    showExportSecretDialog = false
+                    exportRecoveryCode = ""
+                    Toast.makeText(context, "Exported ${verifiedSummary.mediaCount} items successfully and verified archive.", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: BackupException) {
+                withContext(Dispatchers.Main) {
+                    isExporting = false
+                    Toast.makeText(context, e.message ?: e.error.userFriendlyMessage(), Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     isExporting = false
-                    Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Backup was written but could not be verified. Do not rely on this file.", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -174,7 +230,7 @@ fun BackupRestoreScreen(
         scope.launch(Dispatchers.IO) {
             try {
                 val inputStream = context.contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("Could not open backup file")
+                    ?: throw BackupException(BackupError.SOURCE_UNAVAILABLE)
                 val summary = inputStream.use { ins ->
                     container.backupVerifier.verifyAndInspect(ins, code)
                 }
@@ -184,19 +240,24 @@ fun BackupRestoreScreen(
                     newPin = ""
                     confirmPin = ""
                     pinStage = 0
+                    patternFirst?.fill('\u0000')
                     patternFirst = null
                     credentialError = null
                 }
+            } catch (e: BackupException) {
+                withContext(Dispatchers.Main) {
+                    restoreError = e.message ?: e.error.userFriendlyMessage()
+                }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    restoreError = e.message ?: "Failed to verify backup"
+                    restoreError = "Incorrect Recovery Code or corrupted backup."
                 }
             }
         }
     }
 
     fun startRestore(finalCredential: CharArray) {
-        val uri = restoreUri ?: return
+        val uri = restoreUri ?: run { finalCredential.fill('\u0000'); return }
         isRestoring = true
         showRestoreSecretDialog = false
         restoreProgressFraction = 0f
@@ -204,7 +265,7 @@ fun BackupRestoreScreen(
         scope.launch(Dispatchers.IO) {
             try {
                 val inputStream = context.contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("Could not open backup file")
+                    ?: throw BackupException(BackupError.SOURCE_UNAVAILABLE)
                 inputStream.use { ins ->
                     val result = container.vaultBackupImporter.restoreVault(
                         inputStream = ins,
@@ -221,15 +282,23 @@ fun BackupRestoreScreen(
                     )
                     withContext(Dispatchers.Main) {
                         isRestoring = false
+                        restoreRecoveryCode = ""
                         Toast.makeText(context, "Restored ${result.mediaCount} items into vault!", Toast.LENGTH_LONG).show()
                         onBack()
                     }
                 }
+            } catch (e: BackupException) {
+                withContext(Dispatchers.Main) {
+                    isRestoring = false
+                    Toast.makeText(context, e.message ?: e.error.userFriendlyMessage(), Toast.LENGTH_LONG).show()
+                }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     isRestoring = false
-                    Toast.makeText(context, "Restore failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Restore failed: Invalid or corrupt backup archive.", Toast.LENGTH_LONG).show()
                 }
+            } finally {
+                finalCredential.fill('\u0000')
             }
         }
     }
@@ -259,56 +328,62 @@ fun BackupRestoreScreen(
                 // Info Card
                 Surface(
                     shape = RoundedCornerShape(16.dp),
-                    color = SuyaColors.Fill06,
+                    color = SuyaColors.Surface,
                     border = BorderStroke(1.dp, SuyaColors.Line),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Security, contentDescription = null, tint = SuyaColors.Accent)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Portable Encrypted Vault", fontFamily = SoraFontFamily, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = SuyaColors.White)
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Security, contentDescription = null, tint = SuyaColors.Accent, modifier = Modifier.size(28.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("Zero-Cloud Local Backup", fontFamily = SoraFontFamily, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = SuyaColors.White)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Backups are encrypted using your 26-character Recovery Code and saved directly to your device storage or external drive.",
+                                fontFamily = SoraFontFamily,
+                                fontSize = 13.sp,
+                                color = SuyaColors.TextMuted
+                            )
                         }
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            "Export your vault into a standalone .suyavault archive. Backups are encrypted end-to-end and can be restored on any Android device using your 26-character Recovery Code without relying on device-specific Keystore keys.",
-                            fontFamily = SoraFontFamily,
-                            fontSize = 13.sp,
-                            color = SuyaColors.TextMuted,
-                            lineHeight = 18.sp
-                        )
                     }
                 }
 
-                // Export Card
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = SuyaColors.Fill06,
-                    border = BorderStroke(1.dp, SuyaColors.Line),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.CloudUpload, contentDescription = null, tint = SuyaColors.Accent)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Export Backup", fontFamily = SoraFontFamily, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = SuyaColors.White)
+                // Export Card (Only shown if primary real vault)
+                if (isRealVault) {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = SuyaColors.Fill06,
+                        border = BorderStroke(1.dp, SuyaColors.Line),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.CloudUpload, contentDescription = null, tint = SuyaColors.Accent)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Export Backup", fontFamily = SoraFontFamily, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = SuyaColors.White)
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "Package all photos, videos, albums, and folder locks into an encrypted .suyavault file.",
+                                fontFamily = SoraFontFamily,
+                                fontSize = 13.sp,
+                                color = SuyaColors.TextMuted
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            SuyaButton(
+                                text = "Export .suyavault",
+                                onClick = {
+                                    val timestamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+                                    exportDocumentLauncher.launch("suya_phot_backup_$timestamp.suyavault")
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("backup_export_button")
+                            )
                         }
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            "Package all photos, videos, albums, and folder locks into an encrypted .suyavault file.",
-                            fontFamily = SoraFontFamily,
-                            fontSize = 13.sp,
-                            color = SuyaColors.TextMuted
-                        )
-                        Spacer(Modifier.height(14.dp))
-                        SuyaButton(
-                            text = "Export .suyavault",
-                            onClick = {
-                                val timestamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
-                                exportDocumentLauncher.launch("suya_phot_backup_$timestamp.suyavault")
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        )
                     }
                 }
 
@@ -339,7 +414,9 @@ fun BackupRestoreScreen(
                                 restoreDocumentLauncher.launch(arrayOf("*/*"))
                             },
                             variant = ButtonVariant.Secondary,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("backup_open_file_button")
                         )
                     }
                 }
@@ -349,31 +426,50 @@ fun BackupRestoreScreen(
         // Export Prompt Dialog
         if (showExportSecretDialog) {
             SuyaDialog(
-                onDismissRequest = { showExportSecretDialog = false },
+                onDismissRequest = {
+                    showExportSecretDialog = false
+                    exportRecoveryCode = ""
+                },
                 title = "Confirm Recovery Code",
                 confirmText = "Begin Export",
                 onConfirm = {
-                    if (exportRecoveryCode.replace("-", "").length == 26) {
+                    if (container.keyManager.isValidRecoverySecret(exportRecoveryCode)) {
                         showExportSecretDialog = false
-                        startExport(exportRecoveryCode)
+                        val codeToExport = exportRecoveryCode
+                        exportRecoveryCode = ""
+                        startExport(codeToExport)
                     } else {
-                        Toast.makeText(context, "Recovery code must be exactly 26 characters", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Recovery code must be exactly 26 Base32 characters", Toast.LENGTH_SHORT).show()
                     }
                 },
                 content = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(
-                            "Enter your 26-character Recovery Code to wrap the backup key. This code will be required to unlock this backup on any other phone.",
+                            "Enter your 26-character Recovery Code to prove ownership and wrap the backup key.",
                             fontFamily = SoraFontFamily,
                             fontSize = 13.sp,
                             color = SuyaColors.TextMuted
                         )
-                        SuyaTextField(
-                            value = exportRecoveryCode,
-                            onValueChange = { exportRecoveryCode = it.uppercase() },
-                            label = "Recovery Code",
-                            placeholder = "e.g. 7K9P-4X2B-W8MN-..."
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            SuyaTextField(
+                                value = exportRecoveryCode,
+                                onValueChange = { exportRecoveryCode = it.uppercase() },
+                                label = "Recovery Code",
+                                placeholder = "e.g. 7K9P-4X2B-W8MN-...",
+                                visualTransformation = if (exportCodeRevealed) VisualTransformation.None else PasswordVisualTransformation(),
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(onClick = { exportCodeRevealed = !exportCodeRevealed }) {
+                                Icon(
+                                    imageVector = if (exportCodeRevealed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (exportCodeRevealed) "Hide Code" else "Reveal Code",
+                                    tint = SuyaColors.TextMuted
+                                )
+                            }
+                        }
                     }
                 }
             )
@@ -382,7 +478,14 @@ fun BackupRestoreScreen(
         // Restore Flow Dialog
         if (showRestoreSecretDialog) {
             SuyaDialog(
-                onDismissRequest = { showRestoreSecretDialog = false },
+                onDismissRequest = {
+                    showRestoreSecretDialog = false
+                    restoreRecoveryCode = ""
+                    newPin = ""
+                    confirmPin = ""
+                    patternFirst?.fill('\u0000')
+                    patternFirst = null
+                },
                 title = if (!credentialStep) "Verify Backup" else "Set Device Credential",
                 confirmText = if (credentialStep && (newCredentialType == 0 && pinStage == 1 && confirmPin.length == 6)) "Restore Now" else if (!credentialStep) "Verify" else null,
                 onConfirm = if (!credentialStep) ({
@@ -403,12 +506,26 @@ fun BackupRestoreScreen(
                                 fontSize = 13.sp,
                                 color = SuyaColors.TextMuted
                             )
-                            SuyaTextField(
-                                value = restoreRecoveryCode,
-                                onValueChange = { restoreRecoveryCode = it.uppercase() },
-                                label = "Recovery Code",
-                                placeholder = "XXXX-XXXX-XXXX-..."
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                SuyaTextField(
+                                    value = restoreRecoveryCode,
+                                    onValueChange = { restoreRecoveryCode = it.uppercase() },
+                                    label = "Recovery Code",
+                                    placeholder = "XXXX-XXXX-XXXX-...",
+                                    visualTransformation = if (restoreCodeRevealed) VisualTransformation.None else PasswordVisualTransformation(),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = { restoreCodeRevealed = !restoreCodeRevealed }) {
+                                    Icon(
+                                        imageVector = if (restoreCodeRevealed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = if (restoreCodeRevealed) "Hide Code" else "Reveal Code",
+                                        tint = SuyaColors.TextMuted
+                                    )
+                                }
+                            }
                             restoreError?.let {
                                 Text(it, color = SuyaColors.Negative, fontSize = 13.sp, fontFamily = SoraFontFamily)
                             }
@@ -418,113 +535,105 @@ fun BackupRestoreScreen(
                                     "Found: ${sum.mediaCount} media items, ${sum.folderCount} folders (${sum.totalPlaintextSize / (1024 * 1024)} MB).",
                                     fontFamily = SoraFontFamily,
                                     fontSize = 13.sp,
-                                    color = SuyaColors.Positive,
+                                    color = SuyaColors.White,
                                     fontWeight = FontWeight.Medium
                                 )
                             }
                             Text(
-                                "Choose the credential type for this device:",
+                                "Choose a lock credential to unlock this vault on this phone:",
                                 fontFamily = SoraFontFamily,
                                 fontSize = 13.sp,
-                                color = SuyaColors.White
+                                color = SuyaColors.TextMuted
                             )
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                RadioButton(
-                                    selected = newCredentialType == 0,
-                                    onClick = { newCredentialType = 0; pinStage = 0; newPin = ""; confirmPin = ""; credentialError = null },
-                                    colors = RadioButtonDefaults.colors(selectedColor = SuyaColors.Accent)
-                                )
-                                Text("6-Digit PIN", fontFamily = SoraFontFamily, color = SuyaColors.White, fontSize = 14.sp)
-                                Spacer(Modifier.width(16.dp))
-                                RadioButton(
-                                    selected = newCredentialType == 1,
-                                    onClick = { newCredentialType = 1; patternFirst = null; credentialError = null },
-                                    colors = RadioButtonDefaults.colors(selectedColor = SuyaColors.Accent)
-                                )
-                                Text("Pattern", fontFamily = SoraFontFamily, color = SuyaColors.White, fontSize = 14.sp)
+
+                            // Choose PIN or Pattern
+                            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    RadioButton(
+                                        selected = newCredentialType == 0,
+                                        onClick = { newCredentialType = 0; newPin = ""; confirmPin = ""; pinStage = 0 },
+                                        colors = RadioButtonDefaults.colors(selectedColor = SuyaColors.Accent)
+                                    )
+                                    Text("6-digit PIN", fontFamily = SoraFontFamily, fontSize = 13.sp, color = SuyaColors.White)
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    RadioButton(
+                                        selected = newCredentialType == 1,
+                                        onClick = { newCredentialType = 1; patternFirst?.fill('\u0000'); patternFirst = null },
+                                        colors = RadioButtonDefaults.colors(selectedColor = SuyaColors.Accent)
+                                    )
+                                    Text("Pattern", fontFamily = SoraFontFamily, fontSize = 13.sp, color = SuyaColors.White)
+                                }
+                            }
+
+                            credentialError?.let {
+                                Text(it, color = SuyaColors.Negative, fontSize = 12.sp, fontFamily = SoraFontFamily)
                             }
 
                             if (newCredentialType == 0) {
+                                // PIN entry
                                 Text(
-                                    if (pinStage == 0) "Enter new 6-digit PIN:" else "Confirm 6-digit PIN:",
+                                    if (pinStage == 0) "Enter 6-digit PIN" else "Confirm 6-digit PIN",
                                     fontFamily = SoraFontFamily,
                                     fontSize = 14.sp,
-                                    color = SuyaColors.White
+                                    color = SuyaColors.Accent,
+                                    fontWeight = FontWeight.SemiBold
                                 )
-                                Spacer(Modifier.height(8.dp))
-                                PinDots(
-                                    pinLength = 6,
-                                    enteredCount = if (pinStage == 0) newPin.length else confirmPin.length
-                                )
-                                Spacer(Modifier.height(8.dp))
+                                PinDots(pinLength = 6, enteredCount = if (pinStage == 0) newPin.length else confirmPin.length)
                                 SecurePinPad(
-                                    onDigitClick = { digit ->
-                                        if (pinStage == 0) {
-                                            if (newPin.length < 6) {
-                                                newPin += digit
-                                                if (newPin.length == 6) {
-                                                    pinStage = 1
-                                                    credentialError = null
-                                                }
-                                            }
-                                        } else {
-                                            if (confirmPin.length < 6) {
-                                                confirmPin += digit
-                                                if (confirmPin.length == 6) {
-                                                    if (newPin == confirmPin) {
-                                                        startRestore(confirmPin.toCharArray())
-                                                    } else {
-                                                        credentialError = "PINs do not match. Try again."
-                                                        pinStage = 0
-                                                        newPin = ""
-                                                        confirmPin = ""
-                                                    }
-                                                }
-                                            }
+                                    onDigitClick = { d ->
+                                        if (pinStage == 0 && newPin.length < 6) {
+                                            newPin += d
+                                            if (newPin.length == 6) pinStage = 1
+                                        } else if (pinStage == 1 && confirmPin.length < 6) {
+                                            confirmPin += d
                                         }
                                     },
                                     onBackspaceClick = {
-                                        if (pinStage == 0) {
-                                            if (newPin.isNotEmpty()) newPin = newPin.dropLast(1)
-                                        } else {
-                                            if (confirmPin.isNotEmpty()) confirmPin = confirmPin.dropLast(1)
+                                        if (pinStage == 1 && confirmPin.isNotEmpty()) {
+                                            confirmPin = confirmPin.dropLast(1)
+                                        } else if (pinStage == 1 && confirmPin.isEmpty()) {
+                                            pinStage = 0
+                                            newPin = ""
+                                        } else if (pinStage == 0 && newPin.isNotEmpty()) {
+                                            newPin = newPin.dropLast(1)
                                         }
                                     }
                                 )
                             } else {
+                                // Pattern entry
                                 Text(
-                                    if (patternFirst == null) "Draw new unlock pattern (connect >= 4 dots):" else "Confirm pattern:",
+                                    if (patternFirst == null) "Draw a pattern (at least 4 dots)" else "Confirm pattern",
                                     fontFamily = SoraFontFamily,
-                                    fontSize = 13.sp,
-                                    color = SuyaColors.White
+                                    fontSize = 14.sp,
+                                    color = SuyaColors.Accent,
+                                    fontWeight = FontWeight.SemiBold
                                 )
                                 PatternLockPad(
-                                    onPatternComplete = { nodes ->
-                                        val chars = runCatching { PatternCredential.canonicalChars(nodes) }.getOrNull()
-                                        if (chars == null) {
-                                            credentialError = "Connect at least 4 dots"
+                                    onPatternComplete = { patternInts ->
+                                        if (patternInts.size < 4) {
+                                            credentialError = "Pattern must connect at least 4 dots"
                                             patternErrorTrigger++
-                                        } else if (patternFirst == null) {
-                                            patternFirst = chars
+                                            return@PatternLockPad
+                                        }
+                                        val chars = PatternCredential.canonicalChars(patternInts)
+                                        if (patternFirst == null) {
                                             credentialError = null
+                                            patternFirst = chars
                                         } else {
-                                            if (chars.contentEquals(patternFirst!!)) {
+                                            if (chars.contentEquals(patternFirst)) {
                                                 startRestore(chars)
                                             } else {
-                                                credentialError = "Patterns did not match. Draw pattern again."
-                                                patternFirst = null
+                                                credentialError = "Patterns do not match. Try again."
                                                 patternErrorTrigger++
+                                                patternFirst?.fill('\u0000')
+                                                patternFirst = null
                                             }
                                         }
                                     },
                                     errorTrigger = patternErrorTrigger,
-                                    enabled = true,
                                     modifier = Modifier.size(240.dp).align(Alignment.CenterHorizontally)
                                 )
-                            }
-
-                            credentialError?.let {
-                                Text(it, color = SuyaColors.Negative, fontSize = 13.sp, fontFamily = SoraFontFamily)
                             }
                         }
                     }
@@ -532,53 +641,42 @@ fun BackupRestoreScreen(
             )
         }
 
-        // Active Progress Overlay (Export or Restore)
+        // Progress Overlay
         if (isExporting || isRestoring) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(SuyaColors.Background.copy(alpha = 0.85f))
-                    .padding(24.dp)
+            Surface(
+                color = SuyaColors.Background.copy(alpha = 0.92f),
+                modifier = Modifier.fillMaxSize()
             ) {
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = SuyaColors.Surface,
-                    border = BorderStroke(1.dp, SuyaColors.Line),
-                    modifier = Modifier.fillMaxWidth().padding(16.dp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(24.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            color = SuyaColors.Accent,
-                            modifier = Modifier.size(44.dp)
-                        )
-                        Spacer(Modifier.height(18.dp))
-                        Text(
-                            text = if (isExporting) "Exporting Vault..." else "Restoring Vault...",
-                            fontFamily = SoraFontFamily,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 17.sp,
-                            color = SuyaColors.White
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = if (isExporting) exportProgressText else restoreProgressText,
-                            fontFamily = SoraFontFamily,
-                            fontSize = 13.sp,
-                            color = SuyaColors.TextMuted,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-                        Spacer(Modifier.height(14.dp))
-                        LinearProgressIndicator(
-                            progress = { if (isExporting) exportProgressFraction else restoreProgressFraction },
-                            color = SuyaColors.Accent,
-                            trackColor = SuyaColors.Fill06,
-                            modifier = Modifier.fillMaxWidth().height(6.dp)
-                        )
-                    }
+                    CircularProgressIndicator(color = SuyaColors.Accent, modifier = Modifier.size(48.dp))
+                    Spacer(Modifier.height(24.dp))
+                    Text(
+                        text = if (isExporting) "Exporting Backup" else "Restoring Vault",
+                        fontFamily = SoraFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        color = SuyaColors.White
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = if (isExporting) exportProgressText else restoreProgressText,
+                        fontFamily = SoraFontFamily,
+                        fontSize = 13.sp,
+                        color = SuyaColors.TextMuted
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    LinearProgressIndicator(
+                        progress = { if (isExporting) exportProgressFraction else restoreProgressFraction },
+                        color = SuyaColors.Accent,
+                        trackColor = SuyaColors.Line,
+                        modifier = Modifier.fillMaxWidth(0.8f)
+                    )
                 }
             }
         }

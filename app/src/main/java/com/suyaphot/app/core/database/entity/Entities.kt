@@ -165,7 +165,8 @@ data class FolderLockEntity(
     val biometricIv: ByteArray?,
     val recoveryEnvelope: ByteArray? = null,
     val createdAt: Long,
-    val updatedAt: Long
+    val updatedAt: Long,
+    val requiresCredentialReset: Boolean = false
 )
 
 @Entity(

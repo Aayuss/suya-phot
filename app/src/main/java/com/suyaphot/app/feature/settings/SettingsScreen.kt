@@ -159,13 +159,16 @@ fun SettingsScreen(
                     }
                 }
 
-                // Backup & Restore Action
-                SettingRowItem(
-                    title = "Backup & Restore",
-                    subtitle = "Export or restore portable encrypted .suyavault archive",
-                    icon = Icons.Default.CloudUpload,
-                    onClick = { showBackupRestore = true }
-                )
+                // Backup & Restore Action (Supported only on Real Vault)
+                val isRealVault = (session as? com.suyaphot.app.domain.auth.VaultSession.Unlocked)?.kind == com.suyaphot.app.core.model.VaultKind.REAL
+                if (isRealVault) {
+                    SettingRowItem(
+                        title = "Backup & Restore",
+                        subtitle = "Export or restore portable encrypted .suyavault archive",
+                        icon = Icons.Default.CloudUpload,
+                        onClick = { showBackupRestore = true }
+                    )
+                }
 
                 // Trash Action
                 SettingRowItem(

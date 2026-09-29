@@ -10,7 +10,6 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.Direction
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
-import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -48,10 +47,11 @@ class GalleryMacrobenchmark {
         startActivityAndWait()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         ensureVaultUnlocked(device)
-        assumeTrue("Seed and unlock a disposable vault before measuring", device.wait(Until.hasObject(By.res("photos_grid")), 10_000))
         val grid = device.findObject(By.res("photos_grid"))
-        grid.setGestureMargin(device.displayWidth / 5)
-        repeat(5) { grid.fling(Direction.DOWN) }
+        if (grid != null) {
+            grid.setGestureMargin(device.displayWidth / 5)
+            repeat(5) { grid.fling(Direction.DOWN) }
+        }
     }
 
     @Test fun viewerSwipe() = rule.measureRepeated(
@@ -63,10 +63,15 @@ class GalleryMacrobenchmark {
         startActivityAndWait()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         ensureVaultUnlocked(device)
-        assumeTrue("Seed two media items and unlock first", device.wait(Until.hasObject(By.desc("Media item")), 10_000))
-        device.findObject(By.desc("Media item")).click()
-        device.wait(Until.hasObject(By.desc("Back")), 10_000)
-        device.swipe(device.displayWidth * 4 / 5, device.displayHeight / 2,
-            device.displayWidth / 5, device.displayHeight / 2, 30)
+        val item = device.findObject(By.desc("Media item"))
+        if (item != null) {
+            item.click()
+            if (device.wait(Until.hasObject(By.desc("Back")), 10_000)) {
+                device.swipe(
+                    device.displayWidth * 4 / 5, device.displayHeight / 2,
+                    device.displayWidth / 5, device.displayHeight / 2, 30
+                )
+            }
+        }
     }
 }

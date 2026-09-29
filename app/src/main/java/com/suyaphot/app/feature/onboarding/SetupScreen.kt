@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -179,14 +180,18 @@ fun SetupScreen(
                         SuyaButton(
                             text = "Create Vault",
                             onClick = { currentStep = SetupStep.CHOOSE_CREDENTIAL },
-                            modifier = Modifier.fillMaxWidth(0.8f)
+                            modifier = Modifier
+                                .fillMaxWidth(0.8f)
+                                .testTag("welcome_create_vault_btn")
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         SuyaButton(
                             text = "Restore from Backup",
                             onClick = { showRestoreScreen = true },
                             variant = ButtonVariant.Secondary,
-                            modifier = Modifier.fillMaxWidth(0.8f)
+                            modifier = Modifier
+                                .fillMaxWidth(0.8f)
+                                .testTag("welcome_restore_backup_btn")
                         )
                     }
                 }
@@ -195,15 +200,30 @@ fun SetupScreen(
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("credential_choice_screen")
                     ) {
                         Text("Choose your vault lock", fontFamily = SoraFontFamily, fontSize = 22.sp, color = SuyaColors.White)
                         Spacer(modifier = Modifier.height(12.dp))
                         Text("A PIN is easier to use with accessibility services. A pattern needs at least four dots.", fontFamily = SoraFontFamily, fontSize = 13.sp, color = SuyaColors.TextMuted, textAlign = TextAlign.Center)
                         Spacer(modifier = Modifier.height(28.dp))
-                        SuyaButton("Use 6-digit PIN", onClick = { credentialTypeCode = 0; currentStep = SetupStep.ENTER_PIN }, modifier = Modifier.fillMaxWidth(0.9f))
+                        SuyaButton(
+                            "Use 6-digit PIN",
+                            onClick = { credentialTypeCode = 0; currentStep = SetupStep.ENTER_PIN },
+                            modifier = Modifier
+                                .fillMaxWidth(0.9f)
+                                .testTag("credential_pin_option")
+                        )
                         Spacer(modifier = Modifier.height(12.dp))
-                        SuyaButton("Use Pattern", onClick = { credentialTypeCode = 1; currentStep = SetupStep.ENTER_PATTERN }, variant = ButtonVariant.Secondary, modifier = Modifier.fillMaxWidth(0.9f))
+                        SuyaButton(
+                            "Use Pattern",
+                            onClick = { credentialTypeCode = 1; currentStep = SetupStep.ENTER_PATTERN },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier
+                                .fillMaxWidth(0.9f)
+                                .testTag("credential_pattern_option")
+                        )
                     }
                 }
 

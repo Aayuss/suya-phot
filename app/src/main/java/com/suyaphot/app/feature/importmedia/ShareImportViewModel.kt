@@ -99,28 +99,32 @@ class ShareImportViewModel : ViewModel() {
         }
     }
 
-    private fun markJobsTerminal(
+    private var anyOriginalsRetained = false
+
+    private suspend fun markJobsTerminal(
         results: List<ImportResult.Success>,
         disposition: String? = null
-    ) {
-        val app = container ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            val now = System.currentTimeMillis()
-            for (res in results) {
-                app.database.vaultJobDao().updateState(
-                    res.jobId,
-                    JobState.COMPLETED.code,
-                    now,
-                    disposition
-                )
-            }
+    ) = withContext(Dispatchers.IO) {
+        val app = container ?: return@withContext
+        val now = System.currentTimeMillis()
+        for (res in results) {
+            app.database.vaultJobDao().updateState(
+                res.jobId,
+                JobState.COMPLETED.code,
+                now,
+                disposition
+            )
         }
     }
 
     private fun processSourceDeletions() {
         val app = container ?: return
         if (pendingSuccesses.isEmpty()) {
-            _stage.value = ShareStage.Completed("Move complete. Vault encrypted and protected.")
+            if (anyOriginalsRetained) {
+                _stage.value = ShareStage.Completed("Imported safely. Some public originals were retained by Android.")
+            } else {
+                _stage.value = ShareStage.Completed("Move complete. Vault encrypted and protected.")
+            }
             return
         }
 
@@ -147,9 +151,11 @@ class ShareImportViewModel : ViewModel() {
                     val directlyDeleted = current.filter { it.uri in outcome.deletedUris }
                     markJobsTerminal(directlyDeleted, "SOURCE_DELETED")
                     val retained = current.filter { it.uri in outcome.uris }
+                    if (retained.isNotEmpty()) anyOriginalsRetained = true
                     markJobsTerminal(retained, "SOURCE_DELETE_FAILED_VAULT_SAFE")
-                    pendingSuccesses.clear()
-                    _stage.value = ShareStage.Completed("Imported safely into vault. Originals remain in gallery.")
+                    pendingSuccesses.removeAll { it.uri in outcome.deletedUris }
+                    pendingSuccesses.removeAll { it.uri in outcome.uris }
+                    processSourceDeletions()
                 }
             }
         }
@@ -166,12 +172,13 @@ class ShareImportViewModel : ViewModel() {
                     app.sourceDeletionCoordinator.completeConsent(currentConsent.map { it.uri }, mode)
                 }
                 markJobsTerminal(currentConsent.filter { it.uri in verified.deletedUris }, "SOURCE_DELETED")
-                markJobsTerminal(currentConsent.filter { it.uri in verified.retainedUris }, "SOURCE_DELETE_FAILED_VAULT_SAFE")
-                if (verified.retainedUris.isNotEmpty()) {
-                    _stage.value = ShareStage.Completed("Imported safely. Some public originals were retained by Android.")
-                    return@launch
+                val retained = currentConsent.filter { it.uri in verified.retainedUris }
+                if (retained.isNotEmpty()) {
+                    anyOriginalsRetained = true
+                    markJobsTerminal(retained, "SOURCE_DELETE_FAILED_VAULT_SAFE")
                 }
             } else {
+                anyOriginalsRetained = true
                 markJobsTerminal(currentConsent, "ORIGINAL_RETAINED_BY_USER")
             }
 

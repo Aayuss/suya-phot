@@ -1,10 +1,11 @@
 package com.suyaphot.app.domain.backup
 
-import android.content.Context
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.HkdfSha256
 import com.suyaphot.app.core.crypto.KeyManager
+import com.suyaphot.app.core.crypto.VaultCrypto
 import com.suyaphot.app.core.database.SuyaDatabase
+import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.SessionManager
@@ -32,10 +33,23 @@ class VaultBackupExporter(
     private val database: SuyaDatabase,
     private val fileStore: VaultFileStore,
     private val keyManager: KeyManager,
-    private val sessionManager: SessionManager
+    private val sessionManager: SessionManager,
+    private val vaultCrypto: VaultCrypto = VaultCrypto()
 ) {
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+
+    private fun computeFileSha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(64 * 1024)
+        FileInputStream(file).use { fis ->
+            var read: Int
+            while (fis.read(buf).also { read = it } != -1) {
+                digest.update(buf, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
 
     suspend fun exportVault(
         outputStream: OutputStream,
@@ -45,9 +59,52 @@ class VaultBackupExporter(
         val session = sessionManager.sessionState.value as? VaultSession.Unlocked
             ?: throw IllegalStateException("Vault is locked or uninitialized")
 
+        if (session.kind != VaultKind.REAL) {
+            throw BackupException(
+                BackupError.UNKNOWN,
+                "Backup is only supported for the primary vault."
+            )
+        }
+
         val vaultId = session.vaultId
         val vaultEntity = database.vaultDao().getVault(vaultId)
             ?: throw IllegalStateException("Vault entity not found")
+
+        // 1. Verify entered Recovery Code format
+        if (!keyManager.isValidRecoverySecret(recoveryCodeInput)) {
+            throw BackupException(
+                BackupError.INVALID_RECOVERY_FORMAT,
+                "Recovery code must be exactly 26 Base32 characters."
+            )
+        }
+
+        // 2. Cryptographically verify entered Recovery Code against current vault's recovery envelope
+        val serializedRecovery = vaultEntity.recoveryEnvelope
+            ?: throw BackupException(
+                BackupError.RECOVERY_NOT_CONFIGURED,
+                "Recovery is not configured for this vault."
+            )
+
+        val recoveryEnvelope = KeyManager.RecoveryEnvelope.deserialize(serializedRecovery)
+        val recoveredMasterKey = keyManager.unwrapRecoveryEnvelope(recoveryEnvelope, recoveryCodeInput)
+            ?: throw BackupException(
+                BackupError.INCORRECT_RECOVERY_CODE,
+                "That Recovery Code does not match this vault."
+            )
+
+        try {
+            val matches = session.masterKeyHandle.useBytes { current ->
+                MessageDigest.isEqual(current, recoveredMasterKey)
+            }
+            if (!matches) {
+                throw BackupException(
+                    BackupError.INCORRECT_RECOVERY_CODE,
+                    "That Recovery Code does not match this vault."
+                )
+            }
+        } finally {
+            recoveredMasterKey.fill(0)
+        }
 
         val folders = database.folderDao().getFoldersForVaultOnce(vaultId)
         val locks = database.folderLockDao().getAllForVault(vaultId)
@@ -56,7 +113,104 @@ class VaultBackupExporter(
         val archiveId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
 
-        // Build manifest entries
+        // 3. Preflight every required media file before writing any output
+        val descriptors = ArrayList<BackupFileDescriptor>()
+        val mediaEntries = ArrayList<BackupMediaItemEntry>(mediaItems.size)
+
+        session.masterKeyHandle.useBytes { masterKey ->
+            val mediaSubkey = vaultCrypto.deriveMediaSubkey(masterKey)
+            try {
+                for (m in mediaItems) {
+                    val mediaFile = fileStore.getMediaFile(vaultId, m.id)
+                    if (!mediaFile.exists()) {
+                        throw BackupException(
+                            BackupError.MISSING_MEDIA,
+                            "Missing required media file for item ${m.id}"
+                        )
+                    }
+
+                    // Verify file can be authenticated and decrypted cleanly
+                    try {
+                        val verified = vaultCrypto.verifyAndHash(mediaFile, mediaSubkey, m.id)
+                        check(verified.plaintextSize == m.plaintextSize) { "Plaintext size mismatch for item ${m.id}" }
+                    } catch (e: Exception) {
+                        throw BackupException(
+                            BackupError.CORRUPT_MEDIA,
+                            "Encrypted media file is corrupt for item ${m.id}: ${e.message}",
+                            e
+                        )
+                    }
+
+                    val mediaCipherSha256 = computeFileSha256(mediaFile)
+                    descriptors.add(
+                        BackupFileDescriptor(
+                            typeCode = BackupArchiveFormat.ENTRY_TYPE_MEDIA,
+                            itemId = m.id,
+                            cipherLength = mediaFile.length(),
+                            cipherSha256Hex = mediaCipherSha256
+                        )
+                    )
+
+                    var hasThumb = false
+                    if (m.encryptedThumbRelativePath != null) {
+                        val thumbFile = fileStore.getThumbFile(vaultId, m.id)
+                        if (thumbFile.exists() && thumbFile.length() > 0) {
+                            hasThumb = true
+                            descriptors.add(
+                                BackupFileDescriptor(
+                                    typeCode = BackupArchiveFormat.ENTRY_TYPE_THUMB,
+                                    itemId = m.id,
+                                    cipherLength = thumbFile.length(),
+                                    cipherSha256Hex = computeFileSha256(thumbFile)
+                                )
+                            )
+                        }
+                    }
+
+                    var hasPreview = false
+                    if (m.encryptedPreviewRelativePath != null) {
+                        val prevFile = fileStore.getPreviewFile(vaultId, m.id)
+                        if (prevFile.exists() && prevFile.length() > 0) {
+                            hasPreview = true
+                            descriptors.add(
+                                BackupFileDescriptor(
+                                    typeCode = BackupArchiveFormat.ENTRY_TYPE_PREVIEW,
+                                    itemId = m.id,
+                                    cipherLength = prevFile.length(),
+                                    cipherSha256Hex = computeFileSha256(prevFile)
+                                )
+                            )
+                        }
+                    }
+
+                    mediaEntries.add(
+                        BackupMediaItemEntry(
+                            id = m.id,
+                            folderId = m.folderId,
+                            mediaTypeCode = m.mediaTypeCode,
+                            encryptedMetadataHex = m.encryptedMetadata.toHex(),
+                            plaintextSize = m.plaintextSize,
+                            cipherSize = m.cipherSize,
+                            sha256Hex = m.sha256Hex,
+                            importedAt = m.importedAt,
+                            updatedAt = m.updatedAt,
+                            favorite = m.favorite,
+                            deletedAt = m.deletedAt,
+                            previousFolderId = m.previousFolderId,
+                            dateTakenMs = m.dateTakenMs,
+                            cleanupStateCode = m.cleanupStateCode,
+                            concealed = m.concealed,
+                            hasThumb = hasThumb,
+                            hasPreview = hasPreview
+                        )
+                    )
+                }
+            } finally {
+                mediaSubkey.fill(0)
+            }
+        }
+
+        // Build folder and lock entries
         val folderEntries = folders.map { f ->
             BackupFolderEntry(
                 id = f.id,
@@ -82,30 +236,6 @@ class VaultBackupExporter(
             )
         }
 
-        val mediaEntries = mediaItems.map { m ->
-            val hasThumb = m.encryptedThumbRelativePath != null && fileStore.getThumbFile(vaultId, m.id).exists()
-            val hasPreview = m.encryptedPreviewRelativePath != null && fileStore.getPreviewFile(vaultId, m.id).exists()
-            BackupMediaItemEntry(
-                id = m.id,
-                folderId = m.folderId,
-                mediaTypeCode = m.mediaTypeCode,
-                encryptedMetadataHex = m.encryptedMetadata.toHex(),
-                plaintextSize = m.plaintextSize,
-                cipherSize = m.cipherSize,
-                sha256Hex = m.sha256Hex,
-                importedAt = m.importedAt,
-                updatedAt = m.updatedAt,
-                favorite = m.favorite,
-                deletedAt = m.deletedAt,
-                previousFolderId = m.previousFolderId,
-                dateTakenMs = m.dateTakenMs,
-                cleanupStateCode = m.cleanupStateCode,
-                concealed = m.concealed,
-                hasThumb = hasThumb,
-                hasPreview = hasPreview
-            )
-        }
-
         val manifest = BackupManifest(
             archiveId = archiveId,
             version = BackupArchiveFormat.CURRENT_VERSION,
@@ -115,14 +245,15 @@ class VaultBackupExporter(
             vaultKindCode = vaultEntity.kindCode,
             folders = folderEntries,
             folderLocks = lockEntries,
-            mediaItems = mediaEntries
+            mediaItems = mediaEntries,
+            descriptors = descriptors
         )
 
         val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val normalized = keyManager.normalizeRecoverySecret(recoveryCodeInput)
         val secretBytes = normalized.toByteArray(Charsets.UTF_8)
         val recoveryKek = ByteArray(32)
-        val recoveryEnvelope: ByteArray
+        val portableRecoveryEnvelope: ByteArray
         val manifestNonce = Aead.generateNonce()
         val manifestCiphertext: ByteArray
         val manifestKey = ByteArray(32)
@@ -161,7 +292,7 @@ class VaultBackupExporter(
                 derivedManifestKey.fill(0)
                 Pair(env, key)
             }
-            recoveryEnvelope = envelope
+            portableRecoveryEnvelope = envelope
             System.arraycopy(mKey, 0, manifestKey, 0, 32)
             mKey.fill(0)
 
@@ -183,18 +314,10 @@ class VaultBackupExporter(
         }
 
         // Calculate total estimated bytes
-        var estimatedTotalBytes = 4L + 4 + 16 + 4 + recoveryEnvelope.size + 4 + 12 + manifestCiphertext.size + 4
-        for (m in mediaEntries) {
-            val mediaFile = fileStore.getMediaFile(vaultId, m.id)
-            if (mediaFile.exists()) estimatedTotalBytes += 1 + 2 + m.id.toByteArray(Charsets.UTF_8).size + 8 + mediaFile.length() + 32
-            if (m.hasThumb) {
-                val thumbFile = fileStore.getThumbFile(vaultId, m.id)
-                if (thumbFile.exists()) estimatedTotalBytes += 1 + 2 + m.id.toByteArray(Charsets.UTF_8).size + 8 + thumbFile.length() + 32
-            }
-            if (m.hasPreview) {
-                val prevFile = fileStore.getPreviewFile(vaultId, m.id)
-                if (prevFile.exists()) estimatedTotalBytes += 1 + 2 + m.id.toByteArray(Charsets.UTF_8).size + 8 + prevFile.length() + 32
-            }
+        var estimatedTotalBytes = 4L + 4 + 16 + 4 + portableRecoveryEnvelope.size + 4 + 12 + manifestCiphertext.size + 4
+        for (desc in descriptors) {
+            val idBytes = desc.itemId.toByteArray(Charsets.UTF_8)
+            estimatedTotalBytes += 1 + 2 + idBytes.size + 8 + desc.cipherLength + 32
         }
 
         val bufferedOut = BufferedOutputStream(outputStream, BackupArchiveFormat.BUFFER_SIZE)
@@ -206,17 +329,22 @@ class VaultBackupExporter(
         dos.write(BackupArchiveFormat.MAGIC)
         dos.writeInt(BackupArchiveFormat.CURRENT_VERSION)
         dos.write(salt)
-        dos.writeInt(recoveryEnvelope.size)
-        dos.write(recoveryEnvelope)
+        dos.writeInt(portableRecoveryEnvelope.size)
+        dos.write(portableRecoveryEnvelope)
         dos.writeInt(manifestCiphertext.size)
         dos.write(manifestNonce)
         dos.write(manifestCiphertext)
-        bytesWritten += 4 + 4 + 16 + 4 + recoveryEnvelope.size + 4 + 12 + manifestCiphertext.size
+        bytesWritten += 4 + 4 + 16 + 4 + portableRecoveryEnvelope.size + 4 + 12 + manifestCiphertext.size
 
         onProgress(bytesWritten, estimatedTotalBytes, 0, mediaEntries.size)
 
         fun writeStreamEntry(type: Byte, id: String, file: File) {
-            if (!file.exists()) return
+            if (!file.exists()) {
+                throw BackupException(
+                    BackupError.MISSING_MEDIA,
+                    "File disappeared during backup: ${file.name}"
+                )
+            }
             val idBytes = id.toByteArray(Charsets.UTF_8)
             require(idBytes.size <= Short.MAX_VALUE)
 
@@ -242,23 +370,19 @@ class VaultBackupExporter(
             bytesWritten += 32
         }
 
-        // Stream file entries
-        for (m in mediaEntries) {
-            val mediaFile = fileStore.getMediaFile(vaultId, m.id)
-            writeStreamEntry(BackupArchiveFormat.ENTRY_TYPE_MEDIA, m.id, mediaFile)
-
-            if (m.hasThumb) {
-                val thumbFile = fileStore.getThumbFile(vaultId, m.id)
-                writeStreamEntry(BackupArchiveFormat.ENTRY_TYPE_THUMB, m.id, thumbFile)
+        // Stream file entries according to descriptors
+        for (desc in descriptors) {
+            val file = when (desc.typeCode) {
+                BackupArchiveFormat.ENTRY_TYPE_MEDIA -> fileStore.getMediaFile(vaultId, desc.itemId)
+                BackupArchiveFormat.ENTRY_TYPE_THUMB -> fileStore.getThumbFile(vaultId, desc.itemId)
+                BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> fileStore.getPreviewFile(vaultId, desc.itemId)
+                else -> throw IllegalStateException("Unknown entry type ${desc.typeCode}")
             }
-
-            if (m.hasPreview) {
-                val prevFile = fileStore.getPreviewFile(vaultId, m.id)
-                writeStreamEntry(BackupArchiveFormat.ENTRY_TYPE_PREVIEW, m.id, prevFile)
+            writeStreamEntry(desc.typeCode, desc.itemId, file)
+            if (desc.typeCode == BackupArchiveFormat.ENTRY_TYPE_MEDIA) {
+                itemsWritten++
+                onProgress(bytesWritten, estimatedTotalBytes, itemsWritten, mediaEntries.size)
             }
-
-            itemsWritten++
-            onProgress(bytesWritten, estimatedTotalBytes, itemsWritten, mediaEntries.size)
         }
 
         // Write end marker

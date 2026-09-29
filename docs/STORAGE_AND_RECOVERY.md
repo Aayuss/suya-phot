@@ -83,18 +83,31 @@ Biometric PIN reset and recovery-code rotation are not exposed as completed prod
 
 ---
 
-## 6. Portable Encrypted Backup & Restore (.suyavault)
+## 6. Portable Encrypted Backup & Fail-Safe Restore (.suyavault v2)
 
-Suya Phot provides a fully self-contained, portable encrypted backup and migration system using the `.suyavault` archive specification.
+Suya Phot provides a fully self-contained, portable encrypted backup and migration system using the `.suyavault` archive specification (V2).
 
-### 6.1 Archive Format & Encryption
-- **Magic Header & Trailer**: `SYPB` (0x53595042) magic header, `SYED` (0x53594544) end trailer.
+### 6.1 Archive Format & Authenticated Descriptors (V2)
+- **Magic Header & Trailer**: `SYPB` (0x53595042) magic header, `SYED` (0x53594544) end marker.
+- **Archive Version**: Version 2 (`CURRENT_VERSION = 2`), supporting backward compatibility with version 1 readers/archives.
 - **Portable Master Key Unwrapping**: Encrypted using a KEK derived via HKDF-SHA256 from the user's 26-character Recovery Code (`info = "suya-vault-backup-kek:v1"`).
 - **Zero Hardware Pepper Dependency**: The backup is completely decoupled from the originating device's Android Keystore and hardware pepper, allowing seamless restore onto completely fresh devices, new Android versions, or replacement hardware without risk of permanent lock-out.
-- **Authenticated Entries**: Manifest JSON, media items, thumbnails, and previews are individually encrypted with AES-256-GCM using derived subkeys and authenticated with AADs bound to the archive ID.
+- **Authenticated Descriptors**: The encrypted manifest includes a list of authenticated `BackupFileDescriptor` entries recording entry type (`ENTRY_TYPE_MEDIA`, `ENTRY_TYPE_THUMB`, `ENTRY_TYPE_PREVIEW`), item ID, ciphertext length, and ciphertext SHA-256 hex.
+- **Body Authentication**: Media items, thumbnails, and previews are individually encrypted with AES-256-GCM using derived subkeys and authenticated with AADs bound to the archive ID, verified against their descriptors before commit.
 
-### 6.2 Streaming & Realistic Hardware Constraints
-- **Low-Memory Streaming**: File transfers use fixed 128 KB streaming buffers directly between private storage and Android Storage Access Framework (SAF) `OutputStream`/`InputStream`, operating safely under strict Android heap limits even with multi-gigabyte vaults containing tens of thousands of items.
-- **Keyset Paging & Windowing**: Database export and viewer navigation leverage windowed keyset queries (`ViewerWindow`) rather than loading 50k–100k item IDs into JVM memory at once.
-- **Fail-Safe Atomic Staging**: During restore, entries are extracted to an isolated staging directory (`staging_<archiveId>`). All SHA-256 checksums are verified before creating a new device-bound `PinEnvelope` and committing Room DB entities inside a transaction. In the event of an I/O error or hash mismatch, staging files are pruned cleanly and existing vault contents remain unmodified.
+### 6.2 Preflight & Post-Write Verification
+- **SHA-256 Preflight**: Before writing any bytes to the output stream, the exporter verifies the presence and integrity of all media files on disk via `vaultCrypto.verifyAndHash`.
+- **Post-Write SAF Verification**: After writing and syncing the file descriptor, the app re-opens the output URI from the Storage Access Framework and executes `backupVerifier.verifyFullArchive` to verify the written file before confirming success to the user.
+
+### 6.3 Fail-Safe Restore Invariant
+- **Never Destroys Existing Vaults**: To prevent accidental data loss, `VaultBackupImporter` strictly enforces `BackupError.RESTORE_REQUIRES_EMPTY_VAULT`. If a vault of the same kind already exists on the device, the restore operation is rejected before staging files or modifying the database.
+- **Isolated Staging**: Entries are extracted to an isolated staging directory (`staging_<archiveId>`). Media items are decrypted and verified against their descriptors. Corrupt optional derivatives (thumbnails/previews) are discarded without failing valid media.
+- **Atomic Database Commit**: All Room database entries are committed inside a single transaction after all media items have been verified and staged.
+
+### 6.4 Folder Lock Portability (Schema Version 5)
+- **Credential Reset Flag**: Database version 5 introduces `requiresCredentialReset` on `FolderLockEntity`.
+- **Post-Restore Security**: Restored folders have `requiresCredentialReset = true` and `biometric = null`. Users are prompted to set a new PIN or Pattern using their Recovery Kit before access is granted.
+
+### 6.5 Low-Memory Keyset Paging
+- **Continuous Keyset Paging**: The gallery and media viewer utilize index-backed keyset pagination (`fetchNextViewerBatch` and `fetchPreviousViewerBatch`) with window prefetching around the current viewer index, enabling fluid swiping across 50k+ media items without memory boundaries or JVM heap spikes.
 

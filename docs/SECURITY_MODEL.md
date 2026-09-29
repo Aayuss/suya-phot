@@ -7,12 +7,13 @@
 - Malicious apps on the device scanning public MediaStore or storage.
 - Extracted private application data without Android Keystore access.
 - Accidental screenshots, screen recordings, and Recents snapshots (`FLAG_SECURE`).
-- Coercion via secondary (decoy) PIN without leaking the existence of the real vault.
+- Coercion under casual inspection via secondary (decoy) PIN without in-app UI leakage of the real vault.
 
 ### Out of Scope / Fundamental Limits:
 - Compromised/rooted operating systems with kernel-level memory inspection while the vault is actively unlocked.
 - Hardware-level physical tampering. Keystore hardware backing is device-dependent and must be checked at runtime; it is not assumed as a universal guarantee.
 - Wear-leveling forensic overwrite guarantees on flash memory (plain flash overwrites do not guarantee physical erasure).
+- Forensic physical flash analysis: An adversary inspecting raw disk blocks or storage allocations may detect total storage usage differences between real and decoy vaults. Absolute plausible deniability against laboratory forensic extraction is not guaranteed.
 
 ---
 
@@ -80,3 +81,17 @@ The real vault supports either a six-digit PIN or a canonical 3×3 pattern. The 
 N..N+16: 128-bit GCM Authentication Tag
 ```
 Header bytes (0..43) are provided as Additional Authenticated Data (AAD) to ensure complete integrity.
+
+---
+
+## 5. Portable Backup Cryptography (.suyavault v2)
+
+1. **Recovery Code Derivation**:
+   - Master key is wrapped under a KEK derived from the 26-character Base32 Recovery Code via HKDF-SHA256 (`info = "suya-vault-backup-kek:v1"`).
+   - Zero dependence on origin hardware keystore or pepper allows migration across devices.
+2. **Authenticated Descriptors**:
+   - Manifest contains authenticated descriptors (`BackupFileDescriptor`) with SHA-256 digests and cipher lengths for each item.
+3. **Fail-Safe Restore Invariant**:
+   - Restore rejects execution if a vault of the same kind already exists (`RESTORE_REQUIRES_EMPTY_VAULT`), protecting against accidental vault overwriting.
+4. **Folder Credential Invalidation**:
+   - Restored folder locks have `requiresCredentialReset = true` and `biometric = null`, preventing unauthorized access until reset with the Recovery Kit on the destination device.

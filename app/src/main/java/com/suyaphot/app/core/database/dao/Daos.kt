@@ -151,8 +151,11 @@ interface FolderLockDao {
     @Query("UPDATE folder_locks SET biometricEnvelope = :envelope, biometricIv = :iv, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
     suspend fun updateBiometric(vaultId: String, lockId: String, envelope: ByteArray?, iv: ByteArray?, now: Long): Int
 
-    @Query("UPDATE folder_locks SET credentialEnvelope = :envelope, credentialTypeCode = :typeCode, recoveryEnvelope = :recoveryEnvelope, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
+    @Query("UPDATE folder_locks SET credentialEnvelope = :envelope, credentialTypeCode = :typeCode, recoveryEnvelope = :recoveryEnvelope, requiresCredentialReset = 0, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
     suspend fun updateCredential(vaultId: String, lockId: String, envelope: ByteArray, typeCode: Int, recoveryEnvelope: ByteArray?, now: Long): Int
+
+    @Query("UPDATE folder_locks SET credentialEnvelope = :envelope, credentialTypeCode = :typeCode, recoveryEnvelope = :recoveryEnvelope, requiresCredentialReset = 0, biometricEnvelope = NULL, biometricIv = NULL, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
+    suspend fun resetCredentialFromRecovery(vaultId: String, lockId: String, envelope: ByteArray, typeCode: Int, recoveryEnvelope: ByteArray?, now: Long): Int
 
     @Query("UPDATE folder_locks SET recoveryEnvelope = :recoveryEnvelope, updatedAt = :now WHERE vaultId = :vaultId AND id = :lockId")
     suspend fun updateRecovery(vaultId: String, lockId: String, recoveryEnvelope: ByteArray, now: Long): Int

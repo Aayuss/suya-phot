@@ -132,6 +132,29 @@ data class BackupMediaItemEntry(
     }
 }
 
+data class BackupFileDescriptor(
+    val typeCode: Byte,
+    val itemId: String,
+    val cipherLength: Long,
+    val cipherSha256Hex: String
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("typeCode", typeCode.toInt())
+        put("itemId", itemId)
+        put("cipherLength", cipherLength)
+        put("cipherSha256Hex", cipherSha256Hex)
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject): BackupFileDescriptor = BackupFileDescriptor(
+            typeCode = json.getInt("typeCode").toByte(),
+            itemId = json.getString("itemId"),
+            cipherLength = json.getLong("cipherLength"),
+            cipherSha256Hex = json.getString("cipherSha256Hex")
+        )
+    }
+}
+
 data class BackupManifest(
     val archiveId: String,
     val version: Int,
@@ -141,7 +164,8 @@ data class BackupManifest(
     val vaultKindCode: Int,
     val folders: List<BackupFolderEntry>,
     val folderLocks: List<BackupFolderLockEntry>,
-    val mediaItems: List<BackupMediaItemEntry>
+    val mediaItems: List<BackupMediaItemEntry>,
+    val descriptors: List<BackupFileDescriptor> = emptyList()
 ) {
     fun toJsonString(): String {
         val root = JSONObject().apply {
@@ -160,6 +184,9 @@ data class BackupManifest(
             val mediaArr = JSONArray()
             mediaItems.forEach { mediaArr.put(it.toJson()) }
             put("mediaItems", mediaArr)
+            val descArr = JSONArray()
+            descriptors.forEach { descArr.put(it.toJson()) }
+            put("descriptors", descArr)
         }
         return root.toString()
     }
@@ -182,6 +209,16 @@ data class BackupManifest(
             for (i in 0 until mediaArr.length()) {
                 mediaList.add(BackupMediaItemEntry.fromJson(mediaArr.getJSONObject(i)))
             }
+            val descList = if (root.has("descriptors")) {
+                val descArr = root.getJSONArray("descriptors")
+                val list = ArrayList<BackupFileDescriptor>(descArr.length())
+                for (i in 0 until descArr.length()) {
+                    list.add(BackupFileDescriptor.fromJson(descArr.getJSONObject(i)))
+                }
+                list
+            } else {
+                emptyList()
+            }
             return BackupManifest(
                 archiveId = root.getString("archiveId"),
                 version = root.getInt("version"),
@@ -191,7 +228,8 @@ data class BackupManifest(
                 vaultKindCode = root.getInt("vaultKindCode"),
                 folders = foldersList,
                 folderLocks = locksList,
-                mediaItems = mediaList
+                mediaItems = mediaList,
+                descriptors = descList
             )
         }
     }

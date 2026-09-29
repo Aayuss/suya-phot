@@ -154,10 +154,19 @@ class AppContainer(val context: Context) {
     }
 
     val vaultBackupExporter: VaultBackupExporter by lazy {
-        VaultBackupExporter(database, vaultFileStore, keyManager, sessionManager)
+        VaultBackupExporter(database, vaultFileStore, keyManager, sessionManager, vaultCrypto)
     }
 
     val vaultBackupImporter: VaultBackupImporter by lazy {
-        VaultBackupImporter(context, database, vaultFileStore, keyManager, folderPrivacyCoordinator)
+        VaultBackupImporter(
+            context = context,
+            database = database,
+            fileStore = vaultFileStore,
+            keyManager = keyManager,
+            privacyCoordinator = folderPrivacyCoordinator,
+            vaultCrypto = vaultCrypto,
+            sessionManager = sessionManager,
+            accessManager = folderAccessManager
+        )
     }
 }

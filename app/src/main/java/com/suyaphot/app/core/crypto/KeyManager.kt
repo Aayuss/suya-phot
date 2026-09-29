@@ -32,7 +32,7 @@ class KeyManager(
         const val PIN_SALT_LEN = 16
         const val MASTER_KEY_LEN = 32
 
-        private const val BASE32_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // Crockford-style Base32
+        const val BASE32_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // Crockford-style Base32
     }
 
     data class PinEnvelope(
@@ -289,7 +289,7 @@ class KeyManager(
 
     /**
      * Normalizes a recovery secret input (removes dashes, spaces, uppercases).
-     * Enforces exactly 26 characters (full 128-bit entropy).
+     * Enforces exactly 26 characters (full 128-bit entropy) and the canonical Base32 alphabet.
      */
     fun normalizeRecoverySecret(input: String): String {
         val normalized = input.replace("-", "")
@@ -299,7 +299,24 @@ class KeyManager(
         require(normalized.length == 26) {
             "Recovery code must be exactly 26 characters (128-bit entropy), got ${normalized.length}"
         }
+        for (c in normalized) {
+            require(c in BASE32_ALPHABET) {
+                "Invalid character '$c' in recovery code. Must only contain characters from Base32 alphabet ($BASE32_ALPHABET)."
+            }
+        }
         return normalized
+    }
+
+    /**
+     * Validates whether a given raw or formatted recovery secret is valid.
+     */
+    fun isValidRecoverySecret(secret: String): Boolean {
+        return try {
+            normalizeRecoverySecret(secret)
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /**

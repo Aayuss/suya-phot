@@ -61,7 +61,8 @@ class GalleryRepository(private val dao: MediaItemDao, private val access: Folde
 data class ViewerWindow(
     val ids: List<String>,
     val currentIndex: Int,
-    val totalCount: Int
+    val totalCount: Int,
+    val absoluteStart: Int = 0
 )
 
     suspend fun viewerWindow(
@@ -72,13 +73,13 @@ data class ViewerWindow(
     ): ViewerWindow = when (collection) {
         is ViewerCollection.Folder -> {
             if (collection.folderId != null && !access.canOpen(vaultId, collection.folderId)) {
-                ViewerWindow(emptyList(), 0, 0)
+                ViewerWindow(emptyList(), 0, 0, 0)
             } else {
                 val total = dao.countAuthorizedInFolder(vaultId, collection.folderId)
                 if (total <= windowSize) {
                     val all = dao.getAllIdsInFolder(vaultId, collection.folderId)
                     val idx = all.indexOf(aroundId).coerceAtLeast(0)
-                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total)
+                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total, 0)
                 } else {
                     val targetEntity = dao.getItemForVault(aroundId, vaultId)
                     val offset = if (targetEntity != null) {
@@ -91,7 +92,7 @@ data class ViewerWindow(
                     val slice = dao.getPagedIdsInFolder(vaultId, collection.folderId, windowSize, offset)
                     val finalSlice = if (aroundId in slice) slice else listOf(aroundId) + slice
                     val idx = finalSlice.indexOf(aroundId).coerceAtLeast(0)
-                    ViewerWindow(finalSlice, idx, total)
+                    ViewerWindow(finalSlice, idx, total, offset)
                 }
             }
         }
@@ -103,13 +104,13 @@ data class ViewerWindow(
                 val total = all.size
                 if (total <= windowSize) {
                     val idx = all.indexOf(aroundId).coerceAtLeast(0)
-                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total)
+                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total, 0)
                 } else {
                     val idx = all.indexOf(aroundId).coerceAtLeast(0)
                     val start = (idx - windowSize / 2).coerceIn(0, (total - windowSize).coerceAtLeast(0))
                     val slice = all.subList(start, start + windowSize)
                     val finalSlice = if (aroundId in slice) slice else listOf(aroundId) + slice
-                    ViewerWindow(finalSlice, finalSlice.indexOf(aroundId).coerceAtLeast(0), total)
+                    ViewerWindow(finalSlice, finalSlice.indexOf(aroundId).coerceAtLeast(0), total, start)
                 }
             } else {
                 val filterSql = when (collection.filter) {
@@ -129,7 +130,7 @@ data class ViewerWindow(
                         arrayOf(vaultId)
                     ))
                     val idx = all.indexOf(aroundId).coerceAtLeast(0)
-                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total)
+                    ViewerWindow(if (aroundId in all) all else listOf(aroundId) + all, idx, total, 0)
                 } else {
                     val rowNumRows = dao.viewerIds(SimpleSQLiteQuery(
                         "SELECT CAST(row_num AS TEXT) FROM (SELECT id, (ROW_NUMBER() OVER (ORDER BY $orderSql)) - 1 AS row_num FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql) WHERE id = ?",
@@ -143,7 +144,190 @@ data class ViewerWindow(
                     ))
                     val finalSlice = if (aroundId in slice) slice else listOf(aroundId) + slice
                     val idx = finalSlice.indexOf(aroundId).coerceAtLeast(0)
-                    ViewerWindow(finalSlice, idx, total)
+                    ViewerWindow(finalSlice, idx, total, offset)
+                }
+            }
+        }
+    }
+
+    suspend fun fetchNextViewerBatch(
+        vaultId: String,
+        collection: ViewerCollection,
+        afterId: String,
+        limit: Int = 40
+    ): List<String> = when (collection) {
+        is ViewerCollection.Folder -> {
+            if (collection.folderId != null && !access.canOpen(vaultId, collection.folderId)) {
+                emptyList()
+            } else {
+                val target = dao.getItemForVault(afterId, vaultId) ?: return emptyList()
+                val sql = "SELECT id FROM media_items WHERE vaultId = ? AND folderId IS ? AND deletedAt IS NULL AND (? IS NOT NULL OR concealed = 0) AND (importedAt < ? OR (importedAt = ? AND id < ?)) ORDER BY importedAt DESC, id DESC LIMIT ?"
+                dao.viewerIds(SimpleSQLiteQuery(sql, arrayOf(vaultId, collection.folderId, collection.folderId, target.importedAt, target.importedAt, afterId, limit)))
+            }
+        }
+        is ViewerCollection.Gallery -> {
+            val searchIds = collection.searchIds
+            if (searchIds != null) {
+                val visible = dao.getAllVisibleIdsForFilter(vaultId, collection.filter.ordinal).toHashSet()
+                val all = searchIds.filter { it in visible }
+                val idx = all.indexOf(afterId)
+                if (idx != -1 && idx + 1 < all.size) {
+                    all.subList(idx + 1, (idx + 1 + limit).coerceAtMost(all.size))
+                } else emptyList()
+            } else {
+                val target = dao.getItemForVault(afterId, vaultId) ?: return emptyList()
+                val filterSql = when (collection.filter) {
+                    GalleryFilter.ALL -> ""
+                    GalleryFilter.PHOTOS -> " AND mediaTypeCode = 0"
+                    GalleryFilter.VIDEOS -> " AND mediaTypeCode = 1"
+                    GalleryFilter.FAVORITES -> " AND favorite = 1"
+                }
+                val (predicate, order, args) = buildKeysetQuery(collection.sort, target, isNext = true, vaultId = vaultId, limit = limit)
+                dao.viewerIds(SimpleSQLiteQuery("SELECT id FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql AND $predicate ORDER BY $order LIMIT ?", args))
+            }
+        }
+    }
+
+    suspend fun fetchPreviousViewerBatch(
+        vaultId: String,
+        collection: ViewerCollection,
+        beforeId: String,
+        limit: Int = 40
+    ): List<String> = when (collection) {
+        is ViewerCollection.Folder -> {
+            if (collection.folderId != null && !access.canOpen(vaultId, collection.folderId)) {
+                emptyList()
+            } else {
+                val target = dao.getItemForVault(beforeId, vaultId) ?: return emptyList()
+                val sql = "SELECT id FROM media_items WHERE vaultId = ? AND folderId IS ? AND deletedAt IS NULL AND (? IS NOT NULL OR concealed = 0) AND (importedAt > ? OR (importedAt = ? AND id > ?)) ORDER BY importedAt ASC, id ASC LIMIT ?"
+                val ascIds = dao.viewerIds(SimpleSQLiteQuery(sql, arrayOf(vaultId, collection.folderId, collection.folderId, target.importedAt, target.importedAt, beforeId, limit)))
+                ascIds.reversed()
+            }
+        }
+        is ViewerCollection.Gallery -> {
+            val searchIds = collection.searchIds
+            if (searchIds != null) {
+                val visible = dao.getAllVisibleIdsForFilter(vaultId, collection.filter.ordinal).toHashSet()
+                val all = searchIds.filter { it in visible }
+                val idx = all.indexOf(beforeId)
+                if (idx > 0) {
+                    all.subList((idx - limit).coerceAtLeast(0), idx)
+                } else emptyList()
+            } else {
+                val target = dao.getItemForVault(beforeId, vaultId) ?: return emptyList()
+                val filterSql = when (collection.filter) {
+                    GalleryFilter.ALL -> ""
+                    GalleryFilter.PHOTOS -> " AND mediaTypeCode = 0"
+                    GalleryFilter.VIDEOS -> " AND mediaTypeCode = 1"
+                    GalleryFilter.FAVORITES -> " AND favorite = 1"
+                }
+                val (predicate, order, args) = buildKeysetQuery(collection.sort, target, isNext = false, vaultId = vaultId, limit = limit)
+                val ascIds = dao.viewerIds(SimpleSQLiteQuery("SELECT id FROM media_items WHERE vaultId = ? AND deletedAt IS NULL AND concealed = 0$filterSql AND $predicate ORDER BY $order LIMIT ?", args))
+                ascIds.reversed()
+            }
+        }
+    }
+
+    private data class KeysetParams(val predicate: String, val orderClause: String, val args: Array<Any>)
+
+    private fun buildKeysetQuery(
+        sort: String,
+        target: MediaItemEntity,
+        isNext: Boolean,
+        vaultId: String,
+        limit: Int
+    ): KeysetParams {
+        return when (sort) {
+            "DATE_TAKEN_ASC" -> {
+                val targetTime = target.dateTakenMs ?: target.importedAt
+                if (isNext) {
+                    KeysetParams(
+                        predicate = "(COALESCE(dateTakenMs, importedAt) > ? OR (COALESCE(dateTakenMs, importedAt) = ? AND id > ?))",
+                        orderClause = "COALESCE(dateTakenMs, importedAt) ASC, id ASC",
+                        args = arrayOf(vaultId, targetTime, targetTime, target.id, limit)
+                    )
+                } else {
+                    KeysetParams(
+                        predicate = "(COALESCE(dateTakenMs, importedAt) < ? OR (COALESCE(dateTakenMs, importedAt) = ? AND id < ?))",
+                        orderClause = "COALESCE(dateTakenMs, importedAt) DESC, id DESC",
+                        args = arrayOf(vaultId, targetTime, targetTime, target.id, limit)
+                    )
+                }
+            }
+            "IMPORTED_ASC" -> {
+                if (isNext) {
+                    KeysetParams(
+                        predicate = "(importedAt > ? OR (importedAt = ? AND id > ?))",
+                        orderClause = "importedAt ASC, id ASC",
+                        args = arrayOf(vaultId, target.importedAt, target.importedAt, target.id, limit)
+                    )
+                } else {
+                    KeysetParams(
+                        predicate = "(importedAt < ? OR (importedAt = ? AND id < ?))",
+                        orderClause = "importedAt DESC, id DESC",
+                        args = arrayOf(vaultId, target.importedAt, target.importedAt, target.id, limit)
+                    )
+                }
+            }
+            "IMPORTED_DESC" -> {
+                if (isNext) {
+                    KeysetParams(
+                        predicate = "(importedAt < ? OR (importedAt = ? AND id < ?))",
+                        orderClause = "importedAt DESC, id DESC",
+                        args = arrayOf(vaultId, target.importedAt, target.importedAt, target.id, limit)
+                    )
+                } else {
+                    KeysetParams(
+                        predicate = "(importedAt > ? OR (importedAt = ? AND id > ?))",
+                        orderClause = "importedAt ASC, id ASC",
+                        args = arrayOf(vaultId, target.importedAt, target.importedAt, target.id, limit)
+                    )
+                }
+            }
+            "SIZE_DESC" -> {
+                if (isNext) {
+                    KeysetParams(
+                        predicate = "(plaintextSize < ? OR (plaintextSize = ? AND id < ?))",
+                        orderClause = "plaintextSize DESC, id DESC",
+                        args = arrayOf(vaultId, target.plaintextSize, target.plaintextSize, target.id, limit)
+                    )
+                } else {
+                    KeysetParams(
+                        predicate = "(plaintextSize > ? OR (plaintextSize = ? AND id > ?))",
+                        orderClause = "plaintextSize ASC, id ASC",
+                        args = arrayOf(vaultId, target.plaintextSize, target.plaintextSize, target.id, limit)
+                    )
+                }
+            }
+            "SIZE_ASC" -> {
+                if (isNext) {
+                    KeysetParams(
+                        predicate = "(plaintextSize > ? OR (plaintextSize = ? AND id > ?))",
+                        orderClause = "plaintextSize ASC, id ASC",
+                        args = arrayOf(vaultId, target.plaintextSize, target.plaintextSize, target.id, limit)
+                    )
+                } else {
+                    KeysetParams(
+                        predicate = "(plaintextSize < ? OR (plaintextSize = ? AND id < ?))",
+                        orderClause = "plaintextSize DESC, id DESC",
+                        args = arrayOf(vaultId, target.plaintextSize, target.plaintextSize, target.id, limit)
+                    )
+                }
+            }
+            else -> { // "DATE_TAKEN_DESC"
+                val targetTime = target.dateTakenMs ?: target.importedAt
+                if (isNext) {
+                    KeysetParams(
+                        predicate = "(COALESCE(dateTakenMs, importedAt) < ? OR (COALESCE(dateTakenMs, importedAt) = ? AND id < ?))",
+                        orderClause = "COALESCE(dateTakenMs, importedAt) DESC, id DESC",
+                        args = arrayOf(vaultId, targetTime, targetTime, target.id, limit)
+                    )
+                } else {
+                    KeysetParams(
+                        predicate = "(COALESCE(dateTakenMs, importedAt) > ? OR (COALESCE(dateTakenMs, importedAt) = ? AND id > ?))",
+                        orderClause = "COALESCE(dateTakenMs, importedAt) ASC, id ASC",
+                        args = arrayOf(vaultId, targetTime, targetTime, target.id, limit)
+                    )
                 }
             }
         }

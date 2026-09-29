@@ -129,6 +129,10 @@ fun MediaViewerScreen(
     var ids by remember(itemId, collection) { mutableStateOf(listOf(itemId)) }
     val pager = rememberPagerState { ids.size }
     var zoomed by remember { mutableStateOf(false) }
+    var isFetchingNext by remember { mutableStateOf(false) }
+    var isFetchingPrev by remember { mutableStateOf(false) }
+    var reachedStart by remember { mutableStateOf(false) }
+    var reachedEnd by remember { mutableStateOf(false) }
 
     LaunchedEffect(vaultId, itemId, collection) {
         val id = vaultId ?: return@LaunchedEffect
@@ -137,6 +141,56 @@ fun MediaViewerScreen(
         }
         ids = if (window.ids.isNotEmpty()) window.ids else listOf(itemId)
         pager.scrollToPage(window.currentIndex.coerceIn(0, (ids.size - 1).coerceAtLeast(0)))
+        reachedStart = window.absoluteStart == 0
+        reachedEnd = (window.absoluteStart + window.ids.size) >= window.totalCount
+    }
+
+    LaunchedEffect(pager.currentPage, ids.size) {
+        val id = vaultId ?: return@LaunchedEffect
+        val currentIdx = pager.currentPage
+
+        // Near end of window: fetch next batch
+        if (currentIdx >= ids.size - 10 && !isFetchingNext && !reachedEnd && ids.isNotEmpty()) {
+            isFetchingNext = true
+            val lastId = ids.last()
+            val nextBatch = withContext(Dispatchers.IO) {
+                container.galleryRepository.fetchNextViewerBatch(id, collection, lastId, limit = 40)
+            }
+            if (nextBatch.isNotEmpty()) {
+                val newUnique = nextBatch.filter { it !in ids }
+                if (newUnique.isNotEmpty()) {
+                    ids = ids + newUnique
+                } else {
+                    reachedEnd = true
+                }
+            } else {
+                reachedEnd = true
+            }
+            isFetchingNext = false
+        }
+
+        // Near start of window: fetch previous batch
+        if (currentIdx <= 10 && !isFetchingPrev && !reachedStart && ids.isNotEmpty()) {
+            isFetchingPrev = true
+            val firstId = ids.first()
+            val prevBatch = withContext(Dispatchers.IO) {
+                container.galleryRepository.fetchPreviousViewerBatch(id, collection, firstId, limit = 40)
+            }
+            if (prevBatch.isNotEmpty()) {
+                val newUnique = prevBatch.filter { it !in ids }
+                if (newUnique.isNotEmpty()) {
+                    val currentItemId = ids.getOrNull(currentIdx)
+                    ids = newUnique + ids
+                    val newIndex = if (currentItemId != null) ids.indexOf(currentItemId) else currentIdx + newUnique.size
+                    pager.scrollToPage(newIndex.coerceIn(0, (ids.size - 1).coerceAtLeast(0)))
+                } else {
+                    reachedStart = true
+                }
+            } else {
+                reachedStart = true
+            }
+            isFetchingPrev = false
+        }
     }
 
     LaunchedEffect(pager.settledPage) { zoomed = false }

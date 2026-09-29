@@ -5,13 +5,18 @@ import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.HkdfSha256
 import com.suyaphot.app.core.crypto.KeyManager
+import com.suyaphot.app.core.crypto.VaultCrypto
 import com.suyaphot.app.core.database.SuyaDatabase
 import com.suyaphot.app.core.database.entity.FolderEntity
 import com.suyaphot.app.core.database.entity.FolderLockEntity
 import com.suyaphot.app.core.database.entity.MediaItemEntity
 import com.suyaphot.app.core.database.entity.VaultEntity
+import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
+import com.suyaphot.app.domain.auth.LockReason
+import com.suyaphot.app.domain.auth.SessionManager
+import com.suyaphot.app.domain.folders.FolderAccessManager
 import com.suyaphot.app.domain.folders.FolderPrivacyCoordinator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -20,7 +25,6 @@ import java.io.DataInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
-import java.nio.ByteBuffer
 import java.security.MessageDigest
 
 data class BackupRestoreResult(
@@ -34,8 +38,13 @@ class VaultBackupImporter(
     private val database: SuyaDatabase,
     private val fileStore: VaultFileStore,
     private val keyManager: KeyManager,
-    private val privacyCoordinator: FolderPrivacyCoordinator
+    private val privacyCoordinator: FolderPrivacyCoordinator,
+    private val vaultCrypto: VaultCrypto = VaultCrypto(),
+    private val sessionManager: SessionManager? = null,
+    private val accessManager: FolderAccessManager? = null
 ) {
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
     private fun String.decodeHex(): ByteArray {
         require(length % 2 == 0) { "Hex string must have an even length" }
@@ -55,206 +64,223 @@ class VaultBackupImporter(
     ): BackupRestoreResult = withContext(Dispatchers.IO) {
         val bufferedIn = BufferedInputStream(inputStream, BackupArchiveFormat.BUFFER_SIZE)
         val dis = DataInputStream(bufferedIn)
+        val verifier = BackupVerifier(keyManager)
 
-        // Read and verify header
-        val magic = ByteArray(4)
-        dis.readFully(magic)
-        require(magic.contentEquals(BackupArchiveFormat.MAGIC)) { "Not a valid Suya Phot backup archive" }
+        // 1. Decrypt header, master key, and manifest
+        val (manifest, masterKey) = verifier.decryptManifestAndMasterKey(dis, recoveryCodeInput)
 
-        val version = dis.readInt()
-        require(version == BackupArchiveFormat.CURRENT_VERSION) { "Unsupported backup version: $version" }
-
-        val salt = ByteArray(16)
-        dis.readFully(salt)
-
-        val envLen = dis.readInt()
-        require(envLen in 48..256) { "Invalid recovery envelope length: $envLen" }
-        val recoveryEnvelope = ByteArray(envLen)
-        dis.readFully(recoveryEnvelope)
-
-        val manifestLen = dis.readInt()
-        require(manifestLen in 16..10_000_000) { "Invalid manifest length: $manifestLen" }
-        val manifestNonce = ByteArray(12)
-        dis.readFully(manifestNonce)
-        val manifestCiphertext = ByteArray(manifestLen)
-        dis.readFully(manifestCiphertext)
-
-        var totalBytesRead = 4L + 4 + 16 + 4 + envLen + 4 + 12 + manifestLen
-
-        // Decrypt master key using recovery code
-        val normalized = keyManager.normalizeRecoverySecret(recoveryCodeInput)
-        val secretBytes = normalized.toByteArray(Charsets.UTF_8)
-        val recoveryKek = ByteArray(32)
-        val masterKey: ByteArray
-        try {
-            val derivedKek = HkdfSha256.derive(
-                ikm = secretBytes,
-                salt = salt,
-                info = BackupArchiveFormat.KEK_INFO.toByteArray(Charsets.UTF_8),
-                length = 32
+        // 2. FAIL-SAFE: reject restore immediately if a vault of the same kind already exists
+        val existingVault = database.vaultDao().getVaultByKind(manifest.vaultKindCode)
+        if (existingVault != null) {
+            masterKey.fill(0)
+            newCredential.fill('\u0000')
+            throw BackupException(
+                BackupError.RESTORE_REQUIRES_EMPTY_VAULT,
+                "A vault already exists on this device.\n\nFor safety, Suya Phot will not overwrite an existing vault during restore. Export the current vault first and restore the backup on a fresh installation or another device."
             )
-            System.arraycopy(derivedKek, 0, recoveryKek, 0, 32)
-            derivedKek.fill(0)
-
-            require(recoveryEnvelope.size >= 12 + 16) { "Truncated recovery envelope" }
-            val envNonce = recoveryEnvelope.copyOfRange(0, 12)
-            val envCiphertext = recoveryEnvelope.copyOfRange(12, recoveryEnvelope.size)
-
-            masterKey = try {
-                Aead.decrypt(
-                    keyBytes = recoveryKek,
-                    nonce = envNonce,
-                    aad = BackupArchiveFormat.RECOVERY_AAD.toByteArray(Charsets.UTF_8),
-                    ciphertext = envCiphertext
-                )
-            } catch (e: Exception) {
-                throw IllegalArgumentException("Incorrect Recovery Code or corrupted backup", e)
-            }
-        } finally {
-            secretBytes.fill(0)
-            recoveryKek.fill(0)
         }
 
-        // Decrypt manifest
-        val manifestKey = ByteArray(32)
-        val manifest: BackupManifest
-        try {
-            val derivedManifestKey = HkdfSha256.derive(
-                ikm = masterKey,
-                salt = salt,
-                info = BackupArchiveFormat.MANIFEST_KEY_INFO.toByteArray(Charsets.UTF_8),
-                length = 32
-            )
-            System.arraycopy(derivedManifestKey, 0, manifestKey, 0, 32)
-            derivedManifestKey.fill(0)
-
-            val manifestPlain = try {
-                Aead.decrypt(
-                    keyBytes = manifestKey,
-                    nonce = manifestNonce,
-                    aad = BackupArchiveFormat.MANIFEST_AAD.toByteArray(Charsets.UTF_8),
-                    ciphertext = manifestCiphertext
-                )
-            } catch (e: Exception) {
-                throw IllegalStateException("Failed to decrypt backup manifest", e)
-            }
-
-            try {
-                manifest = BackupManifest.fromJsonString(manifestPlain.toString(Charsets.UTF_8))
-            } finally {
-                manifestPlain.fill(0)
-            }
-        } finally {
-            manifestKey.fill(0)
-        }
+        // 3. Validate untrusted manifest structure
+        validateManifestStructure(manifest)
 
         val stagingDir = File(context.noBackupFilesDir, "staging_${manifest.archiveId}").apply {
             if (exists()) deleteRecursively()
             mkdirs()
         }
 
-        var itemsRead = 0
+        val descriptorMap = manifest.descriptors.associateBy { Pair(it.typeCode, it.itemId) }
+        val seenEntries = HashSet<Pair<Byte, String>>()
+        val stagedMediaFiles = HashMap<String, File>()
+        val stagedThumbFiles = HashMap<String, File>()
+        val stagedPreviewFiles = HashMap<String, File>()
+
+        val buffer = ByteArray(BackupArchiveFormat.BUFFER_SIZE)
+        var reachedEnd = false
+        var bytesRead = 0L
         val totalExpectedItems = manifest.mediaItems.size
-        var totalEstimatedBytes = totalBytesRead + manifest.mediaItems.sumOf { it.cipherSize + 32 }
+        var totalEstimatedBytes = manifest.mediaItems.sumOf { it.cipherSize + 32 }
+        var itemsRead = 0
 
         try {
-            // Read entries
-            val buffer = ByteArray(BackupArchiveFormat.BUFFER_SIZE)
-            var reachedEnd = false
-
+            // 4. Stream entries and stage to temporary files
             while (!reachedEnd) {
                 val nextByte = dis.read()
                 if (nextByte == -1) {
-                    throw IllegalStateException("Unexpected end of archive stream before end marker")
+                    throw BackupException(BackupError.INVALID_ARCHIVE, "Unexpected end of archive stream before end marker")
                 }
 
                 if (nextByte.toByte() == BackupArchiveFormat.END_MARKER[0]) {
                     val remainingEnd = ByteArray(3)
                     dis.readFully(remainingEnd)
                     val fullEnd = byteArrayOf(nextByte.toByte(), remainingEnd[0], remainingEnd[1], remainingEnd[2])
-                    require(fullEnd.contentEquals(BackupArchiveFormat.END_MARKER)) {
-                        "Corrupted archive termination marker"
+                    if (!fullEnd.contentEquals(BackupArchiveFormat.END_MARKER)) {
+                        throw BackupException(BackupError.INVALID_ARCHIVE, "Corrupted archive termination marker")
                     }
-                    totalBytesRead += 4
+                    bytesRead += 4
                     reachedEnd = true
                     break
                 }
 
-                val typeByte = nextByte.toByte()
-                require(
-                    typeByte == BackupArchiveFormat.ENTRY_TYPE_MEDIA ||
-                    typeByte == BackupArchiveFormat.ENTRY_TYPE_THUMB ||
-                    typeByte == BackupArchiveFormat.ENTRY_TYPE_PREVIEW
-                ) { "Unknown entry type: $typeByte" }
-
-                val idLen = dis.readShort().toInt()
-                require(idLen in 1..256) { "Invalid entry id length: $idLen" }
-                val idBytes = ByteArray(idLen)
+                val entryType = nextByte.toByte()
+                val idLength = dis.readShort().toInt() and 0xFFFF
+                if (idLength !in 1..256) {
+                    throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid entry ID length: $idLength")
+                }
+                val idBytes = ByteArray(idLength)
                 dis.readFully(idBytes)
-                val id = String(idBytes, Charsets.UTF_8)
-
-                val cipherLength = dis.readLong()
-                require(cipherLength >= 0) { "Negative cipher length: $cipherLength" }
-                totalBytesRead += 1 + 2 + idLen + 8
-
-                val typePrefix = when (typeByte) {
-                    BackupArchiveFormat.ENTRY_TYPE_MEDIA -> "media"
-                    BackupArchiveFormat.ENTRY_TYPE_THUMB -> "thumb"
-                    BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> "preview"
-                    else -> "unknown"
+                val entryId = idBytes.toString(Charsets.UTF_8)
+                val entryLength = dis.readLong()
+                if (entryLength < 0 || entryLength > 100_000_000_000L) {
+                    throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid entry body length: $entryLength")
                 }
-                val stagedFile = File(stagingDir, "${typePrefix}_$id.bin")
+                bytesRead += 1 + 2 + idLength + 8
 
-                val digest = MessageDigest.getInstance("SHA-256")
-                var remaining = cipherLength
-                FileOutputStream(stagedFile).use { fos ->
-                    while (remaining > 0) {
-                        val toRead = remaining.coerceAtMost(buffer.size.toLong()).toInt()
-                        val count = dis.read(buffer, 0, toRead)
-                        if (count == -1) throw IllegalStateException("Premature end of file reading $id")
-                        fos.write(buffer, 0, count)
-                        digest.update(buffer, 0, count)
-                        remaining -= count
-                        totalBytesRead += count
-                        onProgress(totalBytesRead, totalEstimatedBytes, itemsRead, totalExpectedItems)
+                val key = Pair(entryType, entryId)
+                if (!seenEntries.add(key)) {
+                    throw BackupException(BackupError.INVALID_ARCHIVE, "Duplicate entry in backup: type=$entryType, id=$entryId")
+                }
+
+                val expectedDesc = descriptorMap[key]
+                if (manifest.version >= BackupArchiveFormat.VERSION_2) {
+                    if (expectedDesc == null) {
+                        throw BackupException(
+                            BackupError.INVALID_ARCHIVE,
+                            "Body entry ($entryType, $entryId) was not declared in authenticated descriptors"
+                        )
                     }
-                    fos.flush()
+                    if (expectedDesc.cipherLength != entryLength) {
+                        throw BackupException(
+                            BackupError.CORRUPT_MEDIA,
+                            "Declared body length ${expectedDesc.cipherLength} != entry length $entryLength for $entryId"
+                        )
+                    }
                 }
 
-                val expectedSha256 = ByteArray(32)
-                dis.readFully(expectedSha256)
-                totalBytesRead += 32
-                val computedSha256 = digest.digest()
+                val stagePrefix = when (entryType) {
+                    BackupArchiveFormat.ENTRY_TYPE_MEDIA -> "media_"
+                    BackupArchiveFormat.ENTRY_TYPE_THUMB -> "thumb_"
+                    BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> "preview_"
+                    else -> throw BackupException(BackupError.INVALID_ARCHIVE, "Unknown entry type $entryType")
+                }
+                val stagedFile = File(stagingDir, "${stagePrefix}$entryId.bin")
+                val digest = MessageDigest.getInstance("SHA-256")
 
-                require(computedSha256.contentEquals(expectedSha256)) {
-                    "Integrity check failed: checksum mismatch for $typePrefix item $id"
+                FileOutputStream(stagedFile).use { fos ->
+                    var remaining = entryLength
+                    while (remaining > 0L) {
+                        val toRead = remaining.coerceAtMost(buffer.size.toLong()).toInt()
+                        val r = dis.read(buffer, 0, toRead)
+                        if (r == -1) {
+                            throw BackupException(BackupError.INVALID_ARCHIVE, "Premature EOF in entry body for $entryId")
+                        }
+                        fos.write(buffer, 0, r)
+                        digest.update(buffer, 0, r)
+                        bytesRead += r
+                        remaining -= r
+                    }
                 }
 
-                if (typeByte == BackupArchiveFormat.ENTRY_TYPE_MEDIA) {
-                    itemsRead++
+                val computedSha256 = digest.digest().toHex()
+                val trailingSha = ByteArray(32)
+                dis.readFully(trailingSha)
+                bytesRead += 32
+                val trailingShaHex = trailingSha.toHex()
+
+                if (!computedSha256.equals(trailingShaHex, ignoreCase = true)) {
+                    throw BackupException(BackupError.CORRUPT_MEDIA, "Body SHA-256 mismatch for entry $entryId")
                 }
-                onProgress(totalBytesRead, totalEstimatedBytes, itemsRead, totalExpectedItems)
+
+                if (expectedDesc != null) {
+                    if (!expectedDesc.cipherSha256Hex.equals(computedSha256, ignoreCase = true)) {
+                        throw BackupException(
+                            BackupError.CORRUPT_MEDIA,
+                            "Authenticated descriptor SHA-256 mismatch for entry $entryId"
+                        )
+                    }
+                }
+
+                when (entryType) {
+                    BackupArchiveFormat.ENTRY_TYPE_MEDIA -> {
+                        stagedMediaFiles[entryId] = stagedFile
+                        itemsRead++
+                        onProgress(bytesRead, totalEstimatedBytes, itemsRead, totalExpectedItems)
+                    }
+                    BackupArchiveFormat.ENTRY_TYPE_THUMB -> stagedThumbFiles[entryId] = stagedFile
+                    BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> stagedPreviewFiles[entryId] = stagedFile
+                }
             }
 
-            // Create device-bound envelopes with hardware Keystore pepper
-            val newPinEnvelope = keyManager.createPinEnvelope(masterKey, newCredential)
-            val newRecoveryEnvelope = keyManager.createRecoveryEnvelope(masterKey, normalized)
+            // Check for unexpected trailing bytes
+            if (dis.read() != -1) {
+                throw BackupException(BackupError.INVALID_ARCHIVE, "Unexpected trailing bytes after archive end marker")
+            }
 
-            // Commit to database and file store inside transaction
-            database.withTransaction {
-                // If a vault with the same kind already exists on this device, remove it cleanly
-                val existingVault = database.vaultDao().getVaultByKind(manifest.vaultKindCode)
-                if (existingVault != null) {
-                    // Delete existing vault's files from disk
-                    val existingVaultDir = fileStore.getVaultDir(existingVault.id)
-                    if (existingVaultDir.exists()) {
-                        existingVaultDir.deleteRecursively()
-                    }
-                    // Remove from database (cascades to folders, locks, media)
-                    database.openHelper.writableDatabase.execSQL("DELETE FROM vaults WHERE id = '${existingVault.id}'")
+            // Verify that all required media items have bodies
+            for (m in manifest.mediaItems) {
+                if (!stagedMediaFiles.containsKey(m.id)) {
+                    throw BackupException(BackupError.MISSING_MEDIA, "Missing required media body for item ${m.id}")
                 }
+            }
 
-                // Insert restored Vault
+            // 5. Derive keys and perform full cryptographic verification of all staged media and metadata
+            val mediaSubkey = vaultCrypto.deriveMediaSubkey(masterKey)
+            val metaSubkey = vaultCrypto.deriveMetaSubkey(masterKey)
+
+            try {
+                for (m in manifest.mediaItems) {
+                    val stagedMedia = stagedMediaFiles[m.id]
+                        ?: throw BackupException(BackupError.MISSING_MEDIA, "Missing staged media for ${m.id}")
+
+                    // Verify SUPH ciphertext integrity and plaintext hash
+                    val verified = try {
+                        vaultCrypto.verifyAndHash(stagedMedia, mediaSubkey, m.id)
+                    } catch (e: Exception) {
+                        throw BackupException(BackupError.CORRUPT_MEDIA, "Media SUPH verification failed for ${m.id}", e)
+                    }
+
+                    if (verified.plaintextSize != m.plaintextSize) {
+                        throw BackupException(
+                            BackupError.CORRUPT_MEDIA,
+                            "Verified plaintextSize ${verified.plaintextSize} != manifest ${m.plaintextSize} for ${m.id}"
+                        )
+                    }
+                    if (!verified.sha256.toHex().equals(m.sha256Hex, ignoreCase = true)) {
+                        throw BackupException(
+                            BackupError.CORRUPT_MEDIA,
+                            "Verified plaintext sha256 mismatch for ${m.id}"
+                        )
+                    }
+
+                    // Verify encrypted metadata blob
+                    val metaBytes = m.encryptedMetadataHex.decodeHex()
+                    try {
+                        val decryptedMeta = Aead.decryptWithPrependedNonce(
+                            keyBytes = metaSubkey,
+                            payload = metaBytes,
+                            aad = m.id.toByteArray(Charsets.UTF_8)
+                        )
+                        try {
+                            PrivateMediaMetadata.deserialize(decryptedMeta)
+                        } finally {
+                            decryptedMeta.fill(0.toByte())
+                        }
+                    } catch (e: Exception) {
+                        throw BackupException(BackupError.CORRUPT_MEDIA, "Metadata AEAD verification failed for ${m.id}", e)
+                    }
+                }
+            } finally {
+                mediaSubkey.fill(0)
+                metaSubkey.fill(0)
+            }
+
+            // 6. Wrap master key with the user's NEW credential and recovery code
+            val normalizedRecovery = keyManager.normalizeRecoverySecret(recoveryCodeInput)
+            val newPinEnvelope = keyManager.createPinEnvelope(masterKey, newCredential)
+            val newRecoveryEnvelope = keyManager.createRecoveryEnvelope(masterKey, normalizedRecovery)
+
+            // 7. Commit to database and move files inside Room transaction
+            database.withTransaction {
+                // Insert restored Vault Entity
                 database.vaultDao().insert(
                     VaultEntity(
                         id = manifest.vaultId,
@@ -289,7 +315,7 @@ class VaultBackupImporter(
                     )
                 }
 
-                // Insert Folder Locks
+                // Insert Folder Locks: cross-device restore marks requiresCredentialReset = true, biometric = null
                 for (l in manifest.folderLocks) {
                     database.folderLockDao().insert(
                         FolderLockEntity(
@@ -302,44 +328,41 @@ class VaultBackupImporter(
                             biometricIv = null,
                             recoveryEnvelope = l.recoveryEnvelopeHex?.decodeHex(),
                             createdAt = manifest.createdAt,
-                            updatedAt = manifest.createdAt
+                            updatedAt = manifest.createdAt,
+                            requiresCredentialReset = true
                         )
                     )
                 }
 
-                // Insert Media Items and move staged files
+                // Insert Media Items and move verified staged files into permanent vault directory
                 for (m in manifest.mediaItems) {
                     val mediaFile = fileStore.getMediaFile(manifest.vaultId, m.id)
-                    val stagedMedia = File(stagingDir, "media_${m.id}.bin")
-                    if (stagedMedia.exists()) {
+                    val stagedMedia = stagedMediaFiles[m.id]
+                    if (stagedMedia != null && stagedMedia.exists()) {
                         mediaFile.parentFile?.mkdirs()
                         if (mediaFile.exists()) mediaFile.delete()
                         check(stagedMedia.renameTo(mediaFile)) { "Failed to commit media file ${m.id}" }
                     }
 
                     var thumbRelPath: String? = null
-                    if (m.hasThumb) {
+                    val stagedThumb = stagedThumbFiles[m.id]
+                    if (stagedThumb != null && stagedThumb.exists()) {
                         val thumbFile = fileStore.getThumbFile(manifest.vaultId, m.id)
-                        val stagedThumb = File(stagingDir, "thumb_${m.id}.bin")
-                        if (stagedThumb.exists()) {
-                            thumbFile.parentFile?.mkdirs()
-                            if (thumbFile.exists()) thumbFile.delete()
-                            if (stagedThumb.renameTo(thumbFile)) {
-                                thumbRelPath = thumbFile.name
-                            }
+                        thumbFile.parentFile?.mkdirs()
+                        if (thumbFile.exists()) thumbFile.delete()
+                        if (stagedThumb.renameTo(thumbFile)) {
+                            thumbRelPath = thumbFile.name
                         }
                     }
 
                     var previewRelPath: String? = null
-                    if (m.hasPreview) {
+                    val stagedPreview = stagedPreviewFiles[m.id]
+                    if (stagedPreview != null && stagedPreview.exists()) {
                         val previewFile = fileStore.getPreviewFile(manifest.vaultId, m.id)
-                        val stagedPreview = File(stagingDir, "preview_${m.id}.bin")
-                        if (stagedPreview.exists()) {
-                            previewFile.parentFile?.mkdirs()
-                            if (previewFile.exists()) previewFile.delete()
-                            if (stagedPreview.renameTo(previewFile)) {
-                                previewRelPath = previewFile.name
-                            }
+                        previewFile.parentFile?.mkdirs()
+                        if (previewFile.exists()) previewFile.delete()
+                        if (stagedPreview.renameTo(previewFile)) {
+                            previewRelPath = previewFile.name
                         }
                     }
 
@@ -372,6 +395,11 @@ class VaultBackupImporter(
                 privacyCoordinator.recomputeInsideTransaction(manifest.vaultId)
             }
 
+            // 8. Post-restore security cleanup: lock session, clear folder grants and caches
+            sessionManager?.lock(LockReason.Explicit)
+            accessManager?.clear()
+            fileStore.clearEphemeralPlaintextCaches()
+
             SafeLog.i("VaultBackupImporter", "Restore complete. Restored ${manifest.mediaItems.size} items")
             BackupRestoreResult(
                 vaultId = manifest.vaultId,
@@ -382,6 +410,51 @@ class VaultBackupImporter(
             masterKey.fill(0)
             newCredential.fill('\u0000')
             stagingDir.deleteRecursively()
+        }
+    }
+
+    private fun validateManifestStructure(manifest: BackupManifest) {
+        val folderIds = HashSet<String>()
+        val lockIds = HashSet<String>()
+        val mediaIds = HashSet<String>()
+
+        for (f in manifest.folders) {
+            require(f.id.isNotBlank()) { "Empty folder ID in manifest" }
+            require(folderIds.add(f.id)) { "Duplicate folder ID: ${f.id}" }
+            if (f.parentId != null) {
+                require(f.parentId != f.id) { "Folder cannot be its own parent: ${f.id}" }
+            }
+        }
+
+        // Check for folder cycles and depth
+        for (f in manifest.folders) {
+            var curr = f.parentId
+            var depth = 0
+            while (curr != null) {
+                require(depth < 20) { "Folder hierarchy too deep or cycle detected at ${f.id}" }
+                require(curr != f.id) { "Folder cycle detected at ${f.id}" }
+                val parent = manifest.folders.find { it.id == curr }
+                require(parent != null) { "Missing parent folder $curr for ${f.id}" }
+                curr = parent.parentId
+                depth++
+            }
+        }
+
+        for (l in manifest.folderLocks) {
+            require(l.id.isNotBlank()) { "Empty lock ID in manifest" }
+            require(lockIds.add(l.id)) { "Duplicate lock ID: ${l.id}" }
+            require(folderIds.contains(l.folderId)) { "Folder lock references non-existent folder: ${l.folderId}" }
+        }
+
+        for (m in manifest.mediaItems) {
+            require(m.id.isNotBlank()) { "Empty media ID in manifest" }
+            require(mediaIds.add(m.id)) { "Duplicate media ID: ${m.id}" }
+            if (m.folderId != null) {
+                require(folderIds.contains(m.folderId)) { "Media references non-existent folder: ${m.folderId}" }
+            }
+            require(m.plaintextSize >= 0) { "Negative plaintextSize for ${m.id}" }
+            require(m.cipherSize >= 0) { "Negative cipherSize for ${m.id}" }
+            require(m.sha256Hex.length == 64) { "Invalid SHA256 hex length for ${m.id}" }
         }
     }
 }

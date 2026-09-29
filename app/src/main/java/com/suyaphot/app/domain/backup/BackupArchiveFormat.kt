@@ -3,7 +3,10 @@ package com.suyaphot.app.domain.backup
 object BackupArchiveFormat {
     val MAGIC = byteArrayOf(0x53, 0x59, 0x50, 0x42) // "SYPB" (Suya Phot Backup)
     val END_MARKER = byteArrayOf(0x53, 0x59, 0x45, 0x44) // "SYED" (Suya End Data)
-    const val CURRENT_VERSION = 1
+    const val VERSION_1 = 1
+    const val VERSION_2 = 2
+    const val CURRENT_VERSION = VERSION_2
+    val SUPPORTED_VERSIONS = setOf(VERSION_1, VERSION_2)
 
     const val ENTRY_TYPE_MEDIA: Byte = 0
     const val ENTRY_TYPE_THUMB: Byte = 1

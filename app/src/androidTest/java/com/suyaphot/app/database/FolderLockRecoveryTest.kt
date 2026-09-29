@@ -93,4 +93,44 @@ class FolderLockRecoveryTest {
             assertFalse(restarted.unlock(lockId, "2468".toCharArray(), 0))
         } finally { db.close() }
     }
+
+    @Test fun restoredFolderRequiresCredentialResetUntilRecoveryKitUsed() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
+        val pepper = object : PepperProvider {
+            override fun hmacSha256(input: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(input)
+        }
+        val keys = KeyManager(context, pepper)
+        val crypto = VaultCrypto()
+        val master = ByteArray(32) { 7 }
+        val recoveryCode = "ABCDEFGHJKLMNPQRSTUVWXYZ23"
+        val recoveryEnvelope = keys.createRecoveryEnvelope(master, recoveryCode).serialize()
+        val session = SessionManager(SecurityPreferences(context), CoroutineScope(Dispatchers.Unconfined))
+        val access = FolderAccessManager(db, session, CoroutineScope(Dispatchers.Unconfined))
+        val manager = FolderLockManager(db, keys, session, access, FolderPrivacyCoordinator(db), context)
+        try {
+            db.vaultDao().insert(VaultEntity("vault", 0, 1, 5, byteArrayOf(1), recoveryEnvelope))
+            db.folderDao().insert(FolderEntity("folder", "vault", null, byteArrayOf(1), 1, 1, null, 0))
+            session.unlock("vault", VaultKind.REAL, SensitiveKeyHandle(master.copyOf()),
+                crypto.deriveMediaSubkey(master), crypto.deriveMetaSubkey(master), crypto.deriveThumbSubkey(master))
+            assertTrue(manager.create("folder", "1234".toCharArray(), 0))
+            val lock = db.folderLockDao().getForFolder("vault", "folder")!!
+
+            // Simulate restore setting requiresCredentialReset = 1
+            db.openHelper.writableDatabase.execSQL("UPDATE folder_locks SET requiresCredentialReset = 1 WHERE id = '${lock.id}'")
+            val updated = db.folderLockDao().getForFolder("vault", "folder")!!
+            assertTrue(updated.requiresCredentialReset)
+
+            // Direct unlock must fail because credential reset is required
+            assertFalse(manager.unlock(lock.id, "1234".toCharArray(), 0))
+
+            // Resetting with recovery code must clear requiresCredentialReset
+            assertTrue(manager.resetWithRecovery("folder", recoveryCode, "5678".toCharArray(), 0))
+            val postReset = db.folderLockDao().getForFolder("vault", "folder")!!
+            assertFalse(postReset.requiresCredentialReset)
+
+            // Now unlocking with new PIN must succeed
+            assertTrue(manager.unlock(lock.id, "5678".toCharArray(), 0))
+        } finally { db.close() }
+    }
 }

@@ -156,14 +156,14 @@ class ImportRecoveryManager(
                 }
 
                 JobState.AWAITING_SOURCE_DELETE.code -> {
-                    // Vault copy is valid, awaiting confirmation of source deletion.
-                    // On app restart, resolve to COMPLETED so the job does not hang indefinitely.
-                    SafeLog.d("ImportRecoveryManager", "Resolving AWAITING_SOURCE_DELETE job on restart")
+                    // Vault copy is valid, but source deletion was interrupted by app termination.
+                    // The original item still remains in Gallery.
+                    SafeLog.i("ImportRecoveryManager", "Job ${job.id} interrupted during source deletion. Marking RETAINED_AFTER_INTERRUPTION.")
                     database.vaultJobDao().updateState(
                         id = job.id,
                         stateCode = JobState.COMPLETED.code,
                         now = now,
-                        errorCode = "SOURCE_DELETE_TERMINATED_ON_RESTART"
+                        errorCode = com.suyaphot.app.core.model.SourceDisposition.RETAINED_AFTER_INTERRUPTION.name
                     )
                 }
             }

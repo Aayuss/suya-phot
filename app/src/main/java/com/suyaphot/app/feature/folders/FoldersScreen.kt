@@ -285,7 +285,30 @@ fun FoldersScreen(
         }
     }
 
-    BackHandler(currentParentId != null || hiddenMode) { navigateUp() }
+    fun openLockEdit(target: Folder, recovery: Boolean) {
+        scope.launch {
+            val lock = container.database.folderLockDao().getForFolder(vaultId, target.id) ?: return@launch
+            if (recovery && lock.recoveryEnvelope == null) {
+                folderActionStatus = "This older lock has no recovery envelope. Unlock it and change the lock first."
+                selectedFolderForAction = null
+                return@launch
+            }
+            editLockFolderId = target.id
+            editLockFolderName = target.name
+            editLockRecovery = recovery
+            editLockCurrentType = lock.credentialTypeCode
+            editLockTargetType = lock.credentialTypeCode
+            editLockCurrentPin = ""
+            editLockCurrentPattern?.fill('\u0000')
+            editLockCurrentPattern = null
+            editLockNewPin = ""
+            editLockConfirmPin = ""
+            editLockFirstPattern = null
+            editLockRecoveryCode = ""
+            editLockError = null
+            selectedFolderForAction = null
+        }
+    }
 
     fun attemptOpenFolder(folderId: String) {
         pendingFolderId = folderId
@@ -303,8 +326,17 @@ fun FoldersScreen(
             val missing = container.folderAccessManager.missingLockIds(vaultId, folderId)
                 ?: run { pendingFolderId = null; return@launch }
             if (missing.isNotEmpty()) {
-                pendingLockId = missing.first()
                 val lock = container.database.folderLockDao().getForVault(vaultId, missing.first())
+                if (lock?.requiresCredentialReset == true) {
+                    val folder = folders.find { it.id == folderId }
+                    if (folder != null) {
+                        openLockEdit(folder, recovery = true)
+                    }
+                    folderActionStatus = "This protected folder was restored from another device. Set a new PIN or Pattern using your Recovery Kit."
+                    pendingFolderId = null
+                    return@launch
+                }
+                pendingLockId = missing.first()
                 gateTypeCode = lock?.credentialTypeCode ?: 0
                 pendingLockBioIv = lock?.biometricIv?.takeIf { lock.biometricEnvelope != null }
                 gateInput = ""
@@ -376,30 +408,7 @@ fun FoldersScreen(
         }
     }
 
-    fun openLockEdit(target: Folder, recovery: Boolean) {
-        scope.launch {
-            val lock = container.database.folderLockDao().getForFolder(vaultId, target.id) ?: return@launch
-            if (recovery && lock.recoveryEnvelope == null) {
-                folderActionStatus = "This older lock has no recovery envelope. Unlock it and change the lock first."
-                selectedFolderForAction = null
-                return@launch
-            }
-            editLockFolderId = target.id
-            editLockFolderName = target.name
-            editLockRecovery = recovery
-            editLockCurrentType = lock.credentialTypeCode
-            editLockTargetType = lock.credentialTypeCode
-            editLockCurrentPin = ""
-            editLockCurrentPattern?.fill('\u0000')
-            editLockCurrentPattern = null
-            editLockNewPin = ""
-            editLockConfirmPin = ""
-            editLockFirstPattern = null
-            editLockRecoveryCode = ""
-            editLockError = null
-            selectedFolderForAction = null
-        }
-    }
+    BackHandler(currentParentId != null || hiddenMode) { navigateUp() }
 
     fun launchFolderBiometric() {
         val lockId = pendingLockId ?: return
