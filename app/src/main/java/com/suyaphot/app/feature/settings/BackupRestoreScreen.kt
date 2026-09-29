@@ -220,6 +220,7 @@ fun BackupRestoreScreen(
                     Toast.makeText(context, "Exported ${verifiedSummary.mediaCount} items successfully and verified archive.", Toast.LENGTH_LONG).show()
                 }
             } catch (e: BackupException) {
+                runCatching { android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri) }
                 withContext(Dispatchers.Main) {
                     isExporting = false
                     if (e.error == BackupError.FOLDER_LOCK_RECOVERY_NOT_READY) {
@@ -234,6 +235,7 @@ fun BackupRestoreScreen(
                     }
                 }
             } catch (e: Exception) {
+                runCatching { android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri) }
                 withContext(Dispatchers.Main) {
                     isExporting = false
                     Toast.makeText(context, BackupError.VERIFICATION_FAILED.userFriendlyMessage(), Toast.LENGTH_LONG).show()
@@ -250,7 +252,11 @@ fun BackupRestoreScreen(
                 val inputStream = context.contentResolver.openInputStream(uri)
                     ?: throw BackupException(BackupError.SOURCE_UNAVAILABLE)
                 val summary = inputStream.use { ins ->
-                    container.backupVerifier.verifyAndInspect(ins, code)
+                    if (mode == BackupRestoreMode.UNLOCKED_VAULT) {
+                        container.backupVerifier.verifyFullArchive(ins, code)
+                    } else {
+                        container.backupVerifier.inspectManifest(ins, code)
+                    }
                 }
                 withContext(Dispatchers.Main) {
                     restoreSummary = summary
@@ -585,7 +591,7 @@ fun BackupRestoreScreen(
                         if (isInspectMode) {
                             val sum = restoreSummary!!
                             Text(
-                                "Backup Verified",
+                                "Backup fully verified",
                                 fontFamily = SoraFontFamily,
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 15.sp,
@@ -637,6 +643,13 @@ fun BackupRestoreScreen(
                             }
                         } else {
                             restoreSummary?.let { sum ->
+                                Text(
+                                    "Backup header verified. Full media verification runs before restore is committed.",
+                                    fontFamily = SoraFontFamily,
+                                    fontSize = 13.sp,
+                                    color = SuyaColors.Positive,
+                                    fontWeight = FontWeight.SemiBold
+                                )
                                 Text(
                                     "Found: ${sum.mediaCount} media items, ${sum.folderCount} folders (${sum.totalPlaintextSize / (1024 * 1024)} MB).",
                                     fontFamily = SoraFontFamily,

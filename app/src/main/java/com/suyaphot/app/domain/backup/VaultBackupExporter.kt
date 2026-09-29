@@ -167,7 +167,26 @@ class VaultBackupExporter(
             }
         }
 
+        if (folders.size > BackupLimits.MAX_FOLDERS) {
+            throw BackupException(BackupError.INVALID_ARCHIVE, "Vault exceeds maximum folder count.")
+        }
+        if (locks.size > BackupLimits.MAX_LOCKS) {
+            throw BackupException(BackupError.INVALID_ARCHIVE, "Vault exceeds maximum lock count.")
+        }
+
+        // P0-A: Block export if any trash permanent cleanup is pending
+        val pendingCleanup = database.mediaItemDao().countPendingTrashCleanup(vaultId)
+        if (pendingCleanup > 0) {
+            throw BackupException(
+                BackupError.BACKUP_PENDING_LOCAL_CLEANUP,
+                "Trash cleanup is still pending. Cannot export backup while permanent deletion is unfinished."
+            )
+        }
+
         val mediaItems = database.mediaItemDao().getAllForIntegrityCheck(vaultId)
+        if (mediaItems.size > BackupLimits.MAX_MEDIA_ITEMS_V2) {
+            throw BackupException(BackupError.INVALID_ARCHIVE, "Vault exceeds maximum media item count.")
+        }
 
         val archiveId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
@@ -287,7 +306,7 @@ class VaultBackupExporter(
                             deletedAt = m.deletedAt,
                             previousFolderId = m.previousFolderId,
                             dateTakenMs = m.dateTakenMs,
-                            cleanupStateCode = m.cleanupStateCode,
+                            cleanupStateCode = 0, // P0-A Invariant: never export local runtime cleanup journal
                             concealed = m.concealed,
                             hasThumb = hasThumb,
                             hasPreview = hasPreview
@@ -298,6 +317,10 @@ class VaultBackupExporter(
                 mediaSubkey.fill(0)
                 thumbSubkey.fill(0)
             }
+        }
+
+        if (descriptors.size > BackupLimits.MAX_DESCRIPTORS_V2) {
+            throw BackupException(BackupError.INVALID_ARCHIVE, "Vault exceeds maximum descriptor count.")
         }
 
         // Build folder and lock entries

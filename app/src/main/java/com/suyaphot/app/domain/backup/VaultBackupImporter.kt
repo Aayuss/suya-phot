@@ -21,6 +21,11 @@ import com.suyaphot.app.domain.folders.FolderAccessManager
 import com.suyaphot.app.domain.folders.FolderPrivacyCoordinator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.suyaphot.app.core.util.InternalId
+import com.suyaphot.app.domain.folders.FolderManager
+import kotlinx.coroutines.sync.Mutex
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.File
@@ -44,6 +49,9 @@ class VaultBackupImporter(
     private val sessionManager: SessionManager? = null,
     private val accessManager: FolderAccessManager? = null
 ) {
+    companion object {
+        private val restoreMutex = Mutex()
+    }
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
@@ -56,6 +64,114 @@ class VaultBackupImporter(
         return result
     }
 
+    private fun strictUtf8(bytes: ByteArray): String {
+        val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+
+        return decoder.decode(ByteBuffer.wrap(bytes)).toString()
+    }
+
+    private fun verifyFolderRecoveryEnvelope(
+        entry: BackupFolderLockEntry,
+        metaSubkey: ByteArray
+    ) {
+        val hex = entry.recoveryEnvelopeHex
+            ?: throw BackupException(
+                BackupError.FOLDER_LOCK_RECOVERY_NOT_READY,
+                "Protected folder lock ${entry.id} lacks portable recovery envelope."
+            )
+
+        val encrypted = try {
+            hex.decodeHex()
+        } catch (e: Exception) {
+            throw BackupException(
+                BackupError.INVALID_ARCHIVE,
+                "Failed to decode recovery envelope hex for lock ${entry.id}",
+                cause = e
+            )
+        }
+
+        val token = try {
+            Aead.decryptWithPrependedNonce(
+                keyBytes = metaSubkey,
+                payload = encrypted,
+                aad = FolderLockCryptoFormat.recoveryAad(entry.id)
+            )
+        } catch (e: Exception) {
+            throw BackupException(
+                BackupError.FOLDER_LOCK_RECOVERY_CORRUPT,
+                "Corrupt recovery envelope for lock ${entry.id}",
+                cause = e
+            )
+        } finally {
+            encrypted.fill(0)
+        }
+
+        try {
+            if (token.size != 32) {
+                throw BackupException(
+                    BackupError.FOLDER_LOCK_RECOVERY_CORRUPT,
+                    "Invalid recovery token size ${token.size} for lock ${entry.id}"
+                )
+            }
+        } finally {
+            token.fill(0)
+        }
+    }
+
+    private fun verifyFolderNames(
+        folders: List<BackupFolderEntry>,
+        metaSubkey: ByteArray
+    ) {
+        val siblingsByParent = HashMap<String?, HashSet<String>>()
+
+        for (f in folders) {
+            val encrypted = try {
+                f.encryptedNameHex.decodeHex()
+            } catch (e: Exception) {
+                throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid folder name hex", e)
+            }
+
+            val plain = try {
+                Aead.decryptWithPrependedNonce(
+                    keyBytes = metaSubkey,
+                    payload = encrypted,
+                    aad = f.id.toByteArray(Charsets.UTF_8)
+                )
+            } catch (e: Exception) {
+                throw BackupException(
+                    BackupError.INVALID_ARCHIVE,
+                    "Folder name authentication failed for folder ${f.id}",
+                    e
+                )
+            } finally {
+                encrypted.fill(0)
+            }
+
+            val name = try {
+                val decoded = strictUtf8(plain)
+                FolderManager.normalizeFolderName(decoded)
+            } catch (e: Exception) {
+                throw BackupException(
+                    BackupError.INVALID_ARCHIVE,
+                    "Invalid folder name for folder ${f.id}: ${e.message}",
+                    e
+                )
+            } finally {
+                plain.fill(0)
+            }
+
+            val siblings = siblingsByParent.getOrPut(f.parentId) { HashSet() }
+            if (!siblings.add(name.lowercase())) {
+                throw BackupException(
+                    BackupError.INVALID_ARCHIVE,
+                    "Duplicate sibling folder name '$name' under parent ${f.parentId}"
+                )
+            }
+        }
+    }
+
     suspend fun restoreVault(
         inputStream: InputStream,
         recoveryCodeInput: String,
@@ -63,11 +179,15 @@ class VaultBackupImporter(
         newCredentialType: Int,
         onProgress: (bytesRead: Long, totalEstimatedBytes: Long, itemsRead: Int, totalItems: Int) -> Unit
     ): BackupRestoreResult = withContext(Dispatchers.IO) {
-        // Pre-cleanup stale staging
-        fileStore.clearStaleBackupRestoreStaging()
-
-        val bufferedIn = BufferedInputStream(inputStream, BackupArchiveFormat.BUFFER_SIZE)
-        val dis = DataInputStream(bufferedIn)
+        if (!restoreMutex.tryLock()) {
+            throw BackupException(
+                BackupError.RESTORE_ALREADY_RUNNING,
+                "A restore operation is already in progress."
+            )
+        }
+        try {
+            val bufferedIn = BufferedInputStream(inputStream, BackupArchiveFormat.BUFFER_SIZE)
+            val dis = DataInputStream(bufferedIn)
         val verifier = BackupVerifier(keyManager)
 
         // 1. Decrypt header, master key, and manifest
@@ -170,10 +290,14 @@ class VaultBackupImporter(
                 dis.readFully(idBytes)
                 val entryId = idBytes.toString(Charsets.UTF_8)
                 val entryLength = dis.readLong()
-                if (entryLength < 0 || entryLength > 100_000_000_000L) {
+                if (entryLength < 0 || entryLength > BackupLimits.MAX_SINGLE_MEDIA_BYTES) {
                     throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid entry body length: $entryLength")
                 }
                 bytesRead += 1 + 2 + idLength + 8
+
+                if (!InternalId.isValid(entryId)) {
+                    throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid entry ID format: $entryId")
+                }
 
                 val key = BackupEntryKey(entryType, entryId)
                 if (!seenEntries.add(key)) {
@@ -194,12 +318,53 @@ class VaultBackupImporter(
                             "Declared body length ${expectedDesc.cipherLength} != entry length $entryLength for $entryId"
                         )
                     }
+                } else {
+                    // P0-C: Strict V1 body grammar before reading or staging body
+                    if (entryType !in listOf(
+                            BackupArchiveFormat.ENTRY_TYPE_MEDIA,
+                            BackupArchiveFormat.ENTRY_TYPE_THUMB,
+                            BackupArchiveFormat.ENTRY_TYPE_PREVIEW
+                        )
+                    ) {
+                        throw BackupException(BackupError.INVALID_ARCHIVE, "Unknown V1 entry type: $entryType")
+                    }
+
+                    val media = validated.mediaById[entryId]
+                        ?: throw BackupException(BackupError.INVALID_ARCHIVE, "Undeclared V1 media item ID: $entryId")
+
+                    when (entryType) {
+                        BackupArchiveFormat.ENTRY_TYPE_MEDIA -> {
+                            if (entryLength != media.cipherSize) {
+                                throw BackupException(
+                                    BackupError.CORRUPT_MEDIA,
+                                    "Declared V1 cipher size ${media.cipherSize} != entry length $entryLength for $entryId"
+                                )
+                            }
+                        }
+                        BackupArchiveFormat.ENTRY_TYPE_THUMB -> {
+                            if (!media.hasThumb) {
+                                throw BackupException(BackupError.INVALID_ARCHIVE, "Undeclared V1 thumbnail for $entryId")
+                            }
+                            if (entryLength > BackupLimits.MAX_V1_THUMB_BYTES) {
+                                throw BackupException(BackupError.INVALID_ARCHIVE, "Oversized V1 thumbnail for $entryId: $entryLength")
+                            }
+                        }
+                        BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> {
+                            if (!media.hasPreview) {
+                                throw BackupException(BackupError.INVALID_ARCHIVE, "Undeclared V1 preview for $entryId")
+                            }
+                            if (entryLength > BackupLimits.MAX_V1_PREVIEW_BYTES) {
+                                throw BackupException(BackupError.INVALID_ARCHIVE, "Oversized V1 preview for $entryId: $entryLength")
+                            }
+                        }
+                    }
                 }
 
-                val stagedFile = newStagedBodyFile(entryType)
                 val digest = MessageDigest.getInstance("SHA-256")
+                val isV1Derivative = manifest.version == BackupArchiveFormat.VERSION_1 && entryType != BackupArchiveFormat.ENTRY_TYPE_MEDIA
 
-                FileOutputStream(stagedFile).use { fos ->
+                if (isV1Derivative) {
+                    // P0-C: Discard V1 optional derivatives into buffer without staging to disk
                     var remaining = entryLength
                     while (remaining > 0L) {
                         val toRead = remaining.coerceAtMost(buffer.size.toLong()).toInt()
@@ -207,10 +372,35 @@ class VaultBackupImporter(
                         if (r == -1) {
                             throw BackupException(BackupError.INVALID_ARCHIVE, "Premature EOF in entry body for $entryId")
                         }
-                        fos.write(buffer, 0, r)
                         digest.update(buffer, 0, r)
                         bytesRead += r
                         remaining -= r
+                    }
+                } else {
+                    val stagedFile = newStagedBodyFile(entryType)
+                    FileOutputStream(stagedFile).use { fos ->
+                        var remaining = entryLength
+                        while (remaining > 0L) {
+                            val toRead = remaining.coerceAtMost(buffer.size.toLong()).toInt()
+                            val r = dis.read(buffer, 0, toRead)
+                            if (r == -1) {
+                                throw BackupException(BackupError.INVALID_ARCHIVE, "Premature EOF in entry body for $entryId")
+                            }
+                            fos.write(buffer, 0, r)
+                            digest.update(buffer, 0, r)
+                            bytesRead += r
+                            remaining -= r
+                        }
+                    }
+
+                    when (entryType) {
+                        BackupArchiveFormat.ENTRY_TYPE_MEDIA -> {
+                            stagedMediaFiles[entryId] = stagedFile
+                            itemsRead++
+                            onProgress(bytesRead, totalEstimatedBytes, itemsRead, totalExpectedItems)
+                        }
+                        BackupArchiveFormat.ENTRY_TYPE_THUMB -> stagedThumbFiles[entryId] = stagedFile
+                        BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> stagedPreviewFiles[entryId] = stagedFile
                     }
                 }
 
@@ -232,16 +422,6 @@ class VaultBackupImporter(
                         )
                     }
                 }
-
-                when (entryType) {
-                    BackupArchiveFormat.ENTRY_TYPE_MEDIA -> {
-                        stagedMediaFiles[entryId] = stagedFile
-                        itemsRead++
-                        onProgress(bytesRead, totalEstimatedBytes, itemsRead, totalExpectedItems)
-                    }
-                    BackupArchiveFormat.ENTRY_TYPE_THUMB -> stagedThumbFiles[entryId] = stagedFile
-                    BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> stagedPreviewFiles[entryId] = stagedFile
-                }
             }
 
             // Check for unexpected trailing bytes
@@ -259,7 +439,8 @@ class VaultBackupImporter(
                 }
             } else {
                 for (m in manifest.mediaItems) {
-                    if (!stagedMediaFiles.containsKey(m.id)) {
+                    val requiredKey = BackupEntryKey(BackupArchiveFormat.ENTRY_TYPE_MEDIA, m.id)
+                    if (requiredKey !in seenEntries) {
                         throw BackupException(BackupError.MISSING_MEDIA, "Missing required media body for item ${m.id}")
                     }
                 }
@@ -271,6 +452,14 @@ class VaultBackupImporter(
             val thumbSubkey = vaultCrypto.deriveThumbSubkey(masterKey)
 
             try {
+                // P0-D: Decrypt and validate all folder names under metaSubkey before commit
+                verifyFolderNames(manifest.folders, metaSubkey)
+
+                // P0-B: Verify every folder recovery envelope under metaSubkey before commit
+                for (lock in manifest.folderLocks) {
+                    verifyFolderRecoveryEnvelope(lock, metaSubkey)
+                }
+
                 for (m in manifest.mediaItems) {
                     val stagedMedia = stagedMediaFiles[m.id]
                         ?: throw BackupException(BackupError.MISSING_MEDIA, "Missing staged media for ${m.id}")
@@ -456,8 +645,8 @@ class VaultBackupImporter(
                                 previousFolderId = safePreviousFolderId,
                                 dateTakenMs = m.dateTakenMs,
                                 encryptedPreviewRelativePath = previewRelPath,
-                                cleanupStateCode = m.cleanupStateCode,
-                                concealed = m.concealed
+                                cleanupStateCode = 0, // P0-A: Never restore active cleanup journal
+                                concealed = false     // Derived: recomputed by privacyCoordinator below
                             )
                         )
                     }
@@ -488,6 +677,9 @@ class VaultBackupImporter(
             masterKey.fill(0)
             newCredential.fill('\u0000')
             stagingDir.deleteRecursively()
+        }
+        } finally {
+            restoreMutex.unlock()
         }
     }
 }

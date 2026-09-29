@@ -88,6 +88,7 @@ import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
+import com.suyaphot.app.domain.folders.FolderAccessRequirement
 import com.suyaphot.app.domain.auth.PatternCredential
 import com.suyaphot.app.domain.folders.FolderDeletePolicy
 import com.suyaphot.app.domain.folders.FolderManager
@@ -314,23 +315,20 @@ fun FoldersScreen(
     fun attemptOpenFolder(folderId: String) {
         pendingFolderId = folderId
         scope.launch {
-            val entity = container.database.folderDao().getFolderForVault(folderId, vaultId) ?: return@launch
-            if (entity.effectiveHidden && !container.folderAccessManager.hasHiddenGrant(vaultId)) {
-                val vault = container.database.vaultDao().getVault(vaultId)
-                gateTypeCode = vault?.credentialTypeCode ?: 0
-                hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
-                gateInput = ""
-                gateError = null
-                showHiddenAuth = true
-                return@launch
-            }
-            val missing = container.folderAccessManager.missingLockIds(vaultId, folderId)
-                ?: run { pendingFolderId = null; return@launch }
-            if (missing.isNotEmpty()) {
-                val missingLockId = missing.first()
-                val lock = container.database.folderLockDao().getForVault(vaultId, missingLockId)
-                if (lock?.requiresCredentialReset == true) {
-                    val owningFolder = container.database.folderDao().getFolderForVault(lock.folderId, vaultId)
+            when (val req = container.folderAccessManager.nextRequirement(vaultId, folderId)) {
+                is FolderAccessRequirement.InvalidHierarchy -> {
+                    pendingFolderId = null
+                }
+                is FolderAccessRequirement.HiddenVaultAuth -> {
+                    val vault = container.database.vaultDao().getVault(vaultId)
+                    gateTypeCode = vault?.credentialTypeCode ?: 0
+                    hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+                    gateInput = ""
+                    gateError = null
+                    showHiddenAuth = true
+                }
+                is FolderAccessRequirement.RecoveryReset -> {
+                    val owningFolder = container.database.folderDao().getFolderForVault(req.folderId, vaultId)
                     val unlocked = session as? VaultSession.Unlocked
                     val owningFolderName = if (owningFolder != null && unlocked != null) {
                         try {
@@ -345,11 +343,11 @@ fun FoldersScreen(
                         }
                     } else "Protected folder"
 
-                    editLockFolderId = lock.folderId
+                    editLockFolderId = req.folderId
                     editLockFolderName = owningFolderName
                     editLockRecovery = true
-                    editLockCurrentType = lock.credentialTypeCode
-                    editLockTargetType = lock.credentialTypeCode
+                    editLockCurrentType = req.credentialTypeCode
+                    editLockTargetType = req.credentialTypeCode
                     editLockCurrentPin = ""
                     editLockCurrentPattern?.fill('\u0000')
                     editLockCurrentPattern = null
@@ -361,18 +359,21 @@ fun FoldersScreen(
                     selectedFolderForAction = null
 
                     folderActionStatus = "This protected folder was restored from another device. Set a new PIN or Pattern using your Recovery Kit."
-                    return@launch
                 }
-                pendingLockId = missingLockId
-                gateTypeCode = lock?.credentialTypeCode ?: 0
-                pendingLockBioIv = lock?.biometricIv?.takeIf { lock.biometricEnvelope != null }
-                gateInput = ""
-                gateError = null
-                return@launch
+                is FolderAccessRequirement.Credential -> {
+                    pendingLockId = req.lockId
+                    gateTypeCode = req.credentialTypeCode
+                    val lock = container.database.folderLockDao().getForVault(vaultId, req.lockId)
+                    pendingLockBioIv = lock?.biometricIv?.takeIf { lock.biometricEnvelope != null }
+                    gateInput = ""
+                    gateError = null
+                }
+                is FolderAccessRequirement.Granted -> {
+                    container.folderAccessManager.retainLocksForFolder(vaultId, folderId)
+                    currentParentId = folderId
+                    pendingFolderId = null
+                }
             }
-            container.folderAccessManager.retainLocksForFolder(vaultId, folderId)
-            currentParentId = folderId
-            pendingFolderId = null
         }
     }
 

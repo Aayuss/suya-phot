@@ -16,6 +16,7 @@ import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.JobType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.core.model.MediaType
+import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.SessionManager
@@ -306,8 +307,19 @@ class ImportCoordinator(
                 val existing = mediaItemDao.findBySha256(vaultId, sha256Hex)
                 if (existing != null) {
                     partialFile.delete()
-                    val duplicateState = if (mode == ImportMode.COPY) JobState.COMPLETED else JobState.AWAITING_SOURCE_DELETE
-                    vaultJobDao.updateState(jobId, duplicateState.code, System.currentTimeMillis())
+                    val nowDuplicate = System.currentTimeMillis()
+                    if (mode == ImportMode.COPY) {
+                        vaultJobDao.updateTerminalImportState(
+                            id = jobId,
+                            vaultId = vaultId,
+                            stateCode = JobState.COMPLETED.code,
+                            sourceDispositionCode = SourceDisposition.NOT_APPLICABLE.code,
+                            errorCode = null,
+                            now = nowDuplicate
+                        )
+                    } else {
+                        vaultJobDao.updateState(jobId, JobState.AWAITING_SOURCE_DELETE.code, nowDuplicate)
+                    }
                     return@withContext ImportResult.Success(
                         jobId = jobId,
                         itemId = existing.id,
@@ -417,8 +429,18 @@ class ImportCoordinator(
                 mediaItemDao.insert(mediaEntity.copy(
                     concealed = currentTarget?.let { it.effectiveHidden || it.effectiveProtected } ?: false
                 ))
-                val nextState = if (mode == ImportMode.COPY) JobState.COMPLETED else JobState.AWAITING_SOURCE_DELETE
-                vaultJobDao.updateState(jobId, nextState.code, now)
+                if (mode == ImportMode.COPY) {
+                    vaultJobDao.updateTerminalImportState(
+                        id = jobId,
+                        vaultId = vaultId,
+                        stateCode = JobState.COMPLETED.code,
+                        sourceDispositionCode = SourceDisposition.NOT_APPLICABLE.code,
+                        errorCode = null,
+                        now = now
+                    )
+                } else {
+                    vaultJobDao.updateState(jobId, JobState.AWAITING_SOURCE_DELETE.code, now)
+                }
             }
             dbCommitted = true
 

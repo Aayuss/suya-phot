@@ -69,7 +69,20 @@ object BackupManifestValidator {
             invalid("Unsupported vault kind in backup: ${manifest.vaultKindCode}")
         }
 
-        // 3. Strict internal IDs
+        // 3. Strict internal IDs and limits
+        if (manifest.folders.size > BackupLimits.MAX_FOLDERS) {
+            invalid("Manifest exceeds maximum folder count")
+        }
+        if (manifest.folderLocks.size > BackupLimits.MAX_LOCKS) {
+            invalid("Manifest exceeds maximum lock count")
+        }
+        if (manifest.mediaItems.size > BackupLimits.MAX_MEDIA_ITEMS_V2) {
+            invalid("Manifest exceeds maximum media count")
+        }
+        if (manifest.descriptors.size > BackupLimits.MAX_DESCRIPTORS_V2) {
+            invalid("Manifest exceeds maximum descriptor count")
+        }
+
         try {
             InternalId.requireValid(manifest.archiveId, "archive ID")
             InternalId.requireValid(manifest.vaultId, "vault ID")
@@ -150,15 +163,22 @@ object BackupManifestValidator {
             // Credential envelope: nonce (12) + tag (16) minimum
             checkValidHex(l.credentialEnvelopeHex, "lock ${l.id} credentialEnvelopeHex", minBytes = 28, maxBytes = 1024)
 
-            // V2 portable recovery envelope is required for every lock
+            // Portable recovery envelope policy
             if (manifest.version >= BackupArchiveFormat.VERSION_2) {
                 val recoveryHex = l.recoveryEnvelopeHex
                 if (recoveryHex.isNullOrBlank()) {
                     invalid("Folder lock ${l.id} lacks required portable recovery envelope")
                 }
                 checkValidHex(recoveryHex, "lock ${l.id} recoveryEnvelopeHex", minBytes = 28, maxBytes = 1024)
-            } else if (l.recoveryEnvelopeHex != null) {
-                checkValidHex(l.recoveryEnvelopeHex, "lock ${l.id} recoveryEnvelopeHex", minBytes = 28, maxBytes = 1024)
+            } else {
+                val recoveryHex = l.recoveryEnvelopeHex
+                if (recoveryHex.isNullOrBlank()) {
+                    throw BackupException(
+                        BackupError.LEGACY_PROTECTED_FOLDER_NOT_PORTABLE,
+                        "Legacy V1 backup contains protected folder without portable recovery."
+                    )
+                }
+                checkValidHex(recoveryHex, "lock ${l.id} recoveryEnvelopeHex", minBytes = 28, maxBytes = 1024)
             }
 
             if (lockMap.put(l.id, l) != null) {

@@ -15,6 +15,9 @@ enum class BackupError {
     VERIFICATION_FAILED,
     FOLDER_LOCK_RECOVERY_NOT_READY,
     FOLDER_LOCK_RECOVERY_CORRUPT,
+    BACKUP_PENDING_LOCAL_CLEANUP,
+    LEGACY_PROTECTED_FOLDER_NOT_PORTABLE,
+    RESTORE_ALREADY_RUNNING,
     UNKNOWN;
 
     fun userFriendlyMessage(): String = when (this) {
@@ -32,6 +35,9 @@ enum class BackupError {
         VERIFICATION_FAILED -> "Backup was written but could not be verified. Do not rely on this file."
         FOLDER_LOCK_RECOVERY_NOT_READY -> "Some protected folders need one-time backup preparation."
         FOLDER_LOCK_RECOVERY_CORRUPT -> "A protected folder has damaged recovery information and cannot be backed up safely."
+        BACKUP_PENDING_LOCAL_CLEANUP -> "Trash cleanup is still pending. Suya Phot will not create a backup while a permanent-delete operation is unfinished. Open Trash and let cleanup finish, or restart Suya Phot and try again."
+        LEGACY_PROTECTED_FOLDER_NOT_PORTABLE -> "This older backup contains protected folders that cannot be safely unlocked on a new device. Open the original vault in the latest Suya Phot, unlock those folders once, and create a new backup."
+        RESTORE_ALREADY_RUNNING -> "A restore operation is already in progress."
         UNKNOWN -> "An unexpected error occurred during backup operation."
     }
 }

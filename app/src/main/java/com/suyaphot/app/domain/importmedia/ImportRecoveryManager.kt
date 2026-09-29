@@ -31,6 +31,7 @@ class ImportRecoveryManager(
         try {
         val activeJobs = database.vaultJobDao().getActiveJobsForType(JobType.IMPORT.code)
         val now = System.currentTimeMillis()
+        database.vaultJobDao().purgeResolvedCompletedJobs(session.vaultId, now - 7 * 86_400_000L)
 
         for (job in activeJobs) {
             if (job.vaultId != session.vaultId) continue
@@ -159,15 +160,12 @@ class ImportRecoveryManager(
                     // Vault copy is valid, but source deletion was interrupted by app termination.
                     // The original item still remains in Gallery.
                     SafeLog.i("ImportRecoveryManager", "Job ${job.id} interrupted during source deletion. Marking RETAINED_AFTER_INTERRUPTION.")
-                    database.vaultJobDao().updateState(
+                    database.vaultJobDao().updateTerminalImportState(
                         id = job.id,
+                        vaultId = session.vaultId,
                         stateCode = JobState.COMPLETED.code,
-                        now = now,
-                        errorCode = null
-                    )
-                    database.vaultJobDao().updateSourceDisposition(
-                        id = job.id,
-                        code = com.suyaphot.app.core.model.SourceDisposition.RETAINED_AFTER_INTERRUPTION.code,
+                        sourceDispositionCode = com.suyaphot.app.core.model.SourceDisposition.RETAINED_AFTER_INTERRUPTION.code,
+                        errorCode = null,
                         now = now
                     )
                 }

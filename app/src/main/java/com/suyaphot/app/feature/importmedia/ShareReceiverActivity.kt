@@ -48,9 +48,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.suyaphot.app.app.SuyaApp
+import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.model.Folder
 import com.suyaphot.app.domain.auth.PatternCredential
 import com.suyaphot.app.domain.auth.VaultSession
+import com.suyaphot.app.domain.folders.FolderAccessRequirement
+import com.suyaphot.app.feature.folders.FolderRecoveryResetDialog
 import com.suyaphot.app.feature.lock.LockScreen
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.PatternLockPad
@@ -265,6 +268,9 @@ private fun ImportDestinationPicker(
     var gateInput by remember { mutableStateOf("") }
     var gateError by remember { mutableStateOf<String?>(null) }
     var patternErrorTrigger by remember { mutableIntStateOf(0) }
+    var pendingResetFolderId by remember { mutableStateOf<String?>(null) }
+    var pendingResetFolderName by remember { mutableStateOf("Protected folder") }
+    var pendingResetType by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(vaultId, hiddenMode, accessRevision) {
         if (hiddenMode && !container.folderAccessManager.hasHiddenGrant(vaultId)) hiddenMode = false
@@ -273,17 +279,50 @@ private fun ImportDestinationPicker(
 
     fun chooseFolder(id: String) {
         scope.launch {
-            if (container.folderAccessManager.canOpen(vaultId, id)) {
-                onChosen(id)
-                return@launch
+            when (val req = container.folderAccessManager.nextRequirement(vaultId, id)) {
+                is FolderAccessRequirement.Granted -> {
+                    onChosen(id)
+                }
+                is FolderAccessRequirement.HiddenVaultAuth -> {
+                    pendingFolderId = id
+                    hiddenGate = true
+                    val vault = container.database.vaultDao().getVault(vaultId)
+                    gateType = vault?.credentialTypeCode ?: 0
+                    gateInput = ""
+                    gateError = null
+                }
+                is FolderAccessRequirement.RecoveryReset -> {
+                    pendingFolderId = id
+                    val folder = container.database.folderDao().getFolderForVault(req.folderId, vaultId)
+                    val session = container.sessionManager.sessionState.value as? VaultSession.Unlocked
+                    val folderName = if (folder != null && session != null) {
+                        try {
+                            val bytes = Aead.decryptWithPrependedNonce(
+                                session.metaSubkey,
+                                folder.encryptedName,
+                                folder.id.toByteArray(Charsets.UTF_8)
+                            )
+                            try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0.toByte()) }
+                        } catch (_: Exception) {
+                            "Protected folder"
+                        }
+                    } else "Protected folder"
+
+                    pendingResetFolderId = req.folderId
+                    pendingResetFolderName = folderName
+                    pendingResetType = req.credentialTypeCode
+                }
+                is FolderAccessRequirement.Credential -> {
+                    pendingFolderId = id
+                    pendingLockId = req.lockId
+                    gateType = req.credentialTypeCode
+                    gateInput = ""
+                    gateError = null
+                }
+                is FolderAccessRequirement.InvalidHierarchy -> {
+                    // Do nothing
+                }
             }
-            val missing = container.folderAccessManager.missingLockIds(vaultId, id) ?: return@launch
-            val lockId = missing.firstOrNull() ?: return@launch
-            pendingFolderId = id
-            pendingLockId = lockId
-            gateType = container.database.folderLockDao().getForVault(vaultId, lockId)?.credentialTypeCode ?: 0
-            gateInput = ""
-            gateError = null
         }
     }
 
@@ -397,6 +436,23 @@ private fun ImportDestinationPicker(
                         )
                     }
                     gateError?.let { Text(it, color = SuyaColors.Negative) }
+                }
+            }
+        )
+    }
+
+    if (pendingResetFolderId != null) {
+        FolderRecoveryResetDialog(
+            container = container,
+            folderId = pendingResetFolderId!!,
+            folderName = pendingResetFolderName,
+            initialTypeCode = pendingResetType,
+            onDismissRequest = { pendingResetFolderId = null },
+            onResetSuccess = {
+                val target = pendingFolderId
+                pendingResetFolderId = null
+                if (target != null) {
+                    chooseFolder(target)
                 }
             }
         )

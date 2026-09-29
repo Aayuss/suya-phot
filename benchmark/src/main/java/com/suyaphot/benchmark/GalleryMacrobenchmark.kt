@@ -21,21 +21,7 @@ class GalleryMacrobenchmark {
     private val target = "com.suyaphot.app"
 
     private fun ensureVaultUnlocked(device: UiDevice) {
-        if (device.hasObject(By.res("photos_grid"))) return
-        if (device.hasObject(By.desc("Digit 1"))) {
-            listOf("1", "2", "3", "4", "5", "6").forEach { digit ->
-                device.findObject(By.desc("Digit $digit"))?.click()
-                Thread.sleep(100)
-            }
-        }
-        check(
-            device.wait(
-                Until.hasObject(By.res("photos_grid")),
-                10_000
-            )
-        ) {
-            "Benchmark fixture did not reach gallery"
-        }
+        BenchmarkSeeder.ensureVaultReady(device)
     }
 
     @Test fun coldStartup() = rule.measureRepeated(

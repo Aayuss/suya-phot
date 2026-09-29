@@ -46,10 +46,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import com.suyaphot.app.app.AppContainer
+import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.auth.PatternCredential
+import com.suyaphot.app.domain.folders.FolderAccessRequirement
+import com.suyaphot.app.feature.folders.FolderRecoveryResetDialog
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.MediaTile
@@ -118,6 +121,48 @@ fun TrashScreen(
     var lockInput by remember { mutableStateOf("") }
     var lockError by remember { mutableStateOf<String?>(null) }
     var lockErrorTrigger by remember { mutableIntStateOf(0) }
+    var pendingResetFolderId by remember { mutableStateOf<String?>(null) }
+    var pendingResetFolderName by remember { mutableStateOf("Protected folder") }
+    var pendingResetType by remember { mutableIntStateOf(0) }
+
+    fun triggerNextUnlock() {
+        scope.launch {
+            val folderIds = container.database.mediaItemDao().getPrivateTrashFolderIds(vaultId)
+            for (folderId in folderIds) {
+                when (val req = container.folderAccessManager.nextRequirement(vaultId, folderId)) {
+                    is FolderAccessRequirement.RecoveryReset -> {
+                        val folder = container.database.folderDao().getFolderForVault(req.folderId, vaultId)
+                        val unlocked = session as? VaultSession.Unlocked
+                        val folderName = if (folder != null && unlocked != null) {
+                            try {
+                                val bytes = Aead.decryptWithPrependedNonce(
+                                    unlocked.metaSubkey,
+                                    folder.encryptedName,
+                                    folder.id.toByteArray(Charsets.UTF_8)
+                                )
+                                try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0.toByte()) }
+                            } catch (_: Exception) {
+                                "Protected folder"
+                            }
+                        } else "Protected folder"
+
+                        pendingResetFolderId = req.folderId
+                        pendingResetFolderName = folderName
+                        pendingResetType = req.credentialTypeCode
+                        return@launch
+                    }
+                    is FolderAccessRequirement.Credential -> {
+                        pendingLockId = req.lockId
+                        pendingLockType = req.credentialTypeCode
+                        lockInput = ""
+                        lockError = null
+                        return@launch
+                    }
+                    else -> { /* continue */ }
+                }
+            }
+        }
+    }
 
     Box(
         modifier = modifier
@@ -145,15 +190,7 @@ fun TrashScreen(
             if (privateMode && missingLockIds.isNotEmpty()) {
                 SuyaButton(
                     text = "Unlock protected deleted items",
-                    onClick = {
-                        scope.launch {
-                            val id = missingLockIds.first()
-                            pendingLockType = container.database.folderLockDao().getForVault(vaultId, id)?.credentialTypeCode ?: 0
-                            pendingLockId = id
-                            lockInput = ""
-                            lockError = null
-                        }
-                    },
+                    onClick = { triggerNextUnlock() },
                     variant = ButtonVariant.Secondary,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp)
                 )
@@ -248,7 +285,13 @@ fun TrashScreen(
                 scope.launch {
                     val success = container.folderLockManager.unlock(pendingLockId!!, lockInput.toCharArray(), 0)
                     lockInput = ""
-                    if (success) pendingLockId = null else { lockError = "Incorrect folder PIN"; lockErrorTrigger++ }
+                    if (success) {
+                        pendingLockId = null
+                        triggerNextUnlock()
+                    } else {
+                        lockError = "Incorrect folder PIN"
+                        lockErrorTrigger++
+                    }
                 }
             }) else null,
             content = {
@@ -262,7 +305,13 @@ fun TrashScreen(
                                 if (chars == null) { lockError = "Connect at least four dots"; lockErrorTrigger++ }
                                 else scope.launch {
                                     val success = container.folderLockManager.unlock(pendingLockId!!, chars, 1)
-                                    if (success) pendingLockId = null else { lockError = "Incorrect folder pattern"; lockErrorTrigger++ }
+                                    if (success) {
+                                        pendingLockId = null
+                                        triggerNextUnlock()
+                                    } else {
+                                        lockError = "Incorrect folder pattern"
+                                        lockErrorTrigger++
+                                    }
                                 }
                             },
                             errorTrigger = lockErrorTrigger,
@@ -271,6 +320,20 @@ fun TrashScreen(
                     }
                     lockError?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
                 }
+            }
+        )
+    }
+
+    if (pendingResetFolderId != null) {
+        FolderRecoveryResetDialog(
+            container = container,
+            folderId = pendingResetFolderId!!,
+            folderName = pendingResetFolderName,
+            initialTypeCode = pendingResetType,
+            onDismissRequest = { pendingResetFolderId = null },
+            onResetSuccess = {
+                pendingResetFolderId = null
+                triggerNextUnlock()
             }
         )
     }

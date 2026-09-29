@@ -164,4 +164,63 @@ class FolderAccessManager(
         if (folder.effectiveHidden && !hasHiddenGrant(vaultId)) return false
         return missingLockIds(vaultId, folderId)?.isEmpty() == true
     }
+
+    suspend fun nextRequirement(
+        vaultId: String,
+        targetFolderId: String
+    ): FolderAccessRequirement {
+        if (sessionManager.currentVaultId != vaultId) return FolderAccessRequirement.InvalidHierarchy
+        val folder = database.folderDao().getFolderForVault(targetFolderId, vaultId)
+            ?: return FolderAccessRequirement.InvalidHierarchy
+
+        if (folder.effectiveHidden && !hasHiddenGrant(vaultId)) {
+            return FolderAccessRequirement.HiddenVaultAuth
+        }
+
+        val missing = missingLockIds(vaultId, targetFolderId)
+            ?: return FolderAccessRequirement.InvalidHierarchy
+
+        if (missing.isEmpty()) {
+            return FolderAccessRequirement.Granted
+        }
+
+        val firstLockId = missing.first()
+        val lock = database.folderLockDao().getForVault(vaultId, firstLockId)
+            ?: return FolderAccessRequirement.InvalidHierarchy
+
+        return if (lock.requiresCredentialReset) {
+            FolderAccessRequirement.RecoveryReset(
+                lockId = lock.id,
+                folderId = lock.folderId,
+                credentialTypeCode = lock.credentialTypeCode
+            )
+        } else {
+            FolderAccessRequirement.Credential(
+                lockId = lock.id,
+                folderId = lock.folderId,
+                credentialTypeCode = lock.credentialTypeCode,
+                biometricIv = lock.biometricIv
+            )
+        }
+    }
+}
+
+sealed interface FolderAccessRequirement {
+    data object Granted : FolderAccessRequirement
+    data object HiddenVaultAuth : FolderAccessRequirement
+
+    data class Credential(
+        val lockId: String,
+        val folderId: String,
+        val credentialTypeCode: Int,
+        val biometricIv: ByteArray?
+    ) : FolderAccessRequirement
+
+    data class RecoveryReset(
+        val lockId: String,
+        val folderId: String,
+        val credentialTypeCode: Int
+    ) : FolderAccessRequirement
+
+    data object InvalidHierarchy : FolderAccessRequirement
 }

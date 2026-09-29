@@ -22,13 +22,8 @@ class BaselineProfileGenerator {
         startActivityAndWait()
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
 
-        // Unlock if PIN pad is visible
-        if (device.hasObject(By.desc("Digit 1"))) {
-            listOf("1", "2", "3", "4", "5", "6").forEach { digit ->
-                device.findObject(By.desc("Digit $digit"))?.click()
-                Thread.sleep(100)
-            }
-        }
+        // Ensure vault is created and unlocked
+        BenchmarkSeeder.ensureVaultReady(device)
 
         if (device.wait(Until.hasObject(By.res("photos_grid")), 5_000)) {
             val grid = device.findObject(By.res("photos_grid"))

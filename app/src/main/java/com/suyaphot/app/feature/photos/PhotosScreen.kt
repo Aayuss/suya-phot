@@ -78,6 +78,7 @@ import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.database.entity.VaultJobEntity
 import com.suyaphot.app.core.model.JobType
+import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.domain.importmedia.ImportJobPayload
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
@@ -196,15 +197,31 @@ fun PhotosScreen(
         val current = pendingAttentionUris
         pendingAttentionConsentMode = null
         pendingAttentionUris = emptyList()
+        val unlocked = session as? VaultSession.Unlocked ?: return@rememberLauncherForActivityResult
+        val vaultId = unlocked.vaultId
         if (result.resultCode == android.app.Activity.RESULT_OK && mode != null) {
             scope.launch(Dispatchers.IO) {
                 val verified = container.sourceDeletionCoordinator.completeConsent(current.map { it.second }, mode)
                 val now = System.currentTimeMillis()
                 for ((job, uri) in current) {
                     if (uri in verified.deletedUris) {
-                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETED.code, now)
+                        container.database.vaultJobDao().updateTerminalImportState(
+                            id = job.id,
+                            vaultId = vaultId,
+                            stateCode = JobState.COMPLETED.code,
+                            sourceDispositionCode = SourceDisposition.DELETED.code,
+                            errorCode = null,
+                            now = now
+                        )
                     } else {
-                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETE_FAILED.code, now)
+                        container.database.vaultJobDao().updateTerminalImportState(
+                            id = job.id,
+                            vaultId = vaultId,
+                            stateCode = JobState.COMPLETED.code,
+                            sourceDispositionCode = SourceDisposition.DELETE_FAILED.code,
+                            errorCode = "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                            now = now
+                        )
                     }
                 }
                 withContext(Dispatchers.Main) {
@@ -219,7 +236,14 @@ fun PhotosScreen(
             scope.launch(Dispatchers.IO) {
                 val now = System.currentTimeMillis()
                 for ((job, _) in current) {
-                    container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.RETAINED_BY_USER.code, now)
+                    container.database.vaultJobDao().updateTerminalImportState(
+                        id = job.id,
+                        vaultId = vaultId,
+                        stateCode = JobState.COMPLETED.code,
+                        sourceDispositionCode = SourceDisposition.RETAINED_BY_USER.code,
+                        errorCode = null,
+                        now = now
+                    )
                 }
                 withContext(Dispatchers.Main) {
                     statusMessage = "Kept originals in Gallery."
@@ -380,12 +404,16 @@ fun PhotosScreen(
                                 text = "Keep Original",
                                 onClick = {
                                     scope.launch(Dispatchers.IO) {
+                                        val unlocked = session as? VaultSession.Unlocked ?: return@launch
                                         val now = System.currentTimeMillis()
                                         for (job in attentionJobs) {
-                                            container.database.vaultJobDao().updateSourceDisposition(
-                                                job.id,
-                                                SourceDisposition.RETAINED_BY_USER.code,
-                                                now
+                                            container.database.vaultJobDao().updateTerminalImportState(
+                                                id = job.id,
+                                                vaultId = unlocked.vaultId,
+                                                stateCode = JobState.COMPLETED.code,
+                                                sourceDispositionCode = SourceDisposition.RETAINED_BY_USER.code,
+                                                errorCode = null,
+                                                now = now
                                             )
                                         }
                                         withContext(Dispatchers.Main) {
@@ -416,10 +444,13 @@ fun PhotosScreen(
                                                 }
                                                 jobsWithUris.add(Pair(job, Uri.parse(payload.sourceUri)))
                                             } catch (_: Exception) {
-                                                container.database.vaultJobDao().updateSourceDisposition(
-                                                    job.id,
-                                                    SourceDisposition.DELETE_FAILED.code,
-                                                    System.currentTimeMillis()
+                                                container.database.vaultJobDao().updateTerminalImportState(
+                                                    id = job.id,
+                                                    vaultId = unlocked.vaultId,
+                                                    stateCode = JobState.COMPLETED.code,
+                                                    sourceDispositionCode = SourceDisposition.DELETE_FAILED.code,
+                                                    errorCode = "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                                                    now = System.currentTimeMillis()
                                                 )
                                             }
                                         }
@@ -430,7 +461,14 @@ fun PhotosScreen(
                                                 val now = System.currentTimeMillis()
                                                 for ((job, uri) in jobsWithUris) {
                                                     if (uri in outcome.deletedUris) {
-                                                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETED.code, now)
+                                                        container.database.vaultJobDao().updateTerminalImportState(
+                                                            id = job.id,
+                                                            vaultId = unlocked.vaultId,
+                                                            stateCode = JobState.COMPLETED.code,
+                                                            sourceDispositionCode = SourceDisposition.DELETED.code,
+                                                            errorCode = null,
+                                                            now = now
+                                                        )
                                                     }
                                                 }
                                                 withContext(Dispatchers.Main) {
@@ -441,7 +479,14 @@ fun PhotosScreen(
                                                 val now = System.currentTimeMillis()
                                                 for ((job, uri) in jobsWithUris) {
                                                     if (uri in outcome.deletedUris) {
-                                                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETED.code, now)
+                                                        container.database.vaultJobDao().updateTerminalImportState(
+                                                            id = job.id,
+                                                            vaultId = unlocked.vaultId,
+                                                            stateCode = JobState.COMPLETED.code,
+                                                            sourceDispositionCode = SourceDisposition.DELETED.code,
+                                                            errorCode = null,
+                                                            now = now
+                                                        )
                                                     }
                                                 }
                                                 val remaining = jobsWithUris.filter { it.second in outcome.uris }
@@ -455,9 +500,23 @@ fun PhotosScreen(
                                                 val now = System.currentTimeMillis()
                                                 for ((job, uri) in jobsWithUris) {
                                                     if (uri in outcome.deletedUris) {
-                                                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETED.code, now)
+                                                        container.database.vaultJobDao().updateTerminalImportState(
+                                                            id = job.id,
+                                                            vaultId = unlocked.vaultId,
+                                                            stateCode = JobState.COMPLETED.code,
+                                                            sourceDispositionCode = SourceDisposition.DELETED.code,
+                                                            errorCode = null,
+                                                            now = now
+                                                        )
                                                     } else {
-                                                        container.database.vaultJobDao().updateSourceDisposition(job.id, SourceDisposition.DELETE_FAILED.code, now)
+                                                        container.database.vaultJobDao().updateTerminalImportState(
+                                                            id = job.id,
+                                                            vaultId = unlocked.vaultId,
+                                                            stateCode = JobState.COMPLETED.code,
+                                                            sourceDispositionCode = SourceDisposition.DELETE_FAILED.code,
+                                                            errorCode = "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                                                            now = now
+                                                        )
                                                     }
                                                 }
                                                 withContext(Dispatchers.Main) {

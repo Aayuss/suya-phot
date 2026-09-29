@@ -3,6 +3,7 @@ package com.suyaphot.app.domain.backup
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.HkdfSha256
 import com.suyaphot.app.core.crypto.KeyManager
+import com.suyaphot.app.core.util.InternalId
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.InputStream
@@ -63,7 +64,7 @@ class BackupVerifier(private val keyManager: KeyManager) {
         dis.readFully(recoveryEnvelope)
 
         val manifestLen = dis.readInt()
-        if (manifestLen !in 16..10_000_000) {
+        if (manifestLen !in 16..BackupLimits.MAX_MANIFEST_CIPHERTEXT_BYTES) {
             throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid manifest length: $manifestLen")
         }
         val manifestNonce = ByteArray(12)
@@ -190,10 +191,10 @@ class BackupVerifier(private val keyManager: KeyManager) {
     }
 
     /**
-     * Unwraps master key and decrypts the backup manifest using the user's Recovery Code.
-     * Returns a BackupSummary detailing what will be restored.
+     * Inspects only the header and manifest without full media verification.
+     * Use before PIN setup or for metadata summary.
      */
-    fun verifyAndInspect(inputStream: InputStream, recoveryCodeInput: String): BackupSummary {
+    fun inspectManifest(inputStream: InputStream, recoveryCodeInput: String): BackupSummary {
         val dis = DataInputStream(BufferedInputStream(inputStream, BackupArchiveFormat.BUFFER_SIZE))
         val (manifest, masterKey) = decryptManifestAndMasterKey(dis, recoveryCodeInput)
         masterKey.fill(0)
@@ -213,8 +214,11 @@ class BackupVerifier(private val keyManager: KeyManager) {
         )
     }
 
+    fun verifyAndInspect(inputStream: InputStream, recoveryCodeInput: String): BackupSummary =
+        inspectManifest(inputStream, recoveryCodeInput)
+
     /**
-     * Full post-write verifier that checks both header, manifest, and every body entry
+     * Full post-write verifier that checks header, manifest, and every body entry
      * against authenticated descriptors without writing to permanent storage.
      */
     fun verifyFullArchive(inputStream: InputStream, recoveryCodeInput: String): BackupSummary {
@@ -254,8 +258,12 @@ class BackupVerifier(private val keyManager: KeyManager) {
             dis.readFully(idBytes)
             val entryId = idBytes.toString(Charsets.UTF_8)
             val entryLength = dis.readLong()
-            if (entryLength < 0 || entryLength > 100_000_000_000L) {
+            if (entryLength < 0 || entryLength > BackupLimits.MAX_SINGLE_MEDIA_BYTES) {
                 throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid entry body length: $entryLength")
+            }
+
+            if (!InternalId.isValid(entryId)) {
+                throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid entry ID format: $entryId")
             }
 
             val key = BackupEntryKey(entryType, entryId)
@@ -276,6 +284,46 @@ class BackupVerifier(private val keyManager: KeyManager) {
                         BackupError.CORRUPT_MEDIA,
                         "Declared body length ${expectedDesc.cipherLength} != entry length $entryLength for $entryId"
                     )
+                }
+            } else {
+                // P0-C: Strict V1 body grammar
+                if (entryType !in listOf(
+                        BackupArchiveFormat.ENTRY_TYPE_MEDIA,
+                        BackupArchiveFormat.ENTRY_TYPE_THUMB,
+                        BackupArchiveFormat.ENTRY_TYPE_PREVIEW
+                    )
+                ) {
+                    throw BackupException(BackupError.INVALID_ARCHIVE, "Unknown V1 entry type: $entryType")
+                }
+
+                val media = validated.mediaById[entryId]
+                    ?: throw BackupException(BackupError.INVALID_ARCHIVE, "Undeclared V1 media item ID: $entryId")
+
+                when (entryType) {
+                    BackupArchiveFormat.ENTRY_TYPE_MEDIA -> {
+                        if (entryLength != media.cipherSize) {
+                            throw BackupException(
+                                BackupError.CORRUPT_MEDIA,
+                                "Declared V1 cipher size ${media.cipherSize} != entry length $entryLength for $entryId"
+                            )
+                        }
+                    }
+                    BackupArchiveFormat.ENTRY_TYPE_THUMB -> {
+                        if (!media.hasThumb) {
+                            throw BackupException(BackupError.INVALID_ARCHIVE, "Undeclared V1 thumbnail for $entryId")
+                        }
+                        if (entryLength > BackupLimits.MAX_V1_THUMB_BYTES) {
+                            throw BackupException(BackupError.INVALID_ARCHIVE, "Oversized V1 thumbnail for $entryId: $entryLength")
+                        }
+                    }
+                    BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> {
+                        if (!media.hasPreview) {
+                            throw BackupException(BackupError.INVALID_ARCHIVE, "Undeclared V1 preview for $entryId")
+                        }
+                        if (entryLength > BackupLimits.MAX_V1_PREVIEW_BYTES) {
+                            throw BackupException(BackupError.INVALID_ARCHIVE, "Oversized V1 preview for $entryId: $entryLength")
+                        }
+                    }
                 }
             }
 

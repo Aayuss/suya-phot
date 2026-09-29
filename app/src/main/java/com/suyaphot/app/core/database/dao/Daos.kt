@@ -190,7 +190,7 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND id IN (:ids)")
     suspend fun getItemsByIdsForVault(vaultId: String, ids: List<String>): List<MediaItemEntity>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
     fun getAllActive(vaultId: String): Flow<List<MediaItemEntity>>
 
     @Query("SELECT COUNT(*) FROM media_items WHERE vaultId = :vaultId")
@@ -201,10 +201,10 @@ interface MediaItemDao {
             OR (:filterCode = 2 AND mediaTypeCode = 1) OR (:filterCode = 3 AND favorite = 1))""")
     suspend fun getAllVisibleIdsForFilter(vaultId: String, filterCode: Int): List<String>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
     suspend fun getAllActiveOnce(vaultId: String): List<MediaItemEntity>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC LIMIT :limit OFFSET :offset")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC LIMIT :limit OFFSET :offset")
     suspend fun getSearchBatch(vaultId: String, limit: Int, offset: Int): List<MediaItemEntity>
 
     @Query("SELECT id, mediaTypeCode, favorite, importedAt, dateTakenMs, plaintextSize FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0")
@@ -236,23 +236,31 @@ interface MediaItemDao {
     @Query("SELECT COUNT(*) FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0)")
     suspend fun countAuthorizedInFolder(vaultId: String, folderId: String?): Int
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND favorite = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND favorite = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
     fun getFavorites(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 0 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 0 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
     fun getPhotosOnly(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
     fun getVideosOnly(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 0 ORDER BY deletedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 0 ORDER BY deletedAt DESC, id DESC")
     fun getTrashItems(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 1 ORDER BY deletedAt DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 1 ORDER BY deletedAt DESC, id DESC")
     fun getPrivateTrashItems(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = :concealed")
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = :concealed ORDER BY deletedAt DESC, id DESC")
     suspend fun getAllTrashIds(vaultId: String, concealed: Boolean): List<String>
+
+    @Query("""
+        SELECT COUNT(*)
+        FROM media_items
+        WHERE vaultId = :vaultId
+          AND cleanupStateCode != 0
+    """)
+    suspend fun countPendingTrashCleanup(vaultId: String): Int
 
     @Query("SELECT DISTINCT previousFolderId FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 1 AND previousFolderId IS NOT NULL")
     suspend fun getPrivateTrashFolderIds(vaultId: String): List<String>
@@ -266,7 +274,7 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND sha256Hex = :sha256Hex AND deletedAt IS NOT NULL LIMIT 1")
     suspend fun findTrashBySha256(vaultId: String, sha256Hex: String): MediaItemEntity?
 
-    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId = :folderId AND deletedAt IS NULL")
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId = :folderId AND deletedAt IS NULL ORDER BY importedAt DESC, id DESC")
     suspend fun getActiveIdsInFolder(vaultId: String, folderId: String): List<String>
 
     @Query("SELECT COUNT(*) FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL")
@@ -397,6 +405,33 @@ interface VaultJobDao {
         typeCode: Int, 
         dispositionCodes: List<Int>
     ): List<VaultJobEntity>
+
+    @Query("""
+        UPDATE jobs
+        SET stateCode = :stateCode,
+            sourceDispositionCode = :sourceDispositionCode,
+            errorCode = :errorCode,
+            updatedAt = :now
+        WHERE id = :id
+          AND vaultId = :vaultId
+    """)
+    suspend fun updateTerminalImportState(
+        id: String,
+        vaultId: String,
+        stateCode: Int,
+        sourceDispositionCode: Int,
+        errorCode: String?,
+        now: Long
+    ): Int
+
+    @Query("""
+        DELETE FROM jobs
+        WHERE vaultId = :vaultId
+          AND stateCode IN (7, 8, 9)
+          AND (sourceDispositionCode IS NULL OR sourceDispositionCode IN (0, 2, 3))
+          AND updatedAt < :cutoffTimestamp
+    """)
+    suspend fun purgeResolvedCompletedJobs(vaultId: String, cutoffTimestamp: Long): Int
 }
 
 @Dao
