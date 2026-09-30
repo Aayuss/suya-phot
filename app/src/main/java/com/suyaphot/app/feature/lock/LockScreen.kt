@@ -18,8 +18,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,6 +46,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -81,6 +88,7 @@ fun LockScreen(
 
     var showForgotPinDialog by remember { mutableStateOf(false) }
     var recoveryCodeInput by remember { mutableStateOf("") }
+    var recoveryCodeRevealed by remember { mutableStateOf(false) }
     var newPinInput by remember { mutableStateOf("") }
     var confirmNewPinInput by remember { mutableStateOf("") }
     var recoveryCredentialType by remember { mutableIntStateOf(0) }
@@ -361,6 +369,12 @@ fun LockScreen(
             )
             if (success) {
                 showForgotPinDialog = false
+                recoveryCodeInput = ""
+                recoveryCodeRevealed = false
+                newPinInput = ""
+                confirmNewPinInput = ""
+                firstRecoveryPattern?.fill(-1)
+                firstRecoveryPattern = null
                 onUnlocked()
             } else recoveryError = "Invalid recovery code or credential"
         }
@@ -371,8 +385,10 @@ fun LockScreen(
             onDismissRequest = {
                 showForgotPinDialog = false
                 recoveryCodeInput = ""
+                recoveryCodeRevealed = false
                 newPinInput = ""
                 confirmNewPinInput = ""
+                firstRecoveryPattern?.fill(-1)
                 firstRecoveryPattern = null
                 recoveryError = null
             },
@@ -395,15 +411,51 @@ fun LockScreen(
                     color = SuyaColors.TextMuted
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SuyaButton("New PIN", onClick = { recoveryCredentialType = 0; firstRecoveryPattern = null }, variant = ButtonVariant.Secondary)
-                    SuyaButton("New Pattern", onClick = { recoveryCredentialType = 1; firstRecoveryPattern = null }, variant = ButtonVariant.Secondary)
+                    SuyaButton(
+                        "New PIN",
+                        onClick = {
+                            recoveryCredentialType = 0
+                            firstRecoveryPattern?.fill(-1)
+                            firstRecoveryPattern = null
+                        },
+                        variant = ButtonVariant.Secondary
+                    )
+                    SuyaButton(
+                        "New Pattern",
+                        onClick = {
+                            recoveryCredentialType = 1
+                            firstRecoveryPattern?.fill(-1)
+                            firstRecoveryPattern = null
+                        },
+                        variant = ButtonVariant.Secondary
+                    )
                 }
-                SuyaTextField(
-                    value = recoveryCodeInput,
-                    onValueChange = { recoveryCodeInput = it.uppercase() },
-                    placeholder = "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX",
-                    label = "Recovery Code"
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    SuyaTextField(
+                        value = recoveryCodeInput,
+                        onValueChange = { recoveryCodeInput = it.uppercase().take(32) },
+                        placeholder = "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX",
+                        label = "Recovery Code",
+                        visualTransformation =
+                            if (recoveryCodeRevealed) VisualTransformation.None
+                            else PasswordVisualTransformation(),
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { recoveryCodeRevealed = !recoveryCodeRevealed }) {
+                        Icon(
+                            imageVector =
+                                if (recoveryCodeRevealed) Icons.Default.VisibilityOff
+                                else Icons.Default.Visibility,
+                            contentDescription =
+                                if (recoveryCodeRevealed) "Hide Recovery Code"
+                                else "Reveal Recovery Code",
+                            tint = SuyaColors.TextMuted
+                        )
+                    }
+                }
                 if (recoveryCredentialType == 0) {
                     SuyaTextField(
                         value = newPinInput,
@@ -432,13 +484,24 @@ fun LockScreen(
                     PatternLockPad(
                         onPatternComplete = { raw ->
                             val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
-                            if (normalized == null) { recoveryError = "Connect at least four dots"; recoveryPatternErrorTrigger++ }
-                            else if (firstRecoveryPattern == null) { firstRecoveryPattern = normalized; recoveryError = null }
-                            else if (!normalized.contentEquals(firstRecoveryPattern)) {
+                            raw.fill(-1)
+                            if (normalized == null) {
+                                recoveryError = "Connect at least four dots"
+                                recoveryPatternErrorTrigger++
+                            } else if (firstRecoveryPattern == null) {
+                                firstRecoveryPattern = normalized
+                                recoveryError = null
+                            } else if (!normalized.contentEquals(firstRecoveryPattern)) {
+                                firstRecoveryPattern?.fill(-1)
                                 firstRecoveryPattern = null
+                                normalized.fill(-1)
                                 recoveryError = "Patterns do not match"
                                 recoveryPatternErrorTrigger++
-                            } else submitRecoveryCredential(PatternCredential.canonicalChars(normalized), 1)
+                            } else {
+                                val credential = PatternCredential.canonicalChars(normalized)
+                                normalized.fill(-1)
+                                submitRecoveryCredential(credential, 1)
+                            }
                         },
                         errorTrigger = recoveryPatternErrorTrigger,
                         enabled = true,
