@@ -1,6 +1,7 @@
 package com.suyaphot.app.core.media
 
 import android.content.ContentResolver
+import android.content.ContentUris
 import android.content.Context
 import android.Manifest
 import android.content.pm.PackageManager
@@ -44,6 +45,43 @@ class MetadataReader(private val context: Context) {
             rawUri
         }
         return ResolvedMediaSource(rawUri, readUri)
+    }
+
+    /**
+     * Best-effort conversion of a picker/document-facing media URI to its canonical
+     * MediaStore row URI. This is used only after the encrypted vault copy has committed,
+     * so Android can grant/delete the actual public Gallery item rather than a mediated
+     * Photo Picker handle. Returns null when the provider does not expose a stable row id.
+     */
+    fun canonicalMediaStoreUri(rawUri: Uri): Uri? {
+        if (rawUri.authority != MediaStore.AUTHORITY) return null
+
+        val projection = arrayOf(
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.VOLUME_NAME,
+            MediaStore.MediaColumns.MIME_TYPE
+        )
+
+        return runCatching {
+            context.contentResolver.query(rawUri, projection, null, null, null)?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+
+                val idCol = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                val volumeCol = cursor.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
+                val mimeCol = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+                if (idCol < 0 || volumeCol < 0) return@use null
+
+                val id = cursor.getLong(idCol)
+                val volume = cursor.getString(volumeCol)?.takeIf { it.isNotBlank() } ?: return@use null
+                val mime = if (mimeCol >= 0) cursor.getString(mimeCol) else context.contentResolver.getType(rawUri)
+                val collection = if (mime?.startsWith("video/") == true) {
+                    MediaStore.Video.Media.getContentUri(volume)
+                } else {
+                    MediaStore.Images.Media.getContentUri(volume)
+                }
+                ContentUris.withAppendedId(collection, id)
+            }
+        }.getOrNull()
     }
 
     fun read(rawUri: Uri): ExtractedSourceMetadata = read(resolve(rawUri))
