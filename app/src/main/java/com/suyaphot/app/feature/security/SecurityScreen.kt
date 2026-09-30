@@ -294,6 +294,7 @@ fun SecurityScreen(
                                                         val iv = authCipher.iv
                                                         scope.launch(Dispatchers.IO) {
                                                             container.database.vaultDao().updateBiometricEnvelope(real.id, envelope, iv)
+                                                            container.preferences.setBiometricOnLaunch(true)
                                                         }
                                                     }
                                                 }
@@ -306,6 +307,7 @@ fun SecurityScreen(
                                 scope.launch(Dispatchers.IO) {
                                     container.keyManager.deleteBiometricKey(real.id)
                                     container.database.vaultDao().updateBiometricEnvelope(real.id, null, null)
+                                    container.preferences.setBiometricOnLaunch(false)
                                 }
                             }
                         }
