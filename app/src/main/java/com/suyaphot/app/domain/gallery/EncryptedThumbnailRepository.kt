@@ -33,13 +33,47 @@ class EncryptedThumbnailRepository(
         val lease = sessionManager.acquireOperationKeyLease() ?: return@withContext null
         try {
             if (lease.vaultId != vaultId) return@withContext null
-            val bitmap = generator.decryptThumbnail(fileStore.getThumbFile(vaultId, mediaId), lease.thumbSubkey, mediaId)
-                ?: return@withContext null
-            synchronized(this@EncryptedThumbnailRepository) {
-                if (generation != start || sessionManager.currentVaultId != vaultId) return@withContext null
-                cache.put(cacheKey, bitmap)
+            var bitmap = generator.decryptThumbnail(
+                fileStore.getThumbFile(vaultId, mediaId),
+                lease.thumbSubkey,
+                mediaId
+            )
+
+            // Self-healing display fallback: older/import-interrupted image items may
+            // have a valid encrypted preview even if the dedicated 360px thumbnail is
+            // missing or corrupt. Use the authenticated preview and downscale it rather
+            // than showing a permanent grey tile.
+            if (bitmap == null) {
+                val preview = generator.decryptImagePreview(
+                    fileStore.getPreviewFile(vaultId, mediaId),
+                    lease.thumbSubkey,
+                    mediaId
+                )
+                if (preview != null) {
+                    val maxSide = maxOf(preview.width, preview.height).coerceAtLeast(1)
+                    val scale = (ThumbnailGenerator.TARGET_THUMB_SIZE.toFloat() / maxSide)
+                        .coerceAtMost(1f)
+                    val targetW = (preview.width * scale).toInt().coerceAtLeast(1)
+                    val targetH = (preview.height * scale).toInt().coerceAtLeast(1)
+                    bitmap = if (targetW == preview.width && targetH == preview.height) {
+                        preview
+                    } else {
+                        Bitmap.createScaledBitmap(preview, targetW, targetH, true).also {
+                            preview.recycle()
+                        }
+                    }
+                }
             }
-            bitmap
+
+            val finalBitmap = bitmap ?: return@withContext null
+            synchronized(this@EncryptedThumbnailRepository) {
+                if (generation != start || sessionManager.currentVaultId != vaultId) {
+                    finalBitmap.recycle()
+                    return@withContext null
+                }
+                cache.put(cacheKey, finalBitmap)
+            }
+            finalBitmap
         } finally {
             lease.close()
         }
