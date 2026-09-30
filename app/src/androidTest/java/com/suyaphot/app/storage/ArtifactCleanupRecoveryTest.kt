@@ -29,7 +29,7 @@ class ArtifactCleanupRecoveryTest {
         val fileStore = VaultFileStore(context)
         val preferences = SecurityPreferences(context)
 
-        val vaultId = "cleanup_\${UUID.randomUUID()}"
+        val vaultId = "cleanup_${UUID.randomUUID()}"
         val itemId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
 
@@ -55,8 +55,8 @@ class ArtifactCleanupRecoveryTest {
                     folderId = null,
                     mediaTypeCode = 0,
                     encryptedMetadata = ByteArray(32),
-                    encryptedFileRelativePath = "\$itemId.sph",
-                    encryptedThumbRelativePath = "\$itemId.sth",
+                    encryptedFileRelativePath = "$itemId.sph",
+                    encryptedThumbRelativePath = "$itemId.sth",
                     plaintextSize = 4L,
                     cipherSize = 32L,
                     sha256Hex = "00".repeat(32),
@@ -66,7 +66,7 @@ class ArtifactCleanupRecoveryTest {
                     deletedAt = now,
                     previousFolderId = null,
                     dateTakenMs = null,
-                    encryptedPreviewRelativePath = "\$itemId.spr",
+                    encryptedPreviewRelativePath = "$itemId.spr",
                     cleanupStateCode = 0,
                     concealed = false
                 )
