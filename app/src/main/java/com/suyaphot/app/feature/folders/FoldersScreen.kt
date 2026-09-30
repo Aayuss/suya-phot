@@ -9,6 +9,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -90,6 +91,7 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.domain.importmedia.MoveImportFinalizer
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
@@ -208,24 +210,85 @@ fun FoldersScreen(
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingFolderMoveConsent by remember {
+        mutableStateOf<MoveImportFinalizer.Step.RequiresConsent?>(null)
+    }
+    var pendingMoveImportFailureCount by remember { mutableStateOf(0) }
+
+    fun applyFolderMoveStep(step: MoveImportFinalizer.Step) {
+        when (step) {
+            is MoveImportFinalizer.Step.Completed -> {
+                pendingFolderMoveConsent = null
+                val importFailures = pendingMoveImportFailureCount
+                pendingMoveImportFailureCount = 0
+                folderActionStatus = buildString {
+                    append("${step.deletedCount} moved to the vault")
+                    if (step.retainedCount > 0) append(", ${step.retainedCount} originals kept")
+                    if (step.failedCount > 0) append(", ${step.failedCount} originals could not be removed")
+                    if (importFailures > 0) append(", $importFailures imports failed")
+                }
+            }
+            is MoveImportFinalizer.Step.RequiresConsent -> {
+                pendingFolderMoveConsent = step
+                folderActionStatus = "Encrypted copies are safe. Confirm Android's request to remove the originals."
+            }
+        }
+    }
+
+    val folderMoveConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val step = pendingFolderMoveConsent ?: return@rememberLauncherForActivityResult
+        pendingFolderMoveConsent = null
+        scope.launch {
+            applyFolderMoveStep(
+                container.moveImportFinalizer.afterConsent(
+                    vaultId = vaultId,
+                    step = step,
+                    resultCode = result.resultCode
+                )
+            )
+        }
+    }
+
+    LaunchedEffect(pendingFolderMoveConsent) {
+        val step = pendingFolderMoveConsent ?: return@LaunchedEffect
+        container.sessionManager.beginSystemActivity()
+        folderMoveConsentLauncher.launch(
+            IntentSenderRequest.Builder(step.intentSender).build()
+        )
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
+            val targetFolderId = currentParentId
             scope.launch {
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
-                    folderId = currentParentId,
-                    mode = ImportMode.COPY,
+                    folderId = targetFolderId,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                pendingMoveImportFailureCount = results.count { it is ImportResult.Failure }
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
-                val failed = results.count { it is ImportResult.Failure }
-                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
+
+                if (successes.isEmpty()) {
+                    folderActionStatus = "No items were moved to the vault; ${pendingMoveImportFailureCount} failed."
+                    pendingMoveImportFailureCount = 0
+                } else {
+                    applyFolderMoveStep(
+                        container.moveImportFinalizer.begin(
+                            vaultId = vaultId,
+                            successes = successes
+                        )
+                    )
+                }
             }
         }
     }
@@ -734,8 +797,8 @@ fun FoldersScreen(
                 EmptyState(
                     icon = Icons.Default.Folder,
                     title = if (currentParentId == null) "No folders created" else "This folder is empty",
-                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Import media or create subfolders inside.",
-                    actionText = if (hiddenMode && currentParentId == null) null else "Import Photos & Videos",
+                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Move media here or create subfolders inside.",
+                    actionText = if (hiddenMode && currentParentId == null) null else "Move Photos & Videos to Vault",
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
