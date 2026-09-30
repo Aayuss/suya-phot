@@ -123,7 +123,7 @@ class EncryptedThumbnailRepository(
                 sourceEncryptedFile = encryptedMedia,
                 mediaSubkey = mediaSubkey,
                 itemId = mediaId,
-                destinationFile = temp
+                destinationTemp = temp
             )
             val verifiedSha = verified.sha256.joinToString("") { "%02x".format(it) }
             if (
