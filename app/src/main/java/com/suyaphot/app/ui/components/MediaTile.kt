@@ -76,9 +76,9 @@ fun MediaTile(
         // A tile can compose during the brief unlock/session hand-off. Retry a few
         // times instead of leaving a permanent gray placeholder until navigation.
         var loaded: Bitmap? = null
-        repeat(4) { attempt ->
+        for (attempt in 0 until 4) {
             loaded = withContext(Dispatchers.IO) { thumbLoader(item.id) }
-            if (loaded != null) return@repeat
+            if (loaded != null) break
             if (attempt < 3) delay(90L)
         }
         thumbnailBitmap = loaded
