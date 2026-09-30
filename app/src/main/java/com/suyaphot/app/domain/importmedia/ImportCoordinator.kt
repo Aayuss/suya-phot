@@ -194,6 +194,41 @@ class ImportCoordinator(
     private val folderAccessManager: FolderAccessManager
 ) {
 
+    /**
+     * Android Photo Picker URIs are intentionally read-only. For a LOCAL picker item,
+     * AOSP wraps the underlying MediaStore row ID in a well-defined media/picker URI.
+     * Convert only those local-provider shapes; never reinterpret cloud-provider IDs.
+     */
+    private fun localMediaStoreUriFromPicker(uri: Uri, mediaType: MediaType): Uri? {
+        if (uri.authority != MediaStore.AUTHORITY) return null
+        val segments = uri.pathSegments ?: return null
+        if (segments.isEmpty() || (segments[0] != "picker" && segments[0] != "picker_get_content")) {
+            return null
+        }
+
+        val mediaId: Long = when {
+            // Android 13+:
+            // content://media/picker/<user>/<provider-authority>/media/<media-id>
+            segments.size >= 5 &&
+                segments[2] == "com.android.providers.media.photopicker" &&
+                segments[3] == "media" ->
+                segments[4].toLongOrNull()
+
+            // Older local-only picker shape:
+            // content://media/picker/<user>/<media-id>
+            segments.size == 3 ->
+                segments[2].toLongOrNull()
+
+            else -> null
+        } ?: return null
+
+        val collection = when (mediaType) {
+            MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        }
+        return ContentUris.withAppendedId(collection, mediaId)
+    }
+
     private fun bytesToHex(bytes: ByteArray): String =
         bytes.joinToString("") { "%02x".format(it) }
 
@@ -269,13 +304,16 @@ class ImportCoordinator(
             val sourceMeta = metadataReader.read(resolvedSource)
             // Photo Picker URIs are read-only proxy URIs. When MediaStore identity is
             // available, retain the canonical public MediaStore URI for MOVE deletion.
-            val sourceDeleteUri = sourceMeta.metadata.sourceMediaStoreId?.let { sourceId ->
-                val volume = sourceMeta.metadata.sourceVolume ?: MediaStore.VOLUME_EXTERNAL
-                when (sourceMeta.mediaType) {
-                    MediaType.IMAGE -> ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(volume), sourceId)
-                    MediaType.VIDEO -> ContentUris.withAppendedId(MediaStore.Video.Media.getContentUri(volume), sourceId)
-                }
-            } ?: resolvedSource.sourceUri
+            val sourceDeleteUri =
+                localMediaStoreUriFromPicker(resolvedSource.sourceUri, sourceMeta.mediaType)
+                    ?: sourceMeta.metadata.sourceMediaStoreId?.let { sourceId ->
+                        val volume = sourceMeta.metadata.sourceVolume ?: MediaStore.VOLUME_EXTERNAL
+                        when (sourceMeta.mediaType) {
+                            MediaType.IMAGE -> ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(volume), sourceId)
+                            MediaType.VIDEO -> ContentUris.withAppendedId(MediaStore.Video.Media.getContentUri(volume), sourceId)
+                        }
+                    }
+                    ?: resolvedSource.sourceUri
 
             // 2. Encrypting stream to .partial file
             vaultJobDao.updateState(jobId, JobState.ENCRYPTING.code, System.currentTimeMillis())
