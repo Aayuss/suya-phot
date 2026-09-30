@@ -1,8 +1,14 @@
 package com.suyaphot.app.domain.gallery
 
 import android.graphics.Bitmap
+import android.net.Uri
 import android.util.LruCache
+import com.suyaphot.app.core.crypto.Aead
+import com.suyaphot.app.core.crypto.VaultCrypto
+import com.suyaphot.app.core.database.dao.MediaItemDao
 import com.suyaphot.app.core.media.ThumbnailGenerator
+import com.suyaphot.app.core.model.MediaType
+import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.SessionManager
 import kotlinx.coroutines.Dispatchers
@@ -12,7 +18,9 @@ import kotlinx.coroutines.withContext
 class EncryptedThumbnailRepository(
     private val sessionManager: SessionManager,
     private val fileStore: VaultFileStore,
-    private val generator: ThumbnailGenerator
+    private val generator: ThumbnailGenerator,
+    private val mediaItemDao: MediaItemDao,
+    private val vaultCrypto: VaultCrypto
 ) {
     private val cache = object : LruCache<String, Bitmap>(32 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = (value.byteCount / 1024).coerceAtLeast(1)
