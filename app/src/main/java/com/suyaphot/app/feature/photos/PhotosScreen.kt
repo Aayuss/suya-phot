@@ -361,7 +361,7 @@ fun PhotosScreen(
                         )
                         SuyaIconButton(
                             icon = Icons.Default.Add,
-                            contentDescription = "Import media",
+                            contentDescription = "Move media into vault",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(
