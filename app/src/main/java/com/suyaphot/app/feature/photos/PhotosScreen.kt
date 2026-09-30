@@ -136,24 +136,82 @@ fun PhotosScreen(
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
+    var pendingMoveConsentItems by remember { mutableStateOf<List<ImportResult.Success>>(emptyList()) }
+    var pendingMoveAlreadyDeleted by remember { mutableStateOf(0) }
+
+    fun moveSummaryText(deleted: Int, retained: Int, failed: Int): String = when {
+        retained == 0 && failed == 0 -> "$deleted moved into Suya Phot. Public originals removed."
+        failed > 0 -> "$deleted moved. $retained original(s) remain because Android could not delete them."
+        else -> "$deleted moved. $retained original(s) kept in Gallery."
+    }
+
+    val moveConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val mode = pendingMoveConsentMode
+        val pending = pendingMoveConsentItems
+        val alreadyDeleted = pendingMoveAlreadyDeleted
+        pendingMoveConsentMode = null
+        pendingMoveConsentItems = emptyList()
+        pendingMoveAlreadyDeleted = 0
+        if (mode == null || pending.isEmpty()) return@rememberLauncherForActivityResult
+
+        scope.launch {
+            val summary = container.vaultMoveFinalizer.completeConsent(
+                pending = pending,
+                mode = mode,
+                granted = result.resultCode == android.app.Activity.RESULT_OK
+            )
+            statusMessage = moveSummaryText(
+                deleted = alreadyDeleted + summary.deletedCount,
+                retained = summary.retainedCount,
+                failed = summary.failedCount
+            )
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
             scope.launch {
+                // "Add to vault" is MOVE semantics: first create + authenticate the encrypted
+                // private copy, then remove the public source only after that commit succeeds.
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
-                val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                val failedImports = results.count { it is ImportResult.Failure }
+                when (val finalized = container.vaultMoveFinalizer.begin(successes)) {
+                    is com.suyaphot.app.domain.importmedia.VaultMoveFinalizer.Result.Completed -> {
+                        val s = finalized.summary
+                        statusMessage = if (failedImports > 0) {
+                            moveSummaryText(s.deletedCount, s.retainedCount, s.failedCount) +
+                                " $failedImports import(s) failed; their originals were untouched."
+                        } else {
+                            moveSummaryText(s.deletedCount, s.retainedCount, s.failedCount)
+                        }
+                    }
+                    is com.suyaphot.app.domain.importmedia.VaultMoveFinalizer.Result.RequiresConsent -> {
+                        pendingMoveConsentMode = finalized.mode
+                        pendingMoveConsentItems = finalized.pending
+                        pendingMoveAlreadyDeleted = finalized.alreadyDeletedCount
+                        statusMessage = "Encrypted copies are safe. Confirm Android's delete prompt to finish moving."
+                        container.sessionManager.beginSystemActivity()
+                        moveConsentLauncher.launch(
+                            IntentSenderRequest.Builder(finalized.intentSender).build()
+                        )
+                    }
+                }
             }
         }
     }
@@ -349,7 +407,7 @@ fun PhotosScreen(
                         )
                         SuyaIconButton(
                             icon = Icons.Default.Add,
-                            contentDescription = "Import media",
+                            contentDescription = "Move media to Suya Phot",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(
@@ -566,8 +624,8 @@ fun PhotosScreen(
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
-                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to import private photos or videos from your gallery.",
-                    actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
+                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to move photos or videos into your encrypted vault.",
+                    actionText = if (searchQuery.isBlank()) "Move Photos & Videos" else null,
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
