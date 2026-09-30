@@ -1,7 +1,9 @@
 package com.suyaphot.app.domain.importmedia
 
+import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
+import android.provider.MediaStore
 import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.VaultCrypto
@@ -195,6 +197,28 @@ class ImportCoordinator(
     private fun bytesToHex(bytes: ByteArray): String =
         bytes.joinToString("") { "%02x".format(it) }
 
+
+    /**
+     * Android Photo Picker URIs are read-only façade URIs and are often not
+     * accepted by MediaStore.createDeleteRequest(). When the provider exposes
+     * the original MediaStore volume/id, reconstruct the canonical public URI
+     * so MOVE can request deletion of the actual Gallery item.
+     */
+    private fun canonicalDeletionUri(
+        rawUri: Uri,
+        sourceMeta: MetadataReader.ExtractedSourceMetadata
+    ): Uri {
+        val volume = sourceMeta.metadata.sourceVolume
+        val id = sourceMeta.metadata.sourceMediaStoreId
+        if (volume == null || id == null || id < 0L) return rawUri
+
+        val base = when (sourceMeta.mediaType) {
+            MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume)
+            MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume)
+        }
+        return ContentUris.withAppendedId(base, id)
+    }
+
     suspend fun importSingle(
         uri: Uri,
         folderId: String?,
@@ -265,6 +289,7 @@ class ImportCoordinator(
             vaultJobDao.updateState(jobId, JobState.READING_SOURCE.code, System.currentTimeMillis())
             val resolvedSource = metadataReader.resolve(uri)
             val sourceMeta = metadataReader.read(resolvedSource)
+            val deletionUri = canonicalDeletionUri(uri, sourceMeta)
 
             // 2. Encrypting stream to .partial file
             vaultJobDao.updateState(jobId, JobState.ENCRYPTING.code, System.currentTimeMillis())
@@ -383,7 +408,7 @@ class ImportCoordinator(
             // 7. Transactional DB commit (Section 15)
             val now = System.currentTimeMillis()
             val stagedRaw = ImportJobPayload(
-                sourceUri = uri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
+                sourceUri = deletionUri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
                 stagedMedia = ImportJobPayload.StagedMedia(
                     mediaTypeCode = sourceMeta.mediaType.code,
                     plaintextSize = verifyResult.plaintextSize,
@@ -448,7 +473,7 @@ class ImportCoordinator(
             ImportResult.Success(
                 jobId = jobId,
                 itemId = itemId,
-                uri = uri,
+                uri = deletionUri,
                 sha256Hex = sha256Hex,
                 mode = mode
             )
