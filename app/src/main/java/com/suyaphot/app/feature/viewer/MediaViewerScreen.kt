@@ -726,18 +726,24 @@ private fun MediaViewerPage(
                             onClick = {
                                 val current = mediaEntity ?: return@SuyaIconButton
                                 val newFav = !current.favorite
+                                val now = System.currentTimeMillis()
+                                // Optimistic UI: the star should react on the same frame as the tap.
+                                mediaEntity = current.copy(favorite = newFav, updatedAt = now)
                                 scope.launch {
-                                    val activeVaultId = session?.vaultId ?: return@launch
+                                    val activeVaultId = session?.vaultId ?: run {
+                                        mediaEntity = current
+                                        return@launch
+                                    }
                                     val updated = withContext(Dispatchers.IO) {
                                         container.database.mediaItemDao().updateFavoriteForVault(
                                             activeVaultId,
                                             current.id,
                                             newFav,
-                                            System.currentTimeMillis()
+                                            now
                                         )
                                     }
-                                    if (updated == 1) {
-                                        mediaEntity = current.copy(favorite = newFav)
+                                    if (updated != 1) {
+                                        mediaEntity = current
                                     }
                                 }
                             }
