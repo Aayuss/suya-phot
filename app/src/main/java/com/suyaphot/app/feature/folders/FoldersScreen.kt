@@ -512,7 +512,7 @@ fun FoldersScreen(
                                 pendingLockId = null
                                 pendingLockBioIv = null
                                 pendingFolderId?.let { attemptOpenFolder(it) }
-                            } else gateError = "Fingerprint unavailable; use the folder credential"
+                            } else gateError = "Biometric unavailable; use the folder credential"
                         }
                     }
                 }
@@ -525,7 +525,7 @@ fun FoldersScreen(
                     .build(),
                 BiometricPrompt.CryptoObject(cipher)
             )
-        } catch (_: Exception) { gateError = "Fingerprint unavailable; use the folder credential" }
+        } catch (_: Exception) { gateError = "Biometric unavailable; use the folder credential" }
     }
 
     fun launchHiddenBiometric() {
