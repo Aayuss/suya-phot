@@ -66,10 +66,15 @@ fun SuyaBottomNav(
                 .fillMaxWidth()
                 .padding(6.dp)
         ) {
-            val slotWidth = maxWidth / SuyaNavTab.entries.size
+            val selectedWidth = (maxWidth * 0.46f)
+                .coerceAtLeast(92.dp)
+                .coerceAtMost(112.dp)
+                .coerceAtMost(maxWidth)
+            val compactWidth = ((maxWidth - selectedWidth) / (SuyaNavTab.entries.size - 1))
+                .coerceAtLeast(34.dp)
             val selectedIndex = SuyaNavTab.entries.indexOf(selectedTab).coerceAtLeast(0)
             val indicatorX by animateDpAsState(
-                targetValue = slotWidth * selectedIndex,
+                targetValue = compactWidth * selectedIndex,
                 animationSpec = spring(
                     dampingRatio = Spring.DampingRatioNoBouncy,
                     stiffness = Spring.StiffnessMediumLow
@@ -81,8 +86,8 @@ fun SuyaBottomNav(
             Box(
                 modifier = Modifier
                     .offset(x = indicatorX)
-                    .width(slotWidth)
-                    .size(height = 50.dp, width = slotWidth)
+                    .width(selectedWidth)
+                    .size(height = 50.dp, width = selectedWidth)
                     .background(SuyaColors.Accent, RoundedCornerShape(25.dp))
             )
 
@@ -94,11 +99,19 @@ fun SuyaBottomNav(
                 SuyaNavTab.entries.forEach { tab ->
                     val selected = tab == selectedTab
                     val interaction = remember(tab) { MutableInteractionSource() }
+                    val itemWidth by animateDpAsState(
+                        targetValue = if (selected) selectedWidth else compactWidth,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioNoBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        ),
+                        label = "bottom_nav_item_width"
+                    )
 
                     Row(
                         modifier = Modifier
-                            .width(slotWidth)
-                            .size(height = 50.dp, width = slotWidth)
+                            .width(itemWidth)
+                            .size(height = 50.dp, width = itemWidth)
                             .combinedClickable(
                                 interactionSource = interaction,
                                 indication = null,
