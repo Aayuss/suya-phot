@@ -50,6 +50,24 @@ class SetupAndLockFlowTest {
     }
 
     @Test
+    fun testSecureSetupStateRestartsAfterActivityRecreation() {
+        try {
+            composeTestRule.onNodeWithContentDescription("Back").performClick()
+            composeTestRule.waitForIdle()
+        } catch (_: Throwable) {}
+
+        composeTestRule.onNodeWithTag("welcome_create_vault_btn", useUnmergedTree = true).performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("credential_choice_screen", useUnmergedTree = true).assertIsDisplayed()
+
+        composeTestRule.activityRule.scenario.recreate()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("welcome_create_vault_btn", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("Suya Phot").assertIsDisplayed()
+    }
+
+    @Test
     fun testRestoreFromBackupButtonOpensRestoreScreen() {
         // If not on welcome screen, go back
         try {
