@@ -15,6 +15,7 @@ import com.suyaphot.app.core.media.DerivativeCryptoVerifier
 import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
+import com.suyaphot.app.core.util.VaultStorageMutationGate
 import com.suyaphot.app.domain.auth.LockReason
 import com.suyaphot.app.domain.auth.SessionManager
 import com.suyaphot.app.domain.auth.VaultCredentialValidator
@@ -169,6 +170,7 @@ class VaultBackupImporter(
             // 1. Decrypt header, master key, and manifest
             val (manifest, masterKey) = verifier.decryptManifestAndMasterKey(dis, recoveryCodeInput)
 
+            try {
             // 2. FAIL-SAFE: reject restore immediately if a vault of the same kind already exists
             val existingVault = database.vaultDao().getVaultByKind(manifest.vaultKindCode)
             if (existingVault != null) {
@@ -232,7 +234,9 @@ class VaultBackupImporter(
             )
         }
 
-        // 5. Create secure restore staging directory with local random UUID
+        // 5. Serialize staging/final vault mutations against startup orphan cleanup.
+        return@withContext VaultStorageMutationGate.withExclusiveMutation {
+        // Create secure restore staging directory with local random UUID
         val stagingDir = fileStore.createBackupRestoreStagingDir()
         var stagedSequence = 0L
 
@@ -693,10 +697,13 @@ class VaultBackupImporter(
                 folderCount = manifest.folders.size
             )
         } finally {
-            masterKey.fill(0)
-            newCredential.fill('\u0000')
             stagingDir.deleteRecursively()
         }
+        }
+            } finally {
+                masterKey.fill(0)
+                newCredential.fill('\u0000')
+            }
         } finally {
             restoreMutex.unlock()
         }
