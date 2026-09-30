@@ -136,6 +136,104 @@ fun PhotosScreen(
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
+    var pendingMoveConsentItems by remember { mutableStateOf<List<Pair<String, Uri>>>(emptyList()) }
+
+    val moveConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val mode = pendingMoveConsentMode
+        val pending = pendingMoveConsentItems
+        pendingMoveConsentMode = null
+        pendingMoveConsentItems = emptyList()
+        if (mode == null || pending.isEmpty()) return@rememberLauncherForActivityResult
+
+        scope.launch(Dispatchers.IO) {
+            val verification = if (result.resultCode == android.app.Activity.RESULT_OK) {
+                container.sourceDeletionCoordinator.completeConsent(pending.map { it.second }, mode)
+            } else {
+                SourceDeletionCoordinator.DeletionVerification(
+                    deletedUris = emptyList(),
+                    retainedUris = pending.map { it.second }
+                )
+            }
+            val now = System.currentTimeMillis()
+            pending.forEach { (jobId, uri) ->
+                val deleted = uri in verification.deletedUris
+                container.database.vaultJobDao().updateTerminalImportState(
+                    id = jobId,
+                    vaultId = vaultId,
+                    stateCode = JobState.COMPLETED.code,
+                    sourceDispositionCode = if (deleted) SourceDisposition.DELETED.code else SourceDisposition.RETAINED_BY_USER.code,
+                    errorCode = null,
+                    now = now
+                )
+            }
+            withContext(Dispatchers.Main) {
+                statusMessage = if (verification.retainedUris.isEmpty()) {
+                    "Moved to Suya Phot. Originals removed from Gallery."
+                } else {
+                    "Encrypted copies are safe. Some originals remain because Android deletion was not approved."
+                }
+            }
+        }
+    }
+
+    suspend fun finalizeMove(successes: List<ImportResult.Success>) {
+        if (successes.isEmpty()) return
+        val byUri = successes.associateBy { it.uri }
+        when (val outcome = container.sourceDeletionCoordinator.deleteSources(successes.map { it.uri })) {
+            is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
+                val now = System.currentTimeMillis()
+                successes.forEach { success ->
+                    container.database.vaultJobDao().updateTerminalImportState(
+                        success.jobId, vaultId, JobState.COMPLETED.code,
+                        if (success.uri in outcome.deletedUris) SourceDisposition.DELETED.code else SourceDisposition.DELETE_FAILED.code,
+                        if (success.uri in outcome.deletedUris) null else "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                        now
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    statusMessage = "Moved to Suya Phot. Originals removed from Gallery."
+                }
+            }
+            is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
+                val now = System.currentTimeMillis()
+                outcome.deletedUris.forEach { uri ->
+                    byUri[uri]?.let { success ->
+                        container.database.vaultJobDao().updateTerminalImportState(
+                            success.jobId, vaultId, JobState.COMPLETED.code,
+                            SourceDisposition.DELETED.code, null, now
+                        )
+                    }
+                }
+                val pending = outcome.uris.mapNotNull { uri -> byUri[uri]?.let { it.jobId to uri } }
+                withContext(Dispatchers.Main) {
+                    pendingMoveConsentItems = pending
+                    pendingMoveConsentMode = outcome.mode
+                    container.sessionManager.beginSystemActivity()
+                    moveConsentLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
+                }
+            }
+            is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
+                val now = System.currentTimeMillis()
+                successes.forEach { success ->
+                    val deleted = success.uri in outcome.deletedUris
+                    container.database.vaultJobDao().updateTerminalImportState(
+                        success.jobId, vaultId, JobState.COMPLETED.code,
+                        if (deleted) SourceDisposition.DELETED.code else SourceDisposition.DELETE_FAILED.code,
+                        if (deleted) null else "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                        now
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    statusMessage = "Encrypted copies are safe. Android could not remove every original; use Finish Moving."
+                }
+            }
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -143,9 +241,9 @@ fun PhotosScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
                 isImporting = false
@@ -153,7 +251,8 @@ fun PhotosScreen(
                 val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
                 val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+                statusMessage = "$imported secured, $duplicate duplicates, $failed failed"
+                finalizeMove(results.filterIsInstance<ImportResult.Success>())
             }
         }
     }
@@ -566,7 +665,7 @@ fun PhotosScreen(
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
-                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to import private photos or videos from your gallery.",
+                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to move photos or videos into the private vault.",
                     actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
