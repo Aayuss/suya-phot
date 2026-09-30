@@ -688,7 +688,7 @@ fun FoldersScreen(
                     actions = {
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
-                            contentDescription = "Import media here",
+                            contentDescription = "Move media here",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(
