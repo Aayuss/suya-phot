@@ -81,4 +81,21 @@ class PrivacyQueriesTest {
             assertEquals(listOf("hidden"), db.folderDao().getHiddenRoots("vault").first().map { it.folder.id })
         } finally { db.close() }
     }
+
+    @Test fun folderCountIncludesDirectChildFolders() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
+        try {
+            db.vaultDao().insert(VaultEntity("vault", 0, 1, 1, byteArrayOf(1)))
+            db.folderDao().insert(FolderEntity("parent", "vault", null, byteArrayOf(1), 1, 1, null, 0))
+            db.folderDao().insert(FolderEntity("child", "vault", "parent", byteArrayOf(1), 2, 2, null, 0))
+
+            val rootRows = db.folderDao().getSubFoldersWithCount("vault", null).first()
+            val parent = rootRows.single { it.folder.id == "parent" }
+            assertEquals("A folder with one direct subfolder should display one item", 1, parent.itemCount)
+        } finally {
+            db.close()
+        }
+    }
+
 }
