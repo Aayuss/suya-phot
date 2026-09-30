@@ -1,5 +1,14 @@
 package com.suyaphot.app.core.util
 
+data class VaultArtifactCleanupResult(
+    val mediaRemoved: Boolean,
+    val thumbRemoved: Boolean,
+    val previewRemoved: Boolean
+) {
+    val allRemoved: Boolean
+        get() = mediaRemoved && thumbRemoved && previewRemoved
+}
+
 import android.content.Context
 import java.io.File
 import java.io.FileOutputStream
@@ -116,6 +125,27 @@ class VaultFileStore(private val context: Context) {
         requireInternalId(eventId, "event id")
         val dir = File(getVaultDir(vaultId), "security").apply { mkdirs() }
         return File(dir, "$eventId.sph")
+    }
+
+    /**
+     * Removes every private artifact associated with a media item.
+     *
+     * Callers must not delete the database row until [VaultArtifactCleanupResult.allRemoved]
+     * is true. This keeps failed Delete Forever / Move cleanup retryable instead of leaving
+     * orphaned encrypted thumbnails or previews behind.
+     */
+    fun deleteMediaArtifacts(vaultId: String, itemId: String): VaultArtifactCleanupResult {
+        val media = getMediaFile(vaultId, itemId)
+        val thumb = getThumbFile(vaultId, itemId)
+        val preview = getPreviewFile(vaultId, itemId)
+
+        fun remove(file: File): Boolean = !file.exists() || file.delete()
+
+        return VaultArtifactCleanupResult(
+            mediaRemoved = remove(media),
+            thumbRemoved = remove(thumb),
+            previewRemoved = remove(preview)
+        )
     }
 
     /**
