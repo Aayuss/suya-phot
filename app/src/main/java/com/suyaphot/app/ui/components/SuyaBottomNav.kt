@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -81,7 +82,7 @@ fun SuyaBottomNav(
                 modifier = Modifier
                     .offset(x = indicatorOffset)
                     .width(selectedWidth)
-                    .size(width = selectedWidth, height = 50.dp)
+                    .height(50.dp)
                     .background(SuyaColors.Accent, RoundedCornerShape(25.dp))
             )
 
@@ -97,7 +98,7 @@ fun SuyaBottomNav(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .width(tabWidth)
-                            .size(width = tabWidth, height = 50.dp)
+                            .height(50.dp)
                             .clickable(
                                 interactionSource = remember(tab) { MutableInteractionSource() },
                                 indication = null,
