@@ -96,14 +96,11 @@ class TrashCoordinator(
                 failed += item.id
                 continue
             }
-            val media = fileStore.getMediaFile(vaultId, item.id)
-            val mediaRemoved = !media.exists() || media.delete()
-            if (!mediaRemoved) {
+            val cleanup = fileStore.deleteMediaArtifacts(vaultId, item.id)
+            if (!cleanup.allRemoved) {
                 failed += item.id
                 continue
             }
-            runCatching { fileStore.getThumbFile(vaultId, item.id).delete() }
-            runCatching { fileStore.getPreviewFile(vaultId, item.id).delete() }
             if (database.mediaItemDao().markTrashCleanupState(
                     vaultId, item.id, FILE_REMOVED_DB_PENDING, System.currentTimeMillis()
                 ) != 1) {
