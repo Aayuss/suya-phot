@@ -650,7 +650,7 @@ fun FoldersScreen(
                 )
                 prompt.authenticate(
                     BiometricPrompt.PromptInfo.Builder()
-                        .setTitle("Enable folder fingerprint")
+                        .setTitle("Enable folder biometric")
                         .setNegativeButtonText("Cancel")
                         .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                         .build(),
@@ -1165,11 +1165,11 @@ fun FoldersScreen(
                             modifier = Modifier.fillMaxWidth()
                         )
                         SuyaButton(
-                            text = "Disable folder fingerprint",
+                            text = "Disable folder biometric",
                             onClick = {
                                 scope.launch {
                                     val disabled = container.folderLockManager.disableBiometric(targetFolder.lockId)
-                                    folderActionStatus = if (disabled) "Folder fingerprint disabled" else "Unlock this folder first"
+                                    folderActionStatus = if (disabled) "Folder biometric disabled" else "Unlock this folder first"
                                     selectedFolderForAction = null
                                 }
                             },
@@ -1408,7 +1408,7 @@ fun FoldersScreen(
     if (showEnrollBiometricDialog && enrollLockId != null) {
         SuyaDialog(
             onDismissRequest = { showEnrollBiometricDialog = false; enrollInput = "" },
-            title = "Enable folder fingerprint",
+            title = "Enable folder biometric",
             confirmText = if (enrollTypeCode == 0) "Continue" else null,
             onConfirm = if (enrollTypeCode == 0) ({ enrollFolderBiometric(enrollInput.toCharArray()); enrollInput = "" }) else null,
             content = {
