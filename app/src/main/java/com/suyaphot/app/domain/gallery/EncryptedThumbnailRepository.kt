@@ -84,20 +84,20 @@ class EncryptedThumbnailRepository(
                 }
             }
 
-            bitmap ?: return@withContext null
+            val loadedBitmap = bitmap ?: return@withContext null
 
             synchronized(this@EncryptedThumbnailRepository) {
                 if (
                     generation != start ||
                     sessionManager.currentVaultId != vaultId
                 ) {
-                    bitmap.recycle()
+                    loadedBitmap.recycle()
                     return@withContext null
                 }
-                cache.put(cacheKey, bitmap)
+                cache.put(cacheKey, loadedBitmap)
             }
 
-            bitmap
+            loadedBitmap
         } finally {
             lease.close()
         }
