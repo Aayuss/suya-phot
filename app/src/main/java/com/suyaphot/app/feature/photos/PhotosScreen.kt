@@ -87,6 +87,7 @@ import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.domain.importmedia.ImportJobPayload
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
+import com.suyaphot.app.domain.importmedia.MoveImportFinalizer
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.MediaFilter
@@ -142,6 +143,55 @@ fun PhotosScreen(
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingPickerMoveConsent by remember {
+        mutableStateOf<MoveImportFinalizer.Step.RequiresConsent?>(null)
+    }
+    var pendingMoveImportFailureCount by remember { mutableStateOf(0) }
+
+    fun applyMoveStep(step: MoveImportFinalizer.Step) {
+        when (step) {
+            is MoveImportFinalizer.Step.Completed -> {
+                pendingPickerMoveConsent = null
+                val importFailures = pendingMoveImportFailureCount
+                pendingMoveImportFailureCount = 0
+                statusMessage = buildString {
+                    append("${step.deletedCount} moved to the vault")
+                    if (step.retainedCount > 0) append(", ${step.retainedCount} originals kept")
+                    if (step.failedCount > 0) append(", ${step.failedCount} originals could not be removed")
+                    if (importFailures > 0) append(", $importFailures imports failed")
+                }
+            }
+            is MoveImportFinalizer.Step.RequiresConsent -> {
+                pendingPickerMoveConsent = step
+                statusMessage = "Encrypted copies are safe. Confirm Android's request to remove the originals."
+            }
+        }
+    }
+
+    val pickerMoveConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val step = pendingPickerMoveConsent ?: return@rememberLauncherForActivityResult
+        pendingPickerMoveConsent = null
+        scope.launch {
+            val next = container.moveImportFinalizer.afterConsent(
+                vaultId = vaultId,
+                step = step,
+                resultCode = result.resultCode
+            )
+            applyMoveStep(next)
+        }
+    }
+
+    LaunchedEffect(pendingPickerMoveConsent) {
+        val step = pendingPickerMoveConsent ?: return@LaunchedEffect
+        container.sessionManager.beginSystemActivity()
+        pickerMoveConsentLauncher.launch(
+            IntentSenderRequest.Builder(step.intentSender).build()
+        )
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -149,17 +199,28 @@ fun PhotosScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
+
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                pendingMoveImportFailureCount = results.count { it is ImportResult.Failure }
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
-                val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+
+                if (successes.isEmpty()) {
+                    statusMessage = "No items were moved to the vault; ${pendingMoveImportFailureCount} failed."
+                    pendingMoveImportFailureCount = 0
+                } else {
+                    applyMoveStep(
+                        container.moveImportFinalizer.begin(
+                            vaultId = vaultId,
+                            successes = successes
+                        )
+                    )
+                }
             }
         }
     }
@@ -613,8 +674,8 @@ fun PhotosScreen(
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
-                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to import private photos or videos from your gallery.",
-                    actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
+                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to move photos or videos into your private vault.",
+                    actionText = if (searchQuery.isBlank()) "Move Photos & Videos to Vault" else null,
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
