@@ -57,10 +57,12 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.suyaphot.app.app.AppContainer
 import com.suyaphot.app.core.database.entity.VaultEntity
+import com.suyaphot.app.core.media.DerivativeCryptoVerifier
 import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.auth.ChangeSecondaryPinResult
 import com.suyaphot.app.domain.auth.PatternCredential
+import com.suyaphot.app.domain.backup.VaultBackupSemanticVerifier
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
@@ -113,6 +115,7 @@ fun SecurityScreen(
 
     var isRunningIntegrityCheck by remember { mutableStateOf(false) }
     var integrityStatusMessage by remember { mutableStateOf<String?>(null) }
+    var integrityHasFailures by remember { mutableStateOf(false) }
 
     val realVault by container.database.vaultDao()
         .observeVaultByKind(VaultKind.REAL.code)
@@ -397,27 +400,98 @@ fun SecurityScreen(
                         onClick = {
                             isRunningIntegrityCheck = true
                             scope.launch {
-                                val s = session as? VaultSession.Unlocked
-                                if (s != null) {
-                                    val (passed, failed) = withContext(Dispatchers.IO) {
-                                        val all = container.database.mediaItemDao().getAllForIntegrityCheck(s.vaultId)
-                                        var passedCount = 0
-                                        var failedCount = 0
-                                        for (item in all) {
-                                            val file = container.vaultFileStore.getMediaFile(s.vaultId, item.id)
-                                            try {
-                                                val verify = container.vaultCrypto.verifyAndHash(file, s.mediaSubkey, item.id)
-                                                val hash = verify.sha256.joinToString("") { "%02x".format(it) }
-                                                if (verify.plaintextSize == item.plaintextSize && hash.equals(item.sha256Hex, true)) {
-                                                    passedCount++
-                                                } else failedCount++
-                                            } catch (e: Exception) {
-                                                failedCount++
+                                val lease = container.sessionManager.acquireOperationKeyLease()
+                                if (lease != null) {
+                                    val (passed, failed) = try {
+                                        withContext(Dispatchers.IO) {
+                                            val media = container.database.mediaItemDao()
+                                                .getAllForIntegrityCheck(lease.vaultId)
+                                            val folders = container.database.folderDao()
+                                                .getFoldersForVaultOnce(lease.vaultId)
+                                            var passedCount = 0
+                                            var failedCount = 0
+
+                                            for (item in media) {
+                                                var itemValid = true
+                                                try {
+                                                    val file = container.vaultFileStore
+                                                        .getMediaFile(lease.vaultId, item.id)
+                                                    check(file.exists()) { "Missing encrypted media" }
+
+                                                    val verify = container.vaultCrypto
+                                                        .verifyAndHash(file, lease.mediaSubkey, item.id)
+                                                    val hash = verify.sha256
+                                                        .joinToString("") { "%02x".format(it) }
+                                                    check(
+                                                        verify.plaintextSize == item.plaintextSize &&
+                                                            hash.equals(item.sha256Hex, true)
+                                                    ) { "Media hash/size mismatch" }
+
+                                                    VaultBackupSemanticVerifier.verifyMediaMetadata(
+                                                        item.id,
+                                                        item.encryptedMetadata,
+                                                        lease.metaSubkey
+                                                    )
+
+                                                    if (item.encryptedThumbRelativePath != null) {
+                                                        val thumb = container.vaultFileStore
+                                                            .getThumbFile(lease.vaultId, item.id)
+                                                        check(
+                                                            thumb.exists() &&
+                                                                DerivativeCryptoVerifier.verifyThumbnailCiphertext(
+                                                                    thumb,
+                                                                    lease.thumbSubkey,
+                                                                    item.id
+                                                                )
+                                                        ) { "Thumbnail integrity failure" }
+                                                    }
+
+                                                    if (item.encryptedPreviewRelativePath != null) {
+                                                        val preview = container.vaultFileStore
+                                                            .getPreviewFile(lease.vaultId, item.id)
+                                                        check(
+                                                            preview.exists() &&
+                                                                DerivativeCryptoVerifier.verifyPreviewCiphertext(
+                                                                    preview,
+                                                                    lease.thumbSubkey,
+                                                                    item.id
+                                                                )
+                                                        ) { "Preview integrity failure" }
+                                                    }
+                                                } catch (_: Exception) {
+                                                    itemValid = false
+                                                }
+
+                                                if (itemValid) passedCount++ else failedCount++
                                             }
+
+                                            // Folder names are encrypted metadata too. A corrupt name can make
+                                            // navigation and backup restore fail even when every media file is sound.
+                                            for (folder in folders) {
+                                                try {
+                                                    VaultBackupSemanticVerifier.verifyFolderName(
+                                                        folder.id,
+                                                        folder.encryptedName,
+                                                        lease.metaSubkey
+                                                    )
+                                                } catch (_: Exception) {
+                                                    failedCount++
+                                                }
+                                            }
+
+                                            passedCount to failedCount
                                         }
-                                        passedCount to failedCount
+                                    } finally {
+                                        lease.close()
                                     }
-                                    integrityStatusMessage = "Audit finished: $passed verified, $failed corrupted"
+
+                                    integrityHasFailures = failed > 0
+                                    integrityStatusMessage =
+                                        if (failed == 0) {
+                                            "Audit finished: $passed media verified, no integrity issues found"
+                                        } else {
+                                            "Audit finished: $passed media verified, $failed integrity issue(s) found"
+                                        }
                                 }
                                 isRunningIntegrityCheck = false
                             }
@@ -430,7 +504,7 @@ fun SecurityScreen(
                             text = it,
                             fontFamily = SoraFontFamily,
                             fontSize = 13.sp,
-                            color = SuyaColors.Positive
+                            color = if (integrityHasFailures) SuyaColors.Negative else SuyaColors.Positive
                         )
                     }
                 }
