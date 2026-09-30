@@ -76,15 +76,17 @@ class RestoreRecoveryManager(
             )
             return
         }
-        val media = fileStore.getMediaFile(vaultId, mediaId)
-        if (media.exists() && !media.delete()) {
+        val cleanup = fileStore.deleteMediaArtifacts(vaultId, mediaId)
+        if (!cleanup.allRemoved) {
             database.restoreJobDao().updatePhase(
-                jobId, RestorePhase.CLEANUP_PENDING.code, null, System.currentTimeMillis(), "PRIVATE_MEDIA_DELETE_FAILED"
+                jobId,
+                RestorePhase.CLEANUP_PENDING.code,
+                null,
+                System.currentTimeMillis(),
+                "PRIVATE_ARTIFACT_DELETE_FAILED"
             )
             return
         }
-        runCatching { fileStore.getThumbFile(vaultId, mediaId).delete() }
-        runCatching { fileStore.getPreviewFile(vaultId, mediaId).delete() }
         finalizeDatabaseRow(jobId, mediaId, vaultId)
     }
 
