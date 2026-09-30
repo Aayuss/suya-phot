@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -71,6 +72,7 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.feature.importmedia.rememberMoveImportDeletionHandler
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.gallery.GalleryFilter
 import com.suyaphot.app.domain.gallery.ViewerCollection
@@ -86,6 +88,7 @@ import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.MediaFilter
 import com.suyaphot.app.ui.components.MediaTile
+import com.suyaphot.app.ui.components.dragSelectGrid
 import com.suyaphot.app.ui.components.SegmentedFilterChips
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
@@ -124,6 +127,11 @@ fun PhotosScreen(
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
     val trashRetentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
     var statusMessage by remember { mutableStateOf<String?>(null) }
+    val finishMoveImports = rememberMoveImportDeletionHandler(
+        container = container,
+        vaultId = vaultId,
+        onStatus = { statusMessage = it }
+    )
 
     fun selectedIds(): List<String> = allMatchingIds?.toList() ?: selectedMediaIds.keys.toList()
     fun clearSelection() { selectedMediaIds.clear(); allMatchingIds = null }
@@ -143,7 +151,7 @@ fun PhotosScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
                         scope.launch { importProgressText = "Importing $current of $total items..." }
                     }
@@ -153,7 +161,9 @@ fun PhotosScreen(
                 val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
                 val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                statusMessage = "$imported moved into vault, $duplicate duplicates, $failed failed"
+                finishMoveImports(successes)
             }
         }
     }
@@ -266,6 +276,8 @@ fun PhotosScreen(
         container.galleryRepository.paged(vaultId, galleryFilter, sortOrder)
     }
     val pagedEntities = pagingFlow.collectAsLazyPagingItems()
+    val gridState = rememberLazyGridState()
+    var dragBaseSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
     var searchEntities by remember { mutableStateOf<List<MediaItemEntity>>(emptyList()) }
     var searchIndexRevision by remember { mutableStateOf(0L) }
 
@@ -349,7 +361,7 @@ fun PhotosScreen(
                         )
                         SuyaIconButton(
                             icon = Icons.Default.Add,
-                            contentDescription = "Import media",
+                            contentDescription = "Move media into vault",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(
@@ -566,8 +578,8 @@ fun PhotosScreen(
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
-                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to import private photos or videos from your gallery.",
-                    actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
+                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to move photos or videos into your private vault.",
+                    actionText = if (searchQuery.isBlank()) "Move Photos & Videos" else null,
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
@@ -582,7 +594,34 @@ fun PhotosScreen(
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    state = gridState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .dragSelectGrid(
+                            state = gridState,
+                            onDragStartIndex = {
+                                allMatchingIds = null
+                                dragBaseSelection = selectedMediaIds.keys.toSet()
+                            },
+                            onRangeChanged = { anchor, current ->
+                                val start = minOf(anchor, current)
+                                val end = maxOf(anchor, current)
+                                selectedMediaIds.clear()
+                                dragBaseSelection.forEach { selectedMediaIds[it] = Unit }
+                                for (index in start..end) {
+                                    val id = if (isSearching) {
+                                        searchEntities.getOrNull(index)?.id
+                                    } else {
+                                        pagedEntities.peek(index)?.id
+                                    }
+                                    if (id != null) selectedMediaIds[id] = Unit
+                                }
+                            },
+                            onDragFinished = {
+                                dragBaseSelection = emptySet()
+                            }
+                        )
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
@@ -56,6 +57,7 @@ import com.suyaphot.app.feature.folders.FolderRecoveryResetDialog
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.MediaTile
+import com.suyaphot.app.ui.components.dragSelectGrid
 import com.suyaphot.app.ui.components.PatternLockPad
 import com.suyaphot.app.ui.components.SuyaTextField
 import com.suyaphot.app.ui.components.SuyaButton
@@ -116,6 +118,8 @@ fun TrashScreen(
     }
 
     val selectedIds = remember { mutableStateMapOf<String, Unit>() }
+    val gridState = rememberLazyGridState()
+    var dragBaseSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     var showEmptyTrashDialog by remember { mutableStateOf(false) }
     var showDeleteSelectedDialog by remember { mutableStateOf(false) }
@@ -216,7 +220,28 @@ fun TrashScreen(
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(2.dp),
-                    modifier = Modifier.weight(1f)
+                    state = gridState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .dragSelectGrid(
+                            state = gridState,
+                            onDragStartIndex = {
+                                dragBaseSelection = selectedIds.keys.toSet()
+                            },
+                            onRangeChanged = { anchor, current ->
+                                val first = minOf(anchor, current).coerceAtLeast(0)
+                                val last = maxOf(anchor, current)
+                                    .coerceAtMost((pagedEntities.itemCount - 1).coerceAtLeast(-1))
+                                selectedIds.clear()
+                                dragBaseSelection.forEach { selectedIds[it] = Unit }
+                                if (last >= first) {
+                                    for (index in first..last) {
+                                        pagedEntities.peek(index)?.id?.let { selectedIds[it] = Unit }
+                                    }
+                                }
+                            },
+                            onDragFinished = { dragBaseSelection = emptySet() }
+                        )
                 ) {
                     items(count = pagedEntities.itemCount,
                         key = { index -> pagedEntities.peek(index)?.id ?: "placeholder_$index" }) { index ->

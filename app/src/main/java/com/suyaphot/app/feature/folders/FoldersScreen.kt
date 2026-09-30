@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -86,6 +87,7 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.feature.importmedia.rememberMoveImportDeletionHandler
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
@@ -99,6 +101,7 @@ import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.FolderTile
 import com.suyaphot.app.ui.components.MediaTile
+import com.suyaphot.app.ui.components.dragSelectGrid
 import com.suyaphot.app.ui.components.PatternLockPad
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
@@ -117,6 +120,7 @@ import kotlinx.coroutines.withContext
 fun FoldersScreen(
     container: AppContainer,
     modifier: Modifier = Modifier,
+    hiddenEntryRequest: Int = 0,
     onMediaClick: (itemId: String, scope: ViewerAccessScope?, collection: ViewerCollection) -> Unit = { _, _, _ -> },
     onFolderOpened: (folderId: String) -> Unit = {}
 ) {
@@ -184,6 +188,11 @@ fun FoldersScreen(
     var targetParentFolderId by remember { mutableStateOf<String?>(null) }
     var allFoldersInVault by remember { mutableStateOf<List<Folder>>(emptyList()) }
     var folderActionStatus by remember { mutableStateOf<String?>(null) }
+    val finishMoveImports = rememberMoveImportDeletionHandler(
+        container = container,
+        vaultId = vaultId,
+        onStatus = { folderActionStatus = it }
+    )
 
     // Media Multi-selection in current folder
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
@@ -207,7 +216,7 @@ fun FoldersScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = currentParentId,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
                         scope.launch { importProgressText = "Importing $current of $total items..." }
                     }
@@ -217,7 +226,9 @@ fun FoldersScreen(
                 val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
                 val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                folderActionStatus = "Move: $imported added, $duplicates duplicates, $failed failed"
+                finishMoveImports(successes)
             }
         }
     }
@@ -254,12 +265,25 @@ fun FoldersScreen(
         else container.galleryRepository.pagedFolder(vaultId, currentParentId)
     }
     val pagedMedia = mediaFlow.collectAsLazyPagingItems()
+    val mediaGridState = rememberLazyGridState()
+    var dragBaseSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     LaunchedEffect(currentParentId) {
         selectedMediaIds.clear()
         breadcrumbs = container.folderManager.getBreadcrumbs(currentParentId)
         if (currentParentId != null) {
             onFolderOpened(currentParentId!!)
+        }
+    }
+
+    LaunchedEffect(hiddenEntryRequest) {
+        if (hiddenEntryRequest > 0 && currentParentId == null && !hiddenMode && vaultId.isNotBlank()) {
+            val vault = container.database.vaultDao().getVault(vaultId)
+            gateTypeCode = vault?.credentialTypeCode ?: 0
+            hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+            gateInput = ""
+            gateError = null
+            showHiddenAuth = true
         }
     }
 
@@ -610,22 +634,6 @@ fun FoldersScreen(
                         { navigateUp() }
                     } else null,
                     actions = {
-                        if (currentParentId == null && !hiddenMode) {
-                            SuyaIconButton(
-                                icon = Icons.Default.VisibilityOff,
-                                contentDescription = "Hidden folders",
-                                onClick = {
-                                    scope.launch {
-                                        val vault = container.database.vaultDao().getVault(vaultId)
-                                        gateTypeCode = vault?.credentialTypeCode ?: 0
-                                        hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
-                                        gateInput = ""
-                                        gateError = null
-                                        showHiddenAuth = true
-                                    }
-                                }
-                            )
-                        }
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
                             contentDescription = "Import media here",
@@ -696,8 +704,8 @@ fun FoldersScreen(
                 EmptyState(
                     icon = Icons.Default.Folder,
                     title = if (currentParentId == null) "No folders created" else "This folder is empty",
-                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Import media or create subfolders inside.",
-                    actionText = if (hiddenMode && currentParentId == null) null else "Import Photos & Videos",
+                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Move media here or create subfolders inside.",
+                    actionText = if (hiddenMode && currentParentId == null) null else "Move Photos & Videos",
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
@@ -712,7 +720,32 @@ fun FoldersScreen(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1f).testTag("folder_grid")
+                    state = mediaGridState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("folder_grid")
+                        .dragSelectGrid(
+                            state = mediaGridState,
+                            onDragStartIndex = {
+                                dragBaseSelection = selectedMediaIds.keys.toSet()
+                            },
+                            onRangeChanged = { anchor, current ->
+                                val mediaStartIndex =
+                                    (if (folders.isNotEmpty()) 1 + folders.size else 0) +
+                                    (if (pagedMedia.itemCount > 0) 1 else 0)
+                                val first = (minOf(anchor, current) - mediaStartIndex).coerceAtLeast(0)
+                                val last = (maxOf(anchor, current) - mediaStartIndex)
+                                    .coerceAtMost((pagedMedia.itemCount - 1).coerceAtLeast(-1))
+                                selectedMediaIds.clear()
+                                dragBaseSelection.forEach { selectedMediaIds[it] = Unit }
+                                if (last >= first) {
+                                    for (index in first..last) {
+                                        pagedMedia.peek(index)?.id?.let { selectedMediaIds[it] = Unit }
+                                    }
+                                }
+                            },
+                            onDragFinished = { dragBaseSelection = emptySet() }
+                        )
                 ) {
                     // Child Folders section
                     if (folders.isNotEmpty()) {

@@ -92,7 +92,7 @@ fun SecurePinPad(
                 // Bottom left: Biometric or empty
                 if (showBiometric && onBiometricClick != null) {
                     ActionKey(
-                        contentDescription = "Unlock with fingerprint",
+                        contentDescription = "Unlock with biometric",
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             onBiometricClick()

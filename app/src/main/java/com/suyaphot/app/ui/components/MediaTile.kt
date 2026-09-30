@@ -48,6 +48,7 @@ import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -72,7 +73,15 @@ fun MediaTile(
     var thumbnailBitmap by remember(item.id, item.updatedAt) { mutableStateOf<Bitmap?>(null) }
 
     LaunchedEffect(item.id, item.updatedAt) {
-        thumbnailBitmap = withContext(Dispatchers.IO) { thumbLoader(item.id) }
+        // A tile can compose during the brief unlock/session hand-off. Retry a few
+        // times instead of leaving a permanent gray placeholder until navigation.
+        var loaded: Bitmap? = null
+        for (attempt in 0 until 4) {
+            loaded = withContext(Dispatchers.IO) { thumbLoader(item.id) }
+            if (loaded != null) break
+            if (attempt < 3) delay(90L)
+        }
+        thumbnailBitmap = loaded
     }
 
     Box(
