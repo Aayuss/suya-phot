@@ -10,6 +10,7 @@ import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.model.SourceDisposition
+import com.suyaphot.app.core.media.MetadataReader
 import com.suyaphot.app.domain.auth.SessionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,7 +24,8 @@ import kotlinx.coroutines.withContext
 class VaultMoveFinalizer(
     private val database: SuyaDatabase,
     private val sourceDeletionCoordinator: SourceDeletionCoordinator,
-    private val sessionManager: SessionManager
+    private val sessionManager: SessionManager,
+    private val metadataReader: MetadataReader
 ) {
     data class Summary(
         val deletedCount: Int,
@@ -60,40 +62,51 @@ class VaultMoveFinalizer(
 
         return try {
             successes.map { success ->
-                val entity = database.mediaItemDao().getItemForVault(success.itemId, lease.vaultId)
-                val canonical = entity?.let { media ->
-                    val metadataBytes = runCatching {
-                        Aead.decryptWithPrependedNonce(
-                            lease.metaSubkey,
-                            media.encryptedMetadata,
-                            media.id.toByteArray(Charsets.UTF_8)
-                        )
-                    }.getOrNull()
+                // Query the currently-selected public URI first. This is critical for
+                // duplicate imports: the existing vault item's metadata may refer to an
+                // older/different MediaStore row with the same bytes.
+                val currentSourceCanonical = runCatching {
+                    metadataReader.canonicalMediaStoreUri(success.uri)
+                }.getOrNull()
 
-                    metadataBytes?.let { bytes ->
-                        try {
-                            val metadata = PrivateMediaMetadata.deserialize(bytes)
-                            val volume = metadata.sourceVolume
-                            val sourceId = metadata.sourceMediaStoreId
-                            if (!volume.isNullOrBlank() && sourceId != null && sourceId >= 0L) {
-                                val collection = if (media.mediaTypeCode == MediaType.VIDEO.code) {
-                                    MediaStore.Video.Media.getContentUri(volume)
+                val storedCanonical = if (currentSourceCanonical == null && !success.alreadyExisted) {
+                    val entity = database.mediaItemDao().getItemForVault(success.itemId, lease.vaultId)
+                    entity?.let { media ->
+                        val metadataBytes = runCatching {
+                            Aead.decryptWithPrependedNonce(
+                                lease.metaSubkey,
+                                media.encryptedMetadata,
+                                media.id.toByteArray(Charsets.UTF_8)
+                            )
+                        }.getOrNull()
+
+                        metadataBytes?.let { bytes ->
+                            try {
+                                val metadata = PrivateMediaMetadata.deserialize(bytes)
+                                val volume = metadata.sourceVolume
+                                val sourceId = metadata.sourceMediaStoreId
+                                if (!volume.isNullOrBlank() && sourceId != null && sourceId >= 0L) {
+                                    val collection = if (media.mediaTypeCode == MediaType.VIDEO.code) {
+                                        MediaStore.Video.Media.getContentUri(volume)
+                                    } else {
+                                        MediaStore.Images.Media.getContentUri(volume)
+                                    }
+                                    ContentUris.withAppendedId(collection, sourceId)
                                 } else {
-                                    MediaStore.Images.Media.getContentUri(volume)
+                                    null
                                 }
-                                ContentUris.withAppendedId(collection, sourceId)
-                            } else {
+                            } catch (_: Exception) {
                                 null
+                            } finally {
+                                bytes.fill(0)
                             }
-                        } catch (_: Exception) {
-                            null
-                        } finally {
-                            bytes.fill(0)
                         }
                     }
+                } else {
+                    null
                 }
 
-                SourceTarget(success, canonical ?: success.uri)
+                SourceTarget(success, currentSourceCanonical ?: storedCanonical ?: success.uri)
             }
         } finally {
             lease.close()
