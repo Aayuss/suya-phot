@@ -108,6 +108,7 @@ fun SecurityScreen(
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
+        container.sessionManager.endSystemActivity()
         scope.launch { container.preferences.setIntruderSelfieEnabled(granted) }
     }
 
@@ -529,6 +530,7 @@ fun SecurityScreen(
                 if (container.intruderCaptureManager.hasCameraPermission()) {
                     scope.launch { container.preferences.setIntruderSelfieEnabled(true) }
                 } else {
+                    container.sessionManager.beginSystemActivity()
                     cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                 }
             }

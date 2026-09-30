@@ -38,6 +38,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -81,7 +82,7 @@ fun SettingsScreen(
     var showSortDialog by remember { mutableStateOf(false) }
     var showRetentionDialog by remember { mutableStateOf(false) }
     var showAutoLockDialog by remember { mutableStateOf(false) }
-    var showBackupRestore by remember { mutableStateOf(false) }
+    var showBackupRestore by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(vaultId) {
         storageBytes = withContext(Dispatchers.IO) {

@@ -80,7 +80,10 @@ fun TrashScreen(
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
     val accessRevision by container.folderAccessManager.revision.collectAsState()
-    if (privateMode && !container.folderAccessManager.hasHiddenGrant(vaultId)) {
+    val hasHiddenAccess = remember(vaultId, accessRevision) {
+        container.folderAccessManager.hasHiddenGrant(vaultId)
+    }
+    if (privateMode && !hasHiddenAccess) {
         PrivateTrashGate(container, vaultId, onBack)
         return
     }

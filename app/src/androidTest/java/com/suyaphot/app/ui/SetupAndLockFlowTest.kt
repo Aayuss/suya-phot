@@ -8,12 +8,27 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.suyaphot.app.app.MainActivity
+import com.suyaphot.app.app.SuyaApp
+import com.suyaphot.app.domain.auth.LockReason
+import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.BeforeClass
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class SetupAndLockFlowTest {
+
+    companion object {
+        @JvmStatic
+        @BeforeClass
+        fun clearAppData() {
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val app = context.applicationContext as SuyaApp
+            app.container.database.clearAllTables()
+            app.container.sessionManager.lock(LockReason.Explicit)
+        }
+    }
 
     @get:Rule
     val composeTestRule = createAndroidComposeRule<MainActivity>()
