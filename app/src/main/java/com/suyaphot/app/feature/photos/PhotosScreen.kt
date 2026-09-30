@@ -133,6 +133,7 @@ fun PhotosScreen(
 
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
+    var pendingFreshMoveResults by remember { mutableStateOf<List<ImportResult.Success>>(emptyList()) }
 
     // Dialog states
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
@@ -146,7 +147,7 @@ fun PhotosScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
                         scope.launch { importProgressText = "Importing $current of $total items..." }
                     }
@@ -156,7 +157,12 @@ fun PhotosScreen(
                 val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
                 val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+                pendingFreshMoveResults = results.filterIsInstance<ImportResult.Success>()
+                statusMessage = if (pendingFreshMoveResults.isNotEmpty()) {
+                    "$imported added, $duplicate already secured, $failed failed — removing public originals…"
+                } else {
+                    "$imported added, $duplicate already secured, $failed failed"
+                }
             }
         }
     }
@@ -255,6 +261,93 @@ fun PhotosScreen(
                 withContext(Dispatchers.Main) {
                     statusMessage = "Kept originals in Gallery."
                 }
+            }
+        }
+    }
+
+
+    // The in-app '+' picker is a vault move, not a copy. Once every selected source has
+    // been durably encrypted, authenticated, and committed, request Android to remove the
+    // public originals. Scoped-storage consent is handled through the same safe delete path
+    // used by interrupted Move recovery.
+    LaunchedEffect(pendingFreshMoveResults, vaultId) {
+        val fresh = pendingFreshMoveResults
+        if (fresh.isEmpty() || vaultId.isBlank()) return@LaunchedEffect
+        pendingFreshMoveResults = emptyList()
+
+        val jobsWithUris = withContext(Dispatchers.IO) {
+            fresh.mapNotNull { success ->
+                container.database.vaultJobDao().getJob(success.jobId)?.let { it to success.uri }
+            }
+        }
+        if (jobsWithUris.isEmpty()) return@LaunchedEffect
+
+        when (val outcome = withContext(Dispatchers.IO) {
+            container.sourceDeletionCoordinator.deleteSources(jobsWithUris.map { it.second })
+        }) {
+            is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
+                withContext(Dispatchers.IO) {
+                    val now = System.currentTimeMillis()
+                    jobsWithUris.forEach { (job, uri) ->
+                        if (uri in outcome.deletedUris) {
+                            container.database.vaultJobDao().updateTerminalImportState(
+                                id = job.id,
+                                vaultId = vaultId,
+                                stateCode = JobState.COMPLETED.code,
+                                sourceDispositionCode = SourceDisposition.DELETED.code,
+                                errorCode = null,
+                                now = now
+                            )
+                        }
+                    }
+                }
+                statusMessage = "Moved ${outcome.deletedUris.size} item(s) into Suya Phot. Public originals removed."
+            }
+
+            is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
+                withContext(Dispatchers.IO) {
+                    val now = System.currentTimeMillis()
+                    jobsWithUris.forEach { (job, uri) ->
+                        if (uri in outcome.deletedUris) {
+                            container.database.vaultJobDao().updateTerminalImportState(
+                                id = job.id,
+                                vaultId = vaultId,
+                                stateCode = JobState.COMPLETED.code,
+                                sourceDispositionCode = SourceDisposition.DELETED.code,
+                                errorCode = null,
+                                now = now
+                            )
+                        }
+                    }
+                }
+                pendingAttentionUris = jobsWithUris.filter { it.second in outcome.uris }
+                pendingAttentionConsentMode = outcome.mode
+                container.sessionManager.beginSystemActivity()
+                attentionConsentLauncher.launch(
+                    IntentSenderRequest.Builder(outcome.intentSender).build()
+                )
+            }
+
+            is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
+                withContext(Dispatchers.IO) {
+                    val now = System.currentTimeMillis()
+                    jobsWithUris.forEach { (job, uri) ->
+                        val deleted = uri in outcome.deletedUris
+                        container.database.vaultJobDao().updateTerminalImportState(
+                            id = job.id,
+                            vaultId = vaultId,
+                            stateCode = JobState.COMPLETED.code,
+                            sourceDispositionCode = if (deleted) {
+                                SourceDisposition.DELETED.code
+                            } else {
+                                SourceDisposition.DELETE_FAILED.code
+                            },
+                            errorCode = if (deleted) null else "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                            now = now
+                        )
+                    }
+                }
+                statusMessage = "Vault copies are safe, but Android kept some public originals. Use Finish Moving to retry."
             }
         }
     }
