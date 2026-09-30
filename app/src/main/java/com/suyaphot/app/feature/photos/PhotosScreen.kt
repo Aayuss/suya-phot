@@ -9,7 +9,6 @@ import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -176,7 +175,7 @@ fun PhotosScreen(
         startImport(uris)
     }
     val pickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia()
+        contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         container.sessionManager.endSystemActivity()
         if (uris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
@@ -448,9 +447,7 @@ fun PhotosScreen(
                             contentDescription = "Import media",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
-                                pickerLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                                )
+                                pickerLauncher.launch(arrayOf("image/*", "video/*"))
                             }
                         )
                     }
@@ -666,9 +663,7 @@ fun PhotosScreen(
                     actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
-                        pickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                        )
+                        pickerLauncher.launch(arrayOf("image/*", "video/*"))
                     },
                     modifier = Modifier.weight(1f)
                 )
