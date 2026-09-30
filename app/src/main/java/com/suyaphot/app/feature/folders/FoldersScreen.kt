@@ -202,9 +202,9 @@ fun FoldersScreen(
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
-    var pendingMoveConsentItems by remember { mutableStateOf<List<ImportResult.Success>>(emptyList()) }
-    var pendingMoveAlreadyDeleted by remember { mutableIntStateOf(0) }
+    var pendingMoveRequest by remember {
+        mutableStateOf<com.suyaphot.app.domain.importmedia.VaultMoveFinalizer.Result.RequiresConsent?>(null)
+    }
 
     fun moveSummaryText(deleted: Int, retained: Int, failed: Int): String = when {
         retained == 0 && failed == 0 -> "$deleted moved into Suya Phot. Public originals removed."
