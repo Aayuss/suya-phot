@@ -59,6 +59,7 @@ fun FolderRecoveryResetDialog(
         revealRecoveryCode = false
         newPin = ""
         confirmPin = ""
+        firstPattern?.fill(-1)
         firstPattern = null
         error = null
     }
@@ -137,7 +138,7 @@ fun FolderRecoveryResetDialog(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SuyaButton(
                         text = "New PIN",
-                        onClick = { targetType = 0; firstPattern = null },
+                        onClick = { targetType = 0; firstPattern?.fill(-1); firstPattern = null },
                         variant = if (targetType == 0) ButtonVariant.Primary else ButtonVariant.Secondary
                     )
                     SuyaButton(
@@ -177,11 +178,15 @@ fun FolderRecoveryResetDialog(
                                 firstPattern = normalized
                                 error = null
                             } else if (!normalized.contentEquals(firstPattern)) {
+                                firstPattern?.fill(-1)
                                 firstPattern = null
+                                normalized.fill(-1)
                                 error = "Patterns do not match"
                                 errorTrigger++
                             } else {
-                                submit(PatternCredential.canonicalChars(normalized))
+                                val credential = PatternCredential.canonicalChars(normalized)
+                                normalized.fill(-1)
+                                submit(credential)
                             }
                         },
                         errorTrigger = errorTrigger,
