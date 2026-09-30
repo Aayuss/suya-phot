@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import com.suyaphot.app.core.util.SafeLog
 import java.io.FileNotFoundException
@@ -57,10 +58,21 @@ class SourceDeletionCoordinator(
         for (uri in uris) {
             try {
                 val rows = deleteUri(uri)
-                if (rows <= 0) {
-                    remainingUris.add(uri)
+                val documentDeleted = if (
+                    rows <= 0 &&
+                    DocumentsContract.isDocumentUri(context, uri)
+                ) {
+                    runCatching {
+                        DocumentsContract.deleteDocument(resolver, uri)
+                    }.getOrDefault(false)
                 } else {
+                    false
+                }
+
+                if (rows > 0 || documentDeleted || probeAbsent(uri)) {
                     deletedUris.add(uri)
+                } else {
+                    remainingUris.add(uri)
                 }
             } catch (rse: RecoverableSecurityException) {
                 // API 29 per-item user consent
