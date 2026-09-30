@@ -26,6 +26,48 @@ class SourceDeletionCoordinator(
     }
 ) {
 
+    /**
+     * Android Photo Picker returns mediated content://media/picker/... URIs. Those are excellent
+     * read handles, but MediaStore deletion APIs expect the underlying media collection URI.
+     * Resolve the picker handle back to the item's MediaStore identity when the provider exposes
+     * _ID/VOLUME_NAME. If resolution is unavailable we safely fall back to the original URI and
+     * let Android keep the source rather than risking deletion of the wrong item.
+     */
+    private fun canonicalDeleteUri(source: Uri): Uri {
+        if (
+            source.authority != MediaStore.AUTHORITY ||
+            source.pathSegments.firstOrNull() != "picker"
+        ) return source
+
+        return runCatching {
+            val projection = arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.VOLUME_NAME,
+                MediaStore.MediaColumns.MIME_TYPE
+            )
+            context.contentResolver.query(source, projection, null, null, null)?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val idIndex = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                val volumeIndex = cursor.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
+                val mimeIndex = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+                if (idIndex < 0 || volumeIndex < 0) return@use null
+
+                val id = cursor.getLong(idIndex)
+                val volume = cursor.getString(volumeIndex) ?: return@use null
+                val mime = if (mimeIndex >= 0) cursor.getString(mimeIndex).orEmpty() else ""
+
+                when {
+                    mime.startsWith("image/") ->
+                        MediaStore.Images.Media.getContentUri(volume, id)
+                    mime.startsWith("video/") ->
+                        MediaStore.Video.Media.getContentUri(volume, id)
+                    else ->
+                        MediaStore.Files.getContentUri(volume, id)
+                }
+            }
+        }.getOrNull() ?: source
+    }
+
     enum class DeleteConsentMode { API29_RETRY_REQUIRED, API30_SYSTEM_DELETE_REQUEST }
 
     data class DeletionVerification(val deletedUris: List<Uri>, val retainedUris: List<Uri>)
@@ -35,11 +77,12 @@ class SourceDeletionCoordinator(
         val deleted = ArrayList<Uri>()
         val retained = ArrayList<Uri>()
         for (uri in uris) {
+            val canonical = canonicalDeleteUri(uri)
             val rows = if (mode == DeleteConsentMode.API29_RETRY_REQUIRED) {
-                try { deleteUri(uri) }
+                try { deleteUri(canonical) }
                 catch (_: Exception) { 0 }
             } else 0
-            if (rows > 0 || probeAbsent(uri)) deleted += uri else retained += uri
+            if (rows > 0 || probeAbsent(canonical)) deleted += uri else retained += uri
         }
         return DeletionVerification(deleted, retained)
     }
@@ -55,8 +98,9 @@ class SourceDeletionCoordinator(
 
         // Try direct deletion first (works for files owned by this app or under legacy storage)
         for (uri in uris) {
+            val canonical = canonicalDeleteUri(uri)
             try {
-                val rows = deleteUri(uri)
+                val rows = deleteUri(canonical)
                 if (rows <= 0) {
                     remainingUris.add(uri)
                 } else {
@@ -85,7 +129,8 @@ class SourceDeletionCoordinator(
         // On API 30+, request user permission via MediaStore.createDeleteRequest
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             return try {
-                val pendingIntent = MediaStore.createDeleteRequest(resolver, remainingUris)
+                val canonicalUris = remainingUris.map(::canonicalDeleteUri)
+                val pendingIntent = MediaStore.createDeleteRequest(resolver, canonicalUris)
                 DeletionOutcome.RequiresUserConsent(
                     pendingIntent.intentSender, remainingUris, deletedUris,
                     DeleteConsentMode.API30_SYSTEM_DELETE_REQUEST
