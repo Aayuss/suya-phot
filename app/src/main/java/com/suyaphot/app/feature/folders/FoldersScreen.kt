@@ -47,7 +47,6 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.outlined.Delete
@@ -609,23 +608,22 @@ fun FoldersScreen(
                     onNavigationClick = if (currentParentId != null || hiddenMode) {
                         { navigateUp() }
                     } else null,
-                    actions = {
-                        if (currentParentId == null && !hiddenMode) {
-                            SuyaIconButton(
-                                icon = Icons.Default.VisibilityOff,
-                                contentDescription = "Hidden folders",
-                                onClick = {
-                                    scope.launch {
-                                        val vault = container.database.vaultDao().getVault(vaultId)
-                                        gateTypeCode = vault?.credentialTypeCode ?: 0
-                                        hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
-                                        gateInput = ""
-                                        gateError = null
-                                        showHiddenAuth = true
-                                    }
-                                }
-                            )
+                    // Hidden folders stay actually hidden: there is no visible eye/hidden entry point.
+                    // Deliberate long-press on the root "Folders" title re-authenticates with the
+                    // vault credential/biometric before revealing the hidden root list.
+                    onTitleLongClick = if (currentParentId == null && !hiddenMode) {
+                        {
+                            scope.launch {
+                                val vault = container.database.vaultDao().getVault(vaultId)
+                                gateTypeCode = vault?.credentialTypeCode ?: 0
+                                hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+                                gateInput = ""
+                                gateError = null
+                                showHiddenAuth = true
+                            }
                         }
+                    } else null,
+                    actions = {
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
                             contentDescription = "Import media here",
