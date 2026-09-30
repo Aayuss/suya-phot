@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.outlined.Delete
