@@ -9,6 +9,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -85,7 +86,10 @@ import com.suyaphot.app.core.model.Folder
 import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
+import com.suyaphot.app.core.model.JobState
+import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
@@ -200,6 +204,98 @@ fun FoldersScreen(
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
+    var pendingMoveConsentItems by remember { mutableStateOf<List<Pair<String, Uri>>>(emptyList()) }
+
+    val moveConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val mode = pendingMoveConsentMode
+        val pending = pendingMoveConsentItems
+        pendingMoveConsentMode = null
+        pendingMoveConsentItems = emptyList()
+        if (mode == null || pending.isEmpty()) return@rememberLauncherForActivityResult
+        scope.launch(Dispatchers.IO) {
+            val verification = if (result.resultCode == android.app.Activity.RESULT_OK) {
+                container.sourceDeletionCoordinator.completeConsent(pending.map { it.second }, mode)
+            } else {
+                SourceDeletionCoordinator.DeletionVerification(emptyList(), pending.map { it.second })
+            }
+            val now = System.currentTimeMillis()
+            pending.forEach { (jobId, uri) ->
+                val deleted = uri in verification.deletedUris
+                container.database.vaultJobDao().updateTerminalImportState(
+                    jobId, vaultId, JobState.COMPLETED.code,
+                    if (deleted) SourceDisposition.DELETED.code else SourceDisposition.RETAINED_BY_USER.code,
+                    null, now
+                )
+            }
+            withContext(Dispatchers.Main) {
+                folderActionStatus = if (verification.retainedUris.isEmpty()) {
+                    "Moved into vault; originals removed from Gallery."
+                } else {
+                    "Vault copies are safe; some originals remain because Android deletion was not approved."
+                }
+            }
+        }
+    }
+
+    suspend fun finalizeMove(successes: List<ImportResult.Success>) {
+        if (successes.isEmpty()) return
+        val byUri = successes.associateBy { it.uri }
+        when (val outcome = container.sourceDeletionCoordinator.deleteSources(successes.map { it.uri })) {
+            is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
+                val now = System.currentTimeMillis()
+                successes.forEach { success ->
+                    val deleted = success.uri in outcome.deletedUris
+                    container.database.vaultJobDao().updateTerminalImportState(
+                        success.jobId, vaultId, JobState.COMPLETED.code,
+                        if (deleted) SourceDisposition.DELETED.code else SourceDisposition.DELETE_FAILED.code,
+                        if (deleted) null else "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                        now
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    folderActionStatus = "Moved into vault; originals removed from Gallery."
+                }
+            }
+            is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
+                val now = System.currentTimeMillis()
+                outcome.deletedUris.forEach { uri ->
+                    byUri[uri]?.let { success ->
+                        container.database.vaultJobDao().updateTerminalImportState(
+                            success.jobId, vaultId, JobState.COMPLETED.code,
+                            SourceDisposition.DELETED.code, null, now
+                        )
+                    }
+                }
+                val pending = outcome.uris.mapNotNull { uri -> byUri[uri]?.let { it.jobId to uri } }
+                withContext(Dispatchers.Main) {
+                    pendingMoveConsentItems = pending
+                    pendingMoveConsentMode = outcome.mode
+                    container.sessionManager.beginSystemActivity()
+                    moveConsentLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
+                }
+            }
+            is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
+                val now = System.currentTimeMillis()
+                successes.forEach { success ->
+                    val deleted = success.uri in outcome.deletedUris
+                    container.database.vaultJobDao().updateTerminalImportState(
+                        success.jobId, vaultId, JobState.COMPLETED.code,
+                        if (deleted) SourceDisposition.DELETED.code else SourceDisposition.DELETE_FAILED.code,
+                        if (deleted) null else "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                        now
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    folderActionStatus = "Vault copies are safe; Android could not remove every original."
+                }
+            }
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -207,9 +303,9 @@ fun FoldersScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = currentParentId,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
                 isImporting = false
@@ -217,7 +313,8 @@ fun FoldersScreen(
                 val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
                 val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
+                folderActionStatus = "$imported secured, $duplicates duplicates, $failed failed"
+                finalizeMove(results.filterIsInstance<ImportResult.Success>())
             }
         }
     }
