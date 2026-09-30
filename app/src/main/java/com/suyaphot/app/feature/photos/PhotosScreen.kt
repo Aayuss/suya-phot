@@ -7,6 +7,8 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.testTag
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -19,6 +21,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +38,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -61,6 +65,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -119,6 +125,10 @@ fun PhotosScreen(
 
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
     var allMatchingIds by remember { mutableStateOf<Set<String>?>(null) }
+    val gridState = rememberLazyGridState()
+    val haptic = LocalHapticFeedback.current
+    var dragAnchorIndex by remember { mutableStateOf<Int?>(null) }
+    var dragBaseSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() || allMatchingIds != null } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
@@ -387,6 +397,35 @@ fun PhotosScreen(
         }
     }
     val isSearching = searchQuery.isNotBlank()
+
+    fun mediaIdAtGridIndex(index: Int): String? {
+        return if (isSearching) {
+            searchEntities.getOrNull(index)?.id
+        } else {
+            pagedEntities.peek(index)?.id
+        }
+    }
+
+    fun visibleGridIndexAt(position: Offset): Int? {
+        return gridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+            val left = info.offset.x.toFloat()
+            val top = info.offset.y.toFloat()
+            val right = left + info.size.width
+            val bottom = top + info.size.height
+            position.x in left..right && position.y in top..bottom
+        }?.index
+    }
+
+    fun applyDragSelection(toIndex: Int) {
+        val anchor = dragAnchorIndex ?: return
+        val from = minOf(anchor, toIndex)
+        val to = maxOf(anchor, toIndex)
+        selectedMediaIds.clear()
+        dragBaseSelection.forEach { selectedMediaIds[it] = Unit }
+        for (index in from..to) {
+            mediaIdAtGridIndex(index)?.let { selectedMediaIds[it] = Unit }
+        }
+    }
 
     Box(
         modifier = modifier
@@ -678,10 +717,40 @@ fun PhotosScreen(
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
+                    state = gridState,
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .pointerInput(isSearching, searchEntities.size, pagedEntities.itemCount) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { position ->
+                                    visibleGridIndexAt(position)?.let { index ->
+                                        allMatchingIds = null
+                                        dragBaseSelection = selectedMediaIds.keys.toSet()
+                                        dragAnchorIndex = index
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        applyDragSelection(index)
+                                    }
+                                },
+                                onDrag = { change, _ ->
+                                    visibleGridIndexAt(change.position)?.let { index ->
+                                        applyDragSelection(index)
+                                        change.consume()
+                                    }
+                                },
+                                onDragEnd = {
+                                    dragAnchorIndex = null
+                                    dragBaseSelection = emptySet()
+                                },
+                                onDragCancel = {
+                                    dragAnchorIndex = null
+                                    dragBaseSelection = emptySet()
+                                }
+                            )
+                        }
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
