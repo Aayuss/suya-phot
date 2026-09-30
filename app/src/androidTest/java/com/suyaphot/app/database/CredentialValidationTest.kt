@@ -77,6 +77,7 @@ class CredentialValidationTest {
             )
 
             val auth = PinAuthenticator(db.vaultDao(), keys, vaultCrypto, session, preferences)
+            preferences.resetFailedAttempts()
             assertFalse(
                 auth.changeCurrentCredential(
                     "123456".toCharArray(),
