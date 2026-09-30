@@ -35,6 +35,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -98,6 +99,7 @@ import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.FolderTile
 import com.suyaphot.app.ui.components.MediaTile
+import com.suyaphot.app.ui.components.dragSelectGrid
 import com.suyaphot.app.ui.components.PatternLockPad
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
@@ -188,6 +190,7 @@ fun FoldersScreen(
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
+    val folderGridState = rememberLazyGridState()
     val retentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
 
     var showMoveMediaDialog by remember { mutableStateOf(false) }
@@ -709,10 +712,25 @@ fun FoldersScreen(
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
+                    state = folderGridState,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1f).testTag("folder_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("folder_grid")
+                        .dragSelectGrid(
+                            state = folderGridState,
+                            scope = scope,
+                            keyToId = { key ->
+                                (key as? String)
+                                    ?.takeIf { it.startsWith("m_") }
+                                    ?.removePrefix("m_")
+                            },
+                            onItemsSelected = { ids ->
+                                ids.forEach { id -> selectedMediaIds[id] = Unit }
+                            }
+                        )
                 ) {
                     // Child Folders section
                     if (folders.isNotEmpty()) {
