@@ -119,7 +119,8 @@ class AppContainer(val context: Context) {
         VaultMoveFinalizer(
             database = database,
             sourceDeletionCoordinator = sourceDeletionCoordinator,
-            sessionManager = sessionManager
+            sessionManager = sessionManager,
+            metadataReader = metadataReader
         )
     }
 
