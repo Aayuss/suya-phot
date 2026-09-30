@@ -9,6 +9,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -86,6 +87,8 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.domain.importmedia.MoveImportFinalizer
+import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
@@ -200,6 +203,67 @@ fun FoldersScreen(
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveConsent by remember {
+        mutableStateOf<List<MoveImportFinalizer.PendingMove>>(emptyList())
+    }
+    var pendingMoveConsentMode by remember {
+        mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null)
+    }
+
+    val moveDeleteConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val pending = pendingMoveConsent
+        val mode = pendingMoveConsentMode
+        pendingMoveConsent = emptyList()
+        pendingMoveConsentMode = null
+
+        if (mode != null && pending.isNotEmpty()) {
+            scope.launch {
+                val completed = container.moveImportFinalizer.completeConsent(
+                    pending = pending,
+                    mode = mode,
+                    resultCode = result.resultCode
+                )
+                folderActionStatus = if (completed.retainedCount == 0) {
+                    "Moved to Suya Phot. Public originals removed."
+                } else {
+                    "Encrypted safely. ${completed.retainedCount} original(s) remain in Gallery."
+                }
+            }
+        }
+    }
+
+    fun finalizeMovedImports(
+        successes: List<ImportResult.Success>,
+        failedCount: Int
+    ) {
+        scope.launch {
+            when (val finalized = container.moveImportFinalizer.begin(successes)) {
+                is MoveImportFinalizer.Result.Complete -> {
+                    folderActionStatus = buildString {
+                        append("${finalized.deletedCount} moved")
+                        if (finalized.retainedCount > 0) {
+                            append(", ${finalized.retainedCount} original(s) remain in Gallery")
+                        }
+                        if (failedCount > 0) append(", $failedCount failed")
+                    }
+                }
+
+                is MoveImportFinalizer.Result.RequiresConsent -> {
+                    pendingMoveConsent = finalized.pending
+                    pendingMoveConsentMode = finalized.mode
+                    folderActionStatus = "Encrypted safely. Confirm Android's delete request to finish moving."
+                    container.sessionManager.beginSystemActivity()
+                    moveDeleteConsentLauncher.launch(
+                        IntentSenderRequest.Builder(finalized.intentSender).build()
+                    )
+                }
+            }
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -207,17 +271,16 @@ fun FoldersScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = currentParentId,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
+                val successes = results.filterIsInstance<ImportResult.Success>()
                 val failed = results.count { it is ImportResult.Failure }
-                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
+                finalizeMovedImports(successes, failed)
             }
         }
     }
