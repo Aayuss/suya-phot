@@ -58,6 +58,18 @@ class FakeFolderDao : FolderDao {
     override fun getHiddenRoots(vaultId: String): Flow<List<FolderWithCount>> =
         flowOf(folders.values.filter { it.vaultId == vaultId && it.directHidden }.map { FolderWithCount(it, 0) })
 
+    override fun getAllSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>> =
+        flowOf(
+            folders.values
+                .filter { it.vaultId == vaultId && it.parentId == parentId }
+                .map { folder ->
+                    val childCount = folders.values.count {
+                        it.vaultId == vaultId && it.parentId == folder.id
+                    }
+                    FolderWithCount(folder, childCount)
+                }
+        )
+
     override fun getAllSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>> =
         getSubFolders(vaultId, parentId)
 
