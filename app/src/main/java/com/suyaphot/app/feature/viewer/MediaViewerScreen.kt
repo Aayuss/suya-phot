@@ -726,8 +726,16 @@ private fun MediaViewerPage(
                             onClick = {
                                 val current = mediaEntity ?: return@SuyaIconButton
                                 val newFav = !current.favorite
+
+                                // Optimistic UI: the star changes immediately, while Room remains
+                                // the source of truth. Revert only if the guarded update fails.
+                                mediaEntity = current.copy(favorite = newFav)
                                 scope.launch {
-                                    val activeVaultId = session?.vaultId ?: return@launch
+                                    val activeVaultId = session?.vaultId
+                                    if (activeVaultId == null) {
+                                        mediaEntity = current
+                                        return@launch
+                                    }
                                     val updated = withContext(Dispatchers.IO) {
                                         container.database.mediaItemDao().updateFavoriteForVault(
                                             activeVaultId,
@@ -736,8 +744,8 @@ private fun MediaViewerPage(
                                             System.currentTimeMillis()
                                         )
                                     }
-                                    if (updated == 1) {
-                                        mediaEntity = current.copy(favorite = newFav)
+                                    if (updated != 1) {
+                                        mediaEntity = current
                                     }
                                 }
                             }
