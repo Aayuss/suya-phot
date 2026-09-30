@@ -86,6 +86,7 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.feature.importmedia.rememberMoveImportDeletionHandler
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
@@ -117,6 +118,7 @@ import kotlinx.coroutines.withContext
 fun FoldersScreen(
     container: AppContainer,
     modifier: Modifier = Modifier,
+    hiddenEntryRequest: Int = 0,
     onMediaClick: (itemId: String, scope: ViewerAccessScope?, collection: ViewerCollection) -> Unit = { _, _, _ -> },
     onFolderOpened: (folderId: String) -> Unit = {}
 ) {
@@ -184,6 +186,11 @@ fun FoldersScreen(
     var targetParentFolderId by remember { mutableStateOf<String?>(null) }
     var allFoldersInVault by remember { mutableStateOf<List<Folder>>(emptyList()) }
     var folderActionStatus by remember { mutableStateOf<String?>(null) }
+    val finishMoveImports = rememberMoveImportDeletionHandler(
+        container = container,
+        vaultId = vaultId,
+        onStatus = { folderActionStatus = it }
+    )
 
     // Media Multi-selection in current folder
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
@@ -207,7 +214,7 @@ fun FoldersScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = currentParentId,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
                         scope.launch { importProgressText = "Importing $current of $total items..." }
                     }
@@ -217,7 +224,9 @@ fun FoldersScreen(
                 val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
                 val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                folderActionStatus = "Move: $imported added, $duplicates duplicates, $failed failed"
+                finishMoveImports(successes)
             }
         }
     }
@@ -260,6 +269,17 @@ fun FoldersScreen(
         breadcrumbs = container.folderManager.getBreadcrumbs(currentParentId)
         if (currentParentId != null) {
             onFolderOpened(currentParentId!!)
+        }
+    }
+
+    LaunchedEffect(hiddenEntryRequest) {
+        if (hiddenEntryRequest > 0 && currentParentId == null && !hiddenMode && vaultId.isNotBlank()) {
+            val vault = container.database.vaultDao().getVault(vaultId)
+            gateTypeCode = vault?.credentialTypeCode ?: 0
+            hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+            gateInput = ""
+            gateError = null
+            showHiddenAuth = true
         }
     }
 
@@ -610,22 +630,6 @@ fun FoldersScreen(
                         { navigateUp() }
                     } else null,
                     actions = {
-                        if (currentParentId == null && !hiddenMode) {
-                            SuyaIconButton(
-                                icon = Icons.Default.VisibilityOff,
-                                contentDescription = "Hidden folders",
-                                onClick = {
-                                    scope.launch {
-                                        val vault = container.database.vaultDao().getVault(vaultId)
-                                        gateTypeCode = vault?.credentialTypeCode ?: 0
-                                        hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
-                                        gateInput = ""
-                                        gateError = null
-                                        showHiddenAuth = true
-                                    }
-                                }
-                            )
-                        }
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
                             contentDescription = "Import media here",
