@@ -338,6 +338,11 @@ class VaultBackupExporter(
             descriptors = descriptors
         )
 
+        // Validate the exact archive manifest before writing any destination bytes. This catches
+        // corrupted local relational state (cycles, missing folder references, lock mismatches,
+        // invalid IDs/descriptors) before a SAF document is populated.
+        BackupManifestValidator.validate(BackupArchiveFormat.CURRENT_VERSION, manifest)
+
         val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val normalized = keyManager.normalizeRecoverySecret(recoveryCodeInput)
         val secretBytes = normalized.toByteArray(Charsets.UTF_8)
