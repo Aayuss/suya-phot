@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.automirrored.filled.Sort
@@ -52,6 +53,7 @@ import androidx.compose.ui.unit.sp
 import com.suyaphot.app.R
 import com.suyaphot.app.BuildConfig
 import com.suyaphot.app.app.AppContainer
+import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.auth.LockReason
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.ui.components.ButtonVariant
@@ -79,6 +81,11 @@ fun SettingsScreen(
     val retentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
     val autoLockMs by container.preferences.autoLockTimeoutMs.collectAsState(initial = 0L)
     val lockOnScreenOff by container.preferences.lockOnScreenOff.collectAsState(initial = true)
+    val biometricEnabled by container.preferences.biometricOnLaunch.collectAsState(initial = true)
+    val realVault by container.database.vaultDao()
+        .observeVaultByKind(VaultKind.REAL.code)
+        .collectAsState(initial = null)
+    val biometricEnrolled = realVault?.biometricEnvelope != null && realVault?.biometricIv != null
     var showSortDialog by remember { mutableStateOf(false) }
     var showRetentionDialog by remember { mutableStateOf(false) }
     var showAutoLockDialog by remember { mutableStateOf(false) }
@@ -181,7 +188,7 @@ fun SettingsScreen(
                 )
                 SettingRowItem(
                     title = "Private Trash",
-                    subtitle = "Re-authenticate to view deleted protected media",
+                    subtitle = "Deleted media from hidden or locked folders; requires re-authentication",
                     icon = Icons.Default.Delete,
                     onClick = onOpenPrivateTrash
                 )
@@ -213,6 +220,17 @@ fun SettingsScreen(
                     checked = lockOnScreenOff,
                     onCheckedChange = { scope.launch { container.preferences.setLockOnScreenOff(it) } }
                 )
+
+                if (biometricEnrolled) {
+                    SettingToggleRow(
+                        title = "Biometric unlock",
+                        subtitle = "Allow fingerprint or any strong biometric Android can use for vault unlock",
+                        checked = biometricEnabled,
+                        onCheckedChange = { enabled ->
+                            scope.launch { container.preferences.setBiometricOnLaunch(enabled) }
+                        }
+                    )
+                }
 
                 if (showSortDialog) {
                     ChoiceDialog(
