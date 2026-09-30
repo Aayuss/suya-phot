@@ -251,19 +251,14 @@ class RestoreCoordinator(
 
             // 5. Two-phase removal on Move (Section 21)
             if (move) {
-                val mediaDeleted = !vaultFile.exists() || vaultFile.delete()
-                val thumbFile = fileStore.getThumbFile(session.vaultId, itemId)
-                if (thumbFile.exists() && !thumbFile.delete()) {
-                    SafeLog.w("RestoreCoordinator", "Thumbnail cleanup pending for restored media")
-                }
-                val previewFile = fileStore.getPreviewFile(session.vaultId, itemId)
-                if (previewFile.exists() && !previewFile.delete()) {
-                    SafeLog.w("RestoreCoordinator", "Preview cleanup pending for restored media")
-                }
-
-                if (!mediaDeleted) {
+                val cleanup = fileStore.deleteMediaArtifacts(session.vaultId, itemId)
+                if (!cleanup.allRemoved) {
                     database.restoreJobDao().updatePhase(
-                        jobId, RestorePhase.CLEANUP_PENDING.code, null, System.currentTimeMillis(), "PRIVATE_MEDIA_DELETE_FAILED"
+                        jobId,
+                        RestorePhase.CLEANUP_PENDING.code,
+                        null,
+                        System.currentTimeMillis(),
+                        "PRIVATE_ARTIFACT_DELETE_FAILED"
                     )
                     return@withContext RestoreResult.SuccessWithCleanupPending(itemId, insertedUri)
                 }
