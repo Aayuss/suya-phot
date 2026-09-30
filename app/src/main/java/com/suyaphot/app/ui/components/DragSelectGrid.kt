@@ -13,7 +13,9 @@ import androidx.compose.ui.input.pointer.pointerInput
  */
 fun Modifier.dragSelectGrid(
     state: LazyGridState,
-    onRangeChanged: (anchorIndex: Int, currentIndex: Int) -> Unit
+    onDragStartIndex: (Int) -> Unit = {},
+    onRangeChanged: (anchorIndex: Int, currentIndex: Int) -> Unit,
+    onDragFinished: () -> Unit = {}
 ): Modifier = pointerInput(state) {
     var anchorIndex: Int? = null
 
@@ -30,7 +32,10 @@ fun Modifier.dragSelectGrid(
     detectDragGesturesAfterLongPress(
         onDragStart = { position ->
             anchorIndex = indexAt(position)
-            anchorIndex?.let { onRangeChanged(it, it) }
+            anchorIndex?.let {
+                onDragStartIndex(it)
+                onRangeChanged(it, it)
+            }
         },
         onDrag = { change, _ ->
             val anchor = anchorIndex ?: return@detectDragGesturesAfterLongPress
@@ -38,7 +43,13 @@ fun Modifier.dragSelectGrid(
             change.consume()
             onRangeChanged(anchor, current)
         },
-        onDragEnd = { anchorIndex = null },
-        onDragCancel = { anchorIndex = null }
+        onDragEnd = {
+            anchorIndex = null
+            onDragFinished()
+        },
+        onDragCancel = {
+            anchorIndex = null
+            onDragFinished()
+        }
     )
 }
