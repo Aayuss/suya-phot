@@ -52,7 +52,13 @@ class AppContainer(val context: Context) {
     val galleryRepository: GalleryRepository by lazy { GalleryRepository(database.mediaItemDao(), folderAccessManager) }
     val vaultSearchIndex: VaultSearchIndex by lazy { VaultSearchIndex() }
     val encryptedThumbnailRepository: EncryptedThumbnailRepository by lazy {
-        EncryptedThumbnailRepository(sessionManager, vaultFileStore, thumbnailGenerator)
+        EncryptedThumbnailRepository(
+            sessionManager = sessionManager,
+            fileStore = vaultFileStore,
+            generator = thumbnailGenerator,
+            database = database,
+            vaultCrypto = vaultCrypto
+        )
     }
     val shareCoordinator: ShareCoordinator by lazy {
         ShareCoordinator(context, database, sessionManager, folderAccessManager, vaultFileStore, vaultCrypto)
