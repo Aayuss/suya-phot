@@ -618,7 +618,7 @@ fun FoldersScreen(
                                 pendingLockId = null
                                 pendingLockBioIv = null
                                 pendingFolderId?.let { attemptOpenFolder(it) }
-                            } else gateError = "Fingerprint unavailable; use the folder credential"
+                            } else gateError = "Biometric unavailable; use the folder credential"
                         }
                     }
                 }
@@ -631,7 +631,7 @@ fun FoldersScreen(
                     .build(),
                 BiometricPrompt.CryptoObject(cipher)
             )
-        } catch (_: Exception) { gateError = "Fingerprint unavailable; use the folder credential" }
+        } catch (_: Exception) { gateError = "Biometric unavailable; use the folder credential" }
     }
 
     fun launchHiddenBiometric() {
@@ -657,7 +657,7 @@ fun FoldersScreen(
             )
             prompt.authenticate(
                 BiometricPrompt.PromptInfo.Builder()
-                    .setTitle("Open Hidden folders")
+                    .setTitle("Open hidden folders")
                     .setNegativeButtonText("Use vault credential")
                     .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                     .build(),
@@ -686,7 +686,7 @@ fun FoldersScreen(
                                         if (container.folderLockManager.saveBiometricEnvelope(lockId, envelope, authCipher.iv)) {
                                             showEnrollBiometricDialog = false
                                             selectedFolderForAction = null
-                                            folderActionStatus = "Fingerprint enabled for folder"
+                                            folderActionStatus = "Biometric unlock enabled for folder"
                                         } else enrollError = "Could not save fingerprint setting"
                                     }
                                 }
@@ -698,7 +698,7 @@ fun FoldersScreen(
                 )
                 prompt.authenticate(
                     BiometricPrompt.PromptInfo.Builder()
-                        .setTitle("Enable folder fingerprint")
+                        .setTitle("Enable folder biometric")
                         .setNegativeButtonText("Cancel")
                         .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                         .build(),
@@ -1052,7 +1052,7 @@ fun FoldersScreen(
                 pendingFolderId = null
                 gateInput = ""
             },
-            title = if (showHiddenAuth) "Open Hidden folders" else "Unlock folder",
+            title = if (showHiddenAuth) "Open hidden folders" else "Unlock folder",
             confirmText = if (gateTypeCode == 0) "Unlock" else null,
             onConfirm = if (gateTypeCode == 0) ({ submitGate(gateInput.toCharArray()) }) else null,
             content = {
@@ -1331,7 +1331,7 @@ fun FoldersScreen(
             content = {
                 Text(
                     if (target.directHidden) "It will remain hidden if its parent is still hidden."
-                    else "This folder, its subfolders and media will disappear from normal Photos, Search, Favorites and Folders. Open Hidden folders to access it.",
+                    else "This folder, its subfolders and media will disappear from normal Photos, Search, Favorites and Folders. Open hidden folders to access it.",
                     color = SuyaColors.TextMuted, fontSize = 13.sp
                 )
             }
@@ -1483,7 +1483,7 @@ fun FoldersScreen(
     if (showEnrollBiometricDialog && enrollLockId != null) {
         SuyaDialog(
             onDismissRequest = { showEnrollBiometricDialog = false; enrollInput = "" },
-            title = "Enable folder fingerprint",
+            title = "Enable folder biometric",
             confirmText = if (enrollTypeCode == 0) "Continue" else null,
             onConfirm = if (enrollTypeCode == 0) ({ enrollFolderBiometric(enrollInput.toCharArray()); enrollInput = "" }) else null,
             content = {
