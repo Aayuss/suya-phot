@@ -335,6 +335,7 @@ private fun MediaViewerPage(
     var showRestoreDialog by remember { mutableStateOf(false) }
     var showTrashDialog by remember { mutableStateOf(false) }
     var restoreError by remember { mutableStateOf<String?>(null) }
+    var favoriteUpdateInFlight by remember { mutableStateOf(false) }
     val trashRetentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
     var shareJob by remember { mutableStateOf<Job?>(null) }
     var shareProgress by remember { mutableStateOf<Pair<Long, Long>?>(null) }
@@ -723,22 +724,31 @@ private fun MediaViewerPage(
                             icon = if (mediaEntity?.favorite == true) Icons.Default.Star else Icons.Default.StarBorder,
                             contentDescription = "Favorite",
                             active = mediaEntity?.favorite == true,
+                            enabled = !favoriteUpdateInFlight,
                             onClick = {
                                 val current = mediaEntity ?: return@SuyaIconButton
                                 val newFav = !current.favorite
+                                val optimistic = current.copy(
+                                    favorite = newFav,
+                                    updatedAt = System.currentTimeMillis()
+                                )
+                                // Update the viewer immediately; persist in the background and roll back on failure.
+                                mediaEntity = optimistic
+                                favoriteUpdateInFlight = true
                                 scope.launch {
-                                    val activeVaultId = session?.vaultId ?: return@launch
-                                    val updated = withContext(Dispatchers.IO) {
+                                    val activeVaultId = session?.vaultId
+                                    val updated = if (activeVaultId == null) 0 else withContext(Dispatchers.IO) {
                                         container.database.mediaItemDao().updateFavoriteForVault(
                                             activeVaultId,
                                             current.id,
                                             newFav,
-                                            System.currentTimeMillis()
+                                            optimistic.updatedAt
                                         )
                                     }
-                                    if (updated == 1) {
-                                        mediaEntity = current.copy(favorite = newFav)
+                                    if (updated != 1 && mediaEntity?.id == current.id) {
+                                        mediaEntity = current
                                     }
+                                    favoriteUpdateInFlight = false
                                 }
                             }
                         )
