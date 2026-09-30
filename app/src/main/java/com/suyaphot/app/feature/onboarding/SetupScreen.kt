@@ -564,7 +564,7 @@ fun SetupScreen(
 
                         if (canEnrollBiometrics && activity != null && createdVaultId != null) {
                             SuyaButton(
-                                text = "Enable Fingerprint Unlock",
+                                text = "Enable Biometric Unlock",
                                 onClick = {
                                     val vaultId = createdVaultId!!
                                     try {
