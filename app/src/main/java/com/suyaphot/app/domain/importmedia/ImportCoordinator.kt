@@ -1,6 +1,7 @@
 package com.suyaphot.app.domain.importmedia
 
 import android.content.Context
+import android.content.ContentUris
 import android.net.Uri
 import android.provider.MediaStore
 import androidx.room.withTransaction
@@ -271,8 +272,8 @@ class ImportCoordinator(
             val sourceDeleteUri = sourceMeta.metadata.sourceMediaStoreId?.let { sourceId ->
                 val volume = sourceMeta.metadata.sourceVolume ?: MediaStore.VOLUME_EXTERNAL
                 when (sourceMeta.mediaType) {
-                    MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume, sourceId)
-                    MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume, sourceId)
+                    MediaType.IMAGE -> ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(volume), sourceId)
+                    MediaType.VIDEO -> ContentUris.withAppendedId(MediaStore.Video.Media.getContentUri(volume), sourceId)
                 }
             } ?: resolvedSource.sourceUri
 
