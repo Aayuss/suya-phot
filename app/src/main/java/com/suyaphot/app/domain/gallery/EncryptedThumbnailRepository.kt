@@ -73,6 +73,69 @@ class EncryptedThumbnailRepository(
                 }
             }
 
+            if (bitmap == null) {
+                val entity = mediaItemDao.getItemForVault(mediaId, vaultId)
+                if (entity != null && entity.deletedAt == null) {
+                    val metadata = runCatching {
+                        val plain = Aead.decryptWithPrependedNonce(
+                            lease.metaSubkey,
+                            entity.encryptedMetadata,
+                            mediaId.toByteArray(Charsets.UTF_8)
+                        )
+                        try {
+                            PrivateMediaMetadata.deserialize(plain)
+                        } finally {
+                            plain.fill(0)
+                        }
+                    }.getOrNull()
+
+                    val extension = metadata?.originalFileExtension
+                        ?: if (entity.mediaTypeCode == MediaType.VIDEO.code) "mp4" else "jpg"
+                    val temp = fileStore.createViewerTempFile(mediaId, extension)
+                    try {
+                        val verified = vaultCrypto.decryptVerifiedToFile(
+                            fileStore.getMediaFile(vaultId, mediaId),
+                            lease.mediaSubkey,
+                            mediaId,
+                            temp
+                        )
+                        val verifiedHash = verified.sha256.joinToString("") { "%02x".format(it) }
+                        check(verified.plaintextSize == entity.plaintextSize)
+                        check(verifiedHash.equals(entity.sha256Hex, ignoreCase = true))
+
+                        val thumbFile = fileStore.getThumbFile(vaultId, mediaId)
+                        if (!thumbFile.exists()) {
+                            if (entity.mediaTypeCode == MediaType.IMAGE.code) {
+                                generator.generateAndEncryptImageThumbnail(
+                                    imageUri = Uri.fromFile(temp),
+                                    itemId = mediaId,
+                                    thumbSubkey = lease.thumbSubkey,
+                                    outputThumbFile = thumbFile,
+                                    orientation = metadata?.orientation ?: 0
+                                )
+                            } else {
+                                generator.generateAndEncryptVideoThumbnail(
+                                    videoUri = Uri.fromFile(temp),
+                                    itemId = mediaId,
+                                    thumbSubkey = lease.thumbSubkey,
+                                    outputThumbFile = thumbFile
+                                )
+                            }
+                        }
+
+                        bitmap = generator.decryptThumbnail(
+                            thumbFile,
+                            lease.thumbSubkey,
+                            mediaId
+                        )
+                    } catch (_: Exception) {
+                        // Keep the placeholder if the original cannot be fully authenticated.
+                    } finally {
+                        temp.delete()
+                    }
+                }
+            }
+
             val finalBitmap = bitmap ?: return@withContext null
             synchronized(this@EncryptedThumbnailRepository) {
                 if (generation != start || sessionManager.currentVaultId != vaultId) {
