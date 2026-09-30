@@ -9,6 +9,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -85,6 +86,7 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
@@ -199,6 +201,42 @@ fun FoldersScreen(
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
+    var pendingMoveConsentItems by remember { mutableStateOf<List<ImportResult.Success>>(emptyList()) }
+    var pendingMoveAlreadyDeleted by remember { mutableIntStateOf(0) }
+
+    fun moveSummaryText(deleted: Int, retained: Int, failed: Int): String = when {
+        retained == 0 && failed == 0 -> "$deleted moved into Suya Phot. Public originals removed."
+        failed > 0 -> "$deleted moved. $retained original(s) remain because Android could not delete them."
+        else -> "$deleted moved. $retained original(s) kept in Gallery."
+    }
+
+    val moveConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val mode = pendingMoveConsentMode
+        val pending = pendingMoveConsentItems
+        val alreadyDeleted = pendingMoveAlreadyDeleted
+        pendingMoveConsentMode = null
+        pendingMoveConsentItems = emptyList()
+        pendingMoveAlreadyDeleted = 0
+        if (mode == null || pending.isEmpty()) return@rememberLauncherForActivityResult
+
+        scope.launch {
+            val summary = container.vaultMoveFinalizer.completeConsent(
+                pending = pending,
+                mode = mode,
+                granted = result.resultCode == android.app.Activity.RESULT_OK
+            )
+            folderActionStatus = moveSummaryText(
+                deleted = alreadyDeleted + summary.deletedCount,
+                retained = summary.retainedCount,
+                failed = summary.failedCount
+            )
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -206,17 +244,32 @@ fun FoldersScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = currentParentId,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
-                val failed = results.count { it is ImportResult.Failure }
-                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                val failedImports = results.count { it is ImportResult.Failure }
+                when (val finalized = container.vaultMoveFinalizer.begin(successes)) {
+                    is com.suyaphot.app.domain.importmedia.VaultMoveFinalizer.Result.Completed -> {
+                        val s = finalized.summary
+                        folderActionStatus = moveSummaryText(s.deletedCount, s.retainedCount, s.failedCount) +
+                            if (failedImports > 0) " $failedImports import(s) failed; originals untouched." else ""
+                    }
+                    is com.suyaphot.app.domain.importmedia.VaultMoveFinalizer.Result.RequiresConsent -> {
+                        pendingMoveConsentMode = finalized.mode
+                        pendingMoveConsentItems = finalized.pending
+                        pendingMoveAlreadyDeleted = finalized.alreadyDeletedCount
+                        folderActionStatus = "Encrypted copies are safe. Confirm Android's delete prompt to finish moving."
+                        container.sessionManager.beginSystemActivity()
+                        moveConsentLauncher.launch(
+                            IntentSenderRequest.Builder(finalized.intentSender).build()
+                        )
+                    }
+                }
             }
         }
     }
@@ -626,7 +679,7 @@ fun FoldersScreen(
                     actions = {
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
-                            contentDescription = "Import media here",
+                            contentDescription = "Move media to Suya Phot",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(
@@ -695,7 +748,7 @@ fun FoldersScreen(
                     icon = Icons.Default.Folder,
                     title = if (currentParentId == null) "No folders created" else "This folder is empty",
                     subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Import media or create subfolders inside.",
-                    actionText = if (hiddenMode && currentParentId == null) null else "Import Photos & Videos",
+                    actionText = if (hiddenMode && currentParentId == null) null else "Move Photos & Videos",
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
