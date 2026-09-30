@@ -26,6 +26,84 @@ import java.security.MessageDigest
 
 @RunWith(AndroidJUnit4::class)
 class CredentialValidationTest {
+    @Test
+    fun primaryPinCannotBeChangedToExistingSecondaryPin() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
+        val pepper = object : PepperProvider {
+            override fun hmacSha256(input: ByteArray): ByteArray =
+                MessageDigest.getInstance("SHA-256").digest(input)
+        }
+        val keys = KeyManager(context, pepper)
+        val vaultCrypto = VaultCrypto()
+        val preferences = SecurityPreferences(context)
+        val session = SessionManager(preferences, CoroutineScope(Dispatchers.Unconfined))
+
+        val realMaster = ByteArray(32) { 0x11 }
+        val secondaryMaster = ByteArray(32) { 0x22 }
+
+        try {
+            val realEnvelope = keys.createPinEnvelope(realMaster, "123456".toCharArray(), 50_000)
+            val secondaryEnvelope = keys.createPinEnvelope(secondaryMaster, "654321".toCharArray(), 50_000)
+
+            db.vaultDao().insert(
+                VaultEntity(
+                    id = "real-vault",
+                    kindCode = VaultKind.REAL.code,
+                    createdAt = 1,
+                    schemaVersion = 1,
+                    pinEnvelope = realEnvelope.serialize(),
+                    credentialTypeCode = 0
+                )
+            )
+            db.vaultDao().insert(
+                VaultEntity(
+                    id = "secondary-vault",
+                    kindCode = VaultKind.SECONDARY.code,
+                    createdAt = 1,
+                    schemaVersion = 1,
+                    pinEnvelope = secondaryEnvelope.serialize(),
+                    credentialTypeCode = 0
+                )
+            )
+
+            session.unlock(
+                "real-vault",
+                VaultKind.REAL,
+                SensitiveKeyHandle(realMaster.copyOf()),
+                vaultCrypto.deriveMediaSubkey(realMaster),
+                vaultCrypto.deriveMetaSubkey(realMaster),
+                vaultCrypto.deriveThumbSubkey(realMaster)
+            )
+
+            val auth = PinAuthenticator(db.vaultDao(), keys, vaultCrypto, session, preferences)
+            assertFalse(
+                auth.changeCurrentCredential(
+                    "123456".toCharArray(),
+                    0,
+                    "654321".toCharArray(),
+                    0
+                )
+            )
+
+            val unchanged = KeyManager.PinEnvelope.deserialize(
+                db.vaultDao().getVault("real-vault")!!.pinEnvelope
+            )
+            val unwrappedOld = keys.unwrapPinEnvelope(unchanged, "123456".toCharArray())
+            assertTrue(unwrappedOld != null && unwrappedOld.contentEquals(realMaster))
+            unwrappedOld?.fill(0)
+
+            val authResult = auth.authenticateWithPin("654321".toCharArray())
+            assertTrue(authResult is com.suyaphot.app.domain.auth.AuthResult.Success)
+            assertEquals(VaultKind.SECONDARY, (authResult as com.suyaphot.app.domain.auth.AuthResult.Success).kind)
+        } finally {
+            session.lock(com.suyaphot.app.domain.auth.LockReason.Explicit)
+            realMaster.fill(0)
+            secondaryMaster.fill(0)
+            db.close()
+        }
+    }
+
     @Test fun nonDigitPinCannotBeStoredDuringCredentialChange() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
