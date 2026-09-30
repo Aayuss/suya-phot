@@ -19,6 +19,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +36,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -62,6 +64,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -81,6 +87,7 @@ import com.suyaphot.app.core.model.JobType
 import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.domain.importmedia.ImportJobPayload
+import com.suyaphot.app.domain.importmedia.MoveImportFinalizer
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
@@ -110,6 +117,7 @@ fun PhotosScreen(
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
 
@@ -136,6 +144,67 @@ fun PhotosScreen(
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveConsent by remember {
+        mutableStateOf<List<MoveImportFinalizer.PendingMove>>(emptyList())
+    }
+    var pendingMoveConsentMode by remember {
+        mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null)
+    }
+
+    val moveDeleteConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val pending = pendingMoveConsent
+        val mode = pendingMoveConsentMode
+        pendingMoveConsent = emptyList()
+        pendingMoveConsentMode = null
+
+        if (mode != null && pending.isNotEmpty()) {
+            scope.launch {
+                val completed = container.moveImportFinalizer.completeConsent(
+                    pending = pending,
+                    mode = mode,
+                    resultCode = result.resultCode
+                )
+                statusMessage = if (completed.retainedCount == 0) {
+                    "Moved to Suya Phot. Public originals removed."
+                } else {
+                    "Encrypted safely. \${completed.retainedCount} original(s) remain in Gallery."
+                }
+            }
+        }
+    }
+
+    fun finalizeMovedImports(
+        successes: List<ImportResult.Success>,
+        failedCount: Int
+    ) {
+        scope.launch {
+            when (val finalized = container.moveImportFinalizer.begin(successes)) {
+                is MoveImportFinalizer.Result.Complete -> {
+                    statusMessage = buildString {
+                        append("\${finalized.deletedCount} moved")
+                        if (finalized.retainedCount > 0) {
+                            append(", \${finalized.retainedCount} original(s) remain in Gallery")
+                        }
+                        if (failedCount > 0) append(", \$failedCount failed")
+                    }
+                }
+
+                is MoveImportFinalizer.Result.RequiresConsent -> {
+                    pendingMoveConsent = finalized.pending
+                    pendingMoveConsentMode = finalized.mode
+                    statusMessage = "Encrypted safely. Confirm Android's delete request to finish moving."
+                    container.sessionManager.beginSystemActivity()
+                    moveDeleteConsentLauncher.launch(
+                        IntentSenderRequest.Builder(finalized.intentSender).build()
+                    )
+                }
+            }
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -143,17 +212,16 @@ fun PhotosScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing \$current of \$total items..." }
                     }
                 )
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
+                val successes = results.filterIsInstance<ImportResult.Success>()
                 val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+                finalizeMovedImports(successes, failed)
             }
         }
     }
