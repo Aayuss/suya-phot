@@ -134,6 +134,24 @@ interface FolderDao {
     @Query("SELECT * FROM folders WHERE vaultId = :vaultId AND parentId IS :parentId ORDER BY sortOrder ASC, createdAt DESC")
     fun getAllSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>>
 
+    @Query("""
+        SELECT f.*,
+            (
+                (SELECT COUNT(*) FROM media_items m
+                 WHERE m.vaultId = f.vaultId
+                   AND m.folderId = f.id
+                   AND m.deletedAt IS NULL)
+                +
+                (SELECT COUNT(*) FROM folders child
+                 WHERE child.vaultId = f.vaultId
+                   AND child.parentId = f.id)
+            ) AS itemCount
+        FROM folders f
+        WHERE f.vaultId = :vaultId AND f.parentId IS :parentId
+        ORDER BY f.sortOrder ASC, f.createdAt DESC
+    """)
+    fun getAllSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>>
+
     @Query("SELECT * FROM folders WHERE vaultId = :vaultId AND parentId IS :parentId")
     suspend fun getSubFoldersSync(vaultId: String, parentId: String?): List<FolderEntity>
 
