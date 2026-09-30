@@ -2,6 +2,7 @@ package com.suyaphot.app.domain.importmedia
 
 import android.content.Context
 import android.net.Uri
+import android.provider.MediaStore
 import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.VaultCrypto
@@ -266,6 +267,34 @@ class ImportCoordinator(
             val resolvedSource = metadataReader.resolve(uri)
             val sourceMeta = metadataReader.read(resolvedSource)
 
+            // Photo Picker URIs are read-only mediated handles. When MediaStore identity is
+            // available, persist and return the canonical MediaStore URI so MOVE can request
+            // deletion of the actual public item after the vault copy is durably verified.
+            val sourceDeleteUri = sourceMeta.metadata.sourceMediaStoreId?.let { sourceId ->
+                val volume = sourceMeta.metadata.sourceVolume ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
+                when (sourceMeta.mediaType) {
+                    MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume, sourceId)
+                    MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume, sourceId)
+                }
+            } ?: uri
+
+            val canonicalPayload = ImportJobPayload(
+                sourceUri = sourceDeleteUri.toString(),
+                targetFolderId = folderId,
+                itemId = itemId,
+                mode = mode
+            ).serialize()
+            val canonicalEncryptedPayload = try {
+                Aead.encryptWithPrependedNonce(
+                    keyBytes = session.metaSubkey,
+                    plaintext = canonicalPayload,
+                    aad = "job:$jobId:v1".toByteArray(Charsets.UTF_8)
+                )
+            } finally {
+                canonicalPayload.fill(0)
+            }
+            check(vaultJobDao.updateEncryptedPayload(jobId, vaultId, canonicalEncryptedPayload, System.currentTimeMillis()) == 1)
+
             // 2. Encrypting stream to .partial file
             vaultJobDao.updateState(jobId, JobState.ENCRYPTING.code, System.currentTimeMillis())
             val progressUpdates = Channel<Pair<Long, Long>>(Channel.CONFLATED)
@@ -323,7 +352,7 @@ class ImportCoordinator(
                     return@withContext ImportResult.Success(
                         jobId = jobId,
                         itemId = existing.id,
-                        uri = uri,
+                        uri = sourceDeleteUri,
                         sha256Hex = sha256Hex,
                         alreadyExisted = true,
                         mode = mode
@@ -383,7 +412,7 @@ class ImportCoordinator(
             // 7. Transactional DB commit (Section 15)
             val now = System.currentTimeMillis()
             val stagedRaw = ImportJobPayload(
-                sourceUri = uri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
+                sourceUri = sourceDeleteUri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
                 stagedMedia = ImportJobPayload.StagedMedia(
                     mediaTypeCode = sourceMeta.mediaType.code,
                     plaintextSize = verifyResult.plaintextSize,
