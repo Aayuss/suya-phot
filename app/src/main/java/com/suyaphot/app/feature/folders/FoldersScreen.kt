@@ -704,8 +704,8 @@ fun FoldersScreen(
                 EmptyState(
                     icon = Icons.Default.Folder,
                     title = if (currentParentId == null) "No folders created" else "This folder is empty",
-                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Import media or create subfolders inside.",
-                    actionText = if (hiddenMode && currentParentId == null) null else "Import Photos & Videos",
+                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Move media here or create subfolders inside.",
+                    actionText = if (hiddenMode && currentParentId == null) null else "Move Photos & Videos",
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
