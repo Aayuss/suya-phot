@@ -120,9 +120,9 @@ fun rememberMoveImportDeletionHandler(
                                 .forEach { mark(it, SourceDisposition.DELETED) }
 
                             val remaining = moves.filter { it.uri in outcome.uris }
-                            pending = remaining
-                            pendingMode = outcome.mode
                             withContext(Dispatchers.Main) {
+                                pending = remaining
+                                pendingMode = outcome.mode
                                 onStatus("Confirm Android's delete request to finish moving originals.")
                                 container.sessionManager.beginSystemActivity()
                                 consentLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
