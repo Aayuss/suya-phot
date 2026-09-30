@@ -92,7 +92,7 @@ fun SecurePinPad(
                 // Bottom left: Biometric or empty
                 if (showBiometric && onBiometricClick != null) {
                     ActionKey(
-                        contentDescription = "Unlock with fingerprint",
+                        contentDescription = "Unlock with biometric",
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             onBiometricClick()
@@ -101,7 +101,7 @@ fun SecurePinPad(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Fingerprint,
-                            contentDescription = "Fingerprint",
+                            contentDescription = "Biometric",
                             tint = SuyaColors.Accent,
                             modifier = Modifier.size(24.dp)
                         )
