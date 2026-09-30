@@ -15,6 +15,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -36,6 +37,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -70,11 +72,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.compose.foundation.text.KeyboardOptions
@@ -192,6 +198,10 @@ fun FoldersScreen(
     // Media Multi-selection in current folder
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() } }
+    val folderGridState = rememberLazyGridState()
+    val haptic = LocalHapticFeedback.current
+    var dragAnchorMediaIndex by remember { mutableStateOf<Int?>(null) }
+    var dragBaseSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     val retentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
 
@@ -666,6 +676,30 @@ fun FoldersScreen(
         breadcrumbs.lastOrNull { it.first == currentParentId }?.second ?: "Folder"
     }
 
+    fun folderMediaIndexAt(position: Offset): Int? {
+        val info = folderGridState.layoutInfo.visibleItemsInfo.firstOrNull { item ->
+            val left = item.offset.x.toFloat()
+            val top = item.offset.y.toFloat()
+            val right = left + item.size.width
+            val bottom = top + item.size.height
+            position.x in left..right && position.y in top..bottom
+        } ?: return null
+
+        val mediaStart = (if (folders.isNotEmpty()) 1 + folders.size else 0) +
+            (if (pagedMedia.itemCount > 0) 1 else 0)
+        val mediaIndex = info.index - mediaStart
+        return mediaIndex.takeIf { it in 0 until pagedMedia.itemCount }
+    }
+
+    fun applyFolderDragSelection(toIndex: Int) {
+        val anchor = dragAnchorMediaIndex ?: return
+        selectedMediaIds.clear()
+        dragBaseSelection.forEach { selectedMediaIds[it] = Unit }
+        for (index in minOf(anchor, toIndex)..maxOf(anchor, toIndex)) {
+            pagedMedia.peek(index)?.id?.let { selectedMediaIds[it] = Unit }
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -807,10 +841,39 @@ fun FoldersScreen(
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
+                    state = folderGridState,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1f).testTag("folder_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("folder_grid")
+                        .pointerInput(folders.size, pagedMedia.itemCount, currentParentId) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { position ->
+                                    folderMediaIndexAt(position)?.let { index ->
+                                        dragBaseSelection = selectedMediaIds.keys.toSet()
+                                        dragAnchorMediaIndex = index
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        applyFolderDragSelection(index)
+                                    }
+                                },
+                                onDrag = { change, _ ->
+                                    folderMediaIndexAt(change.position)?.let { index ->
+                                        applyFolderDragSelection(index)
+                                        change.consume()
+                                    }
+                                },
+                                onDragEnd = {
+                                    dragAnchorMediaIndex = null
+                                    dragBaseSelection = emptySet()
+                                },
+                                onDragCancel = {
+                                    dragAnchorMediaIndex = null
+                                    dragBaseSelection = emptySet()
+                                }
+                            )
+                        }
                 ) {
                     // Child Folders section
                     if (folders.isNotEmpty()) {
