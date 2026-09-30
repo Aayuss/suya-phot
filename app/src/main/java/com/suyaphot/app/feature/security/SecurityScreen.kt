@@ -264,7 +264,7 @@ fun SecurityScreen(
                 // Biometric Unlock
                 if (canEnrollBiometrics) {
                     SecurityToggleRow(
-                        title = "Fingerprint Unlock",
+                        title = "Biometric Unlock",
                         subtitle = "Biometric unwrap via Android Keystore; hardware protection depends on the device",
                         icon = Icons.Default.Fingerprint,
                         checked = isBiometricEnrolled,
@@ -276,7 +276,7 @@ fun SecurityScreen(
                                     val encryptCipher = container.keyManager.createBiometricEncryptCipher(real.id)
                                     val promptInfo = BiometricPrompt.PromptInfo.Builder()
                                         .setTitle("Enable Biometric Unlock")
-                                        .setSubtitle("Confirm fingerprint to link biometric key to vault")
+                                        .setSubtitle("Confirm a fingerprint or strong biometric to link it to the vault")
                                         .setNegativeButtonText("Cancel")
                                         .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                                         .build()
