@@ -61,7 +61,7 @@ class EncryptedThumbnailRepository(
         try {
             if (lease.vaultId != vaultId) return@withContext null
 
-            val thumbFile = fileStore.getThumbFile(vaultId, mediaId)
+            val thumbFile = thumbFile
             var bitmap = generator.decryptThumbnail(
                 thumbFile,
                 lease.thumbSubkey,
@@ -118,6 +118,14 @@ class EncryptedThumbnailRepository(
         val extension = if (entity.mediaTypeCode == MediaType.VIDEO.code) "mp4" else "jpg"
         val temp = fileStore.createViewerTempFile(mediaId, extension)
 
+        // If load() reached repair, an existing thumbnail failed authenticated decryption.
+        // Thumbnails are replaceable derivatives, so remove only that bad derivative before
+        // regenerating it from the verified original.
+        val thumbFile = thumbFile
+        if (thumbFile.exists()) {
+            runCatching { thumbFile.delete() }
+        }
+
         return try {
             val verified = vaultCrypto.decryptVerifiedToFile(
                 sourceEncryptedFile = encryptedMedia,
@@ -139,7 +147,7 @@ class EncryptedThumbnailRepository(
                     videoUri = Uri.fromFile(temp),
                     itemId = mediaId,
                     thumbSubkey = thumbSubkey,
-                    outputThumbFile = fileStore.getThumbFile(vaultId, mediaId)
+                    outputThumbFile = thumbFile
                 )
             } else {
                 val orientation = runCatching {
@@ -153,7 +161,7 @@ class EncryptedThumbnailRepository(
                     imageUri = Uri.fromFile(temp),
                     itemId = mediaId,
                     thumbSubkey = thumbSubkey,
-                    outputThumbFile = fileStore.getThumbFile(vaultId, mediaId),
+                    outputThumbFile = thumbFile,
                     orientation = orientation
                 )
 
@@ -181,7 +189,7 @@ class EncryptedThumbnailRepository(
 
             if (!generated) return null
 
-            val repairedThumb = fileStore.getThumbFile(vaultId, mediaId)
+            val repairedThumb = thumbFile
             if (repairedThumb.exists()) {
                 database.mediaItemDao().setThumbPathForVault(
                     vaultId,
