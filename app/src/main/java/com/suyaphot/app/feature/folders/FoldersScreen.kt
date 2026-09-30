@@ -609,23 +609,21 @@ fun FoldersScreen(
                     onNavigationClick = if (currentParentId != null || hiddenMode) {
                         { navigateUp() }
                     } else null,
-                    actions = {
-                        if (currentParentId == null && !hiddenMode) {
-                            SuyaIconButton(
-                                icon = Icons.Default.VisibilityOff,
-                                contentDescription = "Hidden folders",
-                                onClick = {
-                                    scope.launch {
-                                        val vault = container.database.vaultDao().getVault(vaultId)
-                                        gateTypeCode = vault?.credentialTypeCode ?: 0
-                                        hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
-                                        gateInput = ""
-                                        gateError = null
-                                        showHiddenAuth = true
-                                    }
-                                }
-                            )
+                    // Hidden folders deliberately have no visible affordance. At the root,
+                    // long-pressing the "Folders" title opens the existing vault re-auth gate.
+                    onTitleLongClick = if (currentParentId == null && !hiddenMode) {
+                        {
+                            scope.launch {
+                                val vault = container.database.vaultDao().getVault(vaultId)
+                                gateTypeCode = vault?.credentialTypeCode ?: 0
+                                hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+                                gateInput = ""
+                                gateError = null
+                                showHiddenAuth = true
+                            }
                         }
+                    } else null,
+                    actions = {
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
                             contentDescription = "Import media here",
