@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -47,12 +48,14 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
@@ -73,6 +76,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
@@ -177,6 +181,7 @@ fun FoldersScreen(
     var editLockConfirmPin by remember { mutableStateOf("") }
     var editLockFirstPattern by remember { mutableStateOf<IntArray?>(null) }
     var editLockRecoveryCode by remember { mutableStateOf("") }
+    var editRecoveryCodeRevealed by remember { mutableStateOf(false) }
     var editLockError by remember { mutableStateOf<String?>(null) }
     var editLockErrorTrigger by remember { mutableIntStateOf(0) }
 
@@ -305,8 +310,10 @@ fun FoldersScreen(
             editLockCurrentPattern = null
             editLockNewPin = ""
             editLockConfirmPin = ""
+            editLockFirstPattern?.fill(-1)
             editLockFirstPattern = null
             editLockRecoveryCode = ""
+            editRecoveryCodeRevealed = false
             editLockError = null
             selectedFolderForAction = null
         }
@@ -353,8 +360,10 @@ fun FoldersScreen(
                     editLockCurrentPattern = null
                     editLockNewPin = ""
                     editLockConfirmPin = ""
+                    editLockFirstPattern?.fill(-1)
                     editLockFirstPattern = null
                     editLockRecoveryCode = ""
+                    editRecoveryCodeRevealed = false
                     editLockError = null
                     selectedFolderForAction = null
 
@@ -426,8 +435,10 @@ fun FoldersScreen(
                 editLockCurrentPattern = null
                 editLockNewPin = ""
                 editLockConfirmPin = ""
+                editLockFirstPattern?.fill(-1)
                 editLockFirstPattern = null
                 editLockRecoveryCode = ""
+                editRecoveryCodeRevealed = false
                 folderActionStatus = "Folder lock updated"
                 val nextFolder = pendingFolderId
                 if (nextFolder != null) {
@@ -1020,6 +1031,7 @@ fun FoldersScreen(
                                 lockTypeCode = 0
                                 newLockInput = ""
                                 confirmLockInput = ""
+                                firstLockPattern?.fill(-1)
                                 firstLockPattern = null
                                 lockError = null
                                 showCreateLockDialog = true
@@ -1163,7 +1175,13 @@ fun FoldersScreen(
     if (showCreateLockDialog && selectedFolderForAction != null) {
         val target = selectedFolderForAction!!
         SuyaDialog(
-            onDismissRequest = { showCreateLockDialog = false; newLockInput = ""; confirmLockInput = ""; firstLockPattern = null },
+            onDismissRequest = {
+                showCreateLockDialog = false
+                newLockInput = ""
+                confirmLockInput = ""
+                firstLockPattern?.fill(-1)
+                firstLockPattern = null
+            },
             title = "Lock ${target.name}",
             confirmText = if (lockTypeCode == 0) "Create lock" else null,
             onConfirm = if (lockTypeCode == 0) ({
@@ -1186,7 +1204,11 @@ fun FoldersScreen(
             content = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SuyaButton("PIN", onClick = { lockTypeCode = 0; firstLockPattern = null }, variant = if (lockTypeCode == 0) ButtonVariant.Primary else ButtonVariant.Secondary)
+                        SuyaButton("PIN", onClick = {
+                            lockTypeCode = 0
+                            firstLockPattern?.fill(-1)
+                            firstLockPattern = null
+                        }, variant = if (lockTypeCode == 0) ButtonVariant.Primary else ButtonVariant.Secondary)
                         SuyaButton("Pattern", onClick = { lockTypeCode = 1; newLockInput = ""; confirmLockInput = "" }, variant = if (lockTypeCode == 1) ButtonVariant.Primary else ButtonVariant.Secondary)
                     }
                     if (lockTypeCode == 0) {
@@ -1197,14 +1219,32 @@ fun FoldersScreen(
                         PatternLockPad(
                             onPatternComplete = { raw ->
                                 val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
-                                if (normalized == null) { lockError = "Connect at least four dots"; lockErrorTrigger++ }
-                                else if (firstLockPattern == null) { firstLockPattern = normalized; lockError = null }
-                                else if (!normalized.contentEquals(firstLockPattern)) { lockError = "Patterns do not match"; lockErrorTrigger++; firstLockPattern = null }
-                                else {
+                                raw.fill(-1)
+                                if (normalized == null) {
+                                    lockError = "Connect at least four dots"
+                                    lockErrorTrigger++
+                                } else if (firstLockPattern == null) {
+                                    firstLockPattern = normalized
+                                    lockError = null
+                                } else if (!normalized.contentEquals(firstLockPattern)) {
+                                    firstLockPattern?.fill(-1)
+                                    firstLockPattern = null
+                                    normalized.fill(-1)
+                                    lockError = "Patterns do not match"
+                                    lockErrorTrigger++
+                                } else {
+                                    val credential = PatternCredential.canonicalChars(normalized)
+                                    normalized.fill(-1)
                                     scope.launch {
-                                        val created = container.folderLockManager.create(target.id, PatternCredential.canonicalChars(normalized), 1)
-                                        if (created) { showCreateLockDialog = false; selectedFolderForAction = null; firstLockPattern = null }
-                                        else lockError = "Could not create folder lock"
+                                        val created = container.folderLockManager.create(target.id, credential, 1)
+                                        if (created) {
+                                            showCreateLockDialog = false
+                                            selectedFolderForAction = null
+                                            firstLockPattern?.fill(-1)
+                                            firstLockPattern = null
+                                        } else {
+                                            lockError = "Could not create folder lock"
+                                        }
                                     }
                                 }
                             },
@@ -1232,8 +1272,10 @@ fun FoldersScreen(
                 editLockCurrentPattern = null
                 editLockNewPin = ""
                 editLockConfirmPin = ""
+                editLockFirstPattern?.fill(-1)
                 editLockFirstPattern = null
                 editLockRecoveryCode = ""
+                editRecoveryCodeRevealed = false
                 pendingFolderId = null
             },
             title = if (editLockRecovery) "Recover $editLockFolderName" else "Change lock for $editLockFolderName",
@@ -1246,9 +1288,36 @@ fun FoldersScreen(
             content = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (editLockRecovery) {
-                        Text("Recovery Kit resets this folder lock without changing its media encryption.", color = SuyaColors.TextMuted, fontSize = 12.sp)
-                        SuyaTextField(editLockRecoveryCode,
-                            onValueChange = { editLockRecoveryCode = it.uppercase() }, label = "Recovery Code")
+                        Text(
+                            "Recovery Kit resets this folder lock without changing its media encryption.",
+                            color = SuyaColors.TextMuted,
+                            fontSize = 12.sp
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            SuyaTextField(
+                                value = editLockRecoveryCode,
+                                onValueChange = { editLockRecoveryCode = it.uppercase().take(32) },
+                                label = "Recovery Code",
+                                visualTransformation =
+                                    if (editRecoveryCodeRevealed) VisualTransformation.None
+                                    else PasswordVisualTransformation(),
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(onClick = { editRecoveryCodeRevealed = !editRecoveryCodeRevealed }) {
+                                Icon(
+                                    imageVector =
+                                        if (editRecoveryCodeRevealed) Icons.Default.VisibilityOff
+                                        else Icons.Default.Visibility,
+                                    contentDescription =
+                                        if (editRecoveryCodeRevealed) "Hide Recovery Code"
+                                        else "Reveal Recovery Code",
+                                    tint = SuyaColors.TextMuted
+                                )
+                            }
+                        }
                     } else if (editLockCurrentType == 0) {
                         SuyaTextField(editLockCurrentPin,
                             onValueChange = { editLockCurrentPin = it.filter(Char::isDigit).take(12) },
@@ -1258,14 +1327,25 @@ fun FoldersScreen(
                         Text("Draw current folder pattern", color = SuyaColors.TextMuted, fontSize = 12.sp)
                         PatternLockPad(
                             onPatternComplete = { raw ->
-                                editLockCurrentPattern = runCatching { PatternCredential.canonicalChars(raw) }.getOrNull()
-                                if (editLockCurrentPattern == null) { editLockError = "Connect at least four dots"; editLockErrorTrigger++ }
+                                editLockCurrentPattern?.fill('\u0000')
+                                editLockCurrentPattern = runCatching {
+                                    PatternCredential.canonicalChars(raw)
+                                }.getOrNull()
+                                raw.fill(-1)
+                                if (editLockCurrentPattern == null) {
+                                    editLockError = "Connect at least four dots"
+                                    editLockErrorTrigger++
+                                }
                             },
                             errorTrigger = editLockErrorTrigger, enabled = true,
                             modifier = Modifier.fillMaxWidth())
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SuyaButton("New PIN", onClick = { editLockTargetType = 0; editLockFirstPattern = null },
+                        SuyaButton("New PIN", onClick = {
+                            editLockTargetType = 0
+                            editLockFirstPattern?.fill(-1)
+                            editLockFirstPattern = null
+                        },
                             variant = if (editLockTargetType == 0) ButtonVariant.Primary else ButtonVariant.Secondary)
                         SuyaButton("New Pattern", onClick = { editLockTargetType = 1; editLockNewPin = ""; editLockConfirmPin = "" },
                             variant = if (editLockTargetType == 1) ButtonVariant.Primary else ButtonVariant.Secondary)
@@ -1285,13 +1365,24 @@ fun FoldersScreen(
                         PatternLockPad(
                             onPatternComplete = { raw ->
                                 val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
-                                if (normalized == null) { editLockError = "Connect at least four dots"; editLockErrorTrigger++ }
-                                else if (editLockFirstPattern == null) { editLockFirstPattern = normalized; editLockError = null }
-                                else if (!normalized.contentEquals(editLockFirstPattern)) {
+                                raw.fill(-1)
+                                if (normalized == null) {
+                                    editLockError = "Connect at least four dots"
+                                    editLockErrorTrigger++
+                                } else if (editLockFirstPattern == null) {
+                                    editLockFirstPattern = normalized
+                                    editLockError = null
+                                } else if (!normalized.contentEquals(editLockFirstPattern)) {
+                                    editLockFirstPattern?.fill(-1)
                                     editLockFirstPattern = null
+                                    normalized.fill(-1)
                                     editLockError = "Patterns do not match"
                                     editLockErrorTrigger++
-                                } else submitEditedLock(PatternCredential.canonicalChars(normalized))
+                                } else {
+                                    val credential = PatternCredential.canonicalChars(normalized)
+                                    normalized.fill(-1)
+                                    submitEditedLock(credential)
+                                }
                             },
                             errorTrigger = editLockErrorTrigger, enabled = true,
                             modifier = Modifier.fillMaxWidth())
