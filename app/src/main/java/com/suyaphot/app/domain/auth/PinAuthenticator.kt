@@ -336,17 +336,24 @@ class PinAuthenticator(
         val masterKey = keyManager.unwrapRecoveryEnvelope(envelope, recoveryCodeInput)
             ?: run { newPinChars.fill('\u0000'); return false }
 
+        var sessionOwnsMasterKey = false
         try {
-            // Re-wrap master key with new PIN
+            // Re-wrap the existing master key; never generate a replacement during recovery.
             val newPinEnvelope = keyManager.createPinEnvelope(masterKey, newPinChars)
-            vaultDao.updateCredential(realVault.id, newPinEnvelope.serialize(), newTypeCode)
+            if (vaultDao.updateCredential(realVault.id, newPinEnvelope.serialize(), newTypeCode) != 1) {
+                return false
+            }
             preferences.resetFailedAttempts()
             establishSession(realVault.id, VaultKind.REAL, masterKey)
+            sessionOwnsMasterKey = true
             return true
         } catch (e: Exception) {
             SafeLog.e("PinAuthenticator", "Recovery reset failed", e)
             return false
         } finally {
+            if (!sessionOwnsMasterKey) {
+                masterKey.fill(0)
+            }
             newPinChars.fill('\u0000')
         }
     }
