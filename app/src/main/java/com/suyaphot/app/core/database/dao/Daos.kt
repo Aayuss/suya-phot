@@ -91,7 +91,22 @@ interface FolderDao {
     fun getSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>>
 
     @Query("""
-        SELECT f.*, (SELECT COUNT(*) FROM media_items m WHERE m.vaultId = f.vaultId AND m.folderId = f.id AND m.deletedAt IS NULL AND m.concealed = 0) AS itemCount
+        SELECT f.*,
+            (
+                SELECT COUNT(*)
+                FROM media_items m
+                WHERE m.vaultId = f.vaultId
+                  AND m.folderId = f.id
+                  AND m.deletedAt IS NULL
+                  AND m.concealed = 0
+            ) +
+            (
+                SELECT COUNT(*)
+                FROM folders child
+                WHERE child.vaultId = f.vaultId
+                  AND child.parentId = f.id
+                  AND child.effectiveHidden = 0
+            ) AS itemCount
         FROM folders f
         WHERE f.vaultId = :vaultId AND f.parentId IS :parentId AND f.effectiveHidden = 0
         ORDER BY f.sortOrder ASC, f.createdAt DESC
@@ -99,7 +114,21 @@ interface FolderDao {
     fun getSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>>
 
     @Query("""
-        SELECT f.*, 0 AS itemCount FROM folders f
+        SELECT f.*,
+            (
+                SELECT COUNT(*)
+                FROM media_items m
+                WHERE m.vaultId = f.vaultId
+                  AND m.folderId = f.id
+                  AND m.deletedAt IS NULL
+            ) +
+            (
+                SELECT COUNT(*)
+                FROM folders child
+                WHERE child.vaultId = f.vaultId
+                  AND child.parentId = f.id
+            ) AS itemCount
+        FROM folders f
         WHERE f.vaultId = :vaultId AND f.directHidden = 1
           AND (f.parentId IS NULL OR NOT EXISTS (
               SELECT 1 FROM folders p WHERE p.id = f.parentId AND p.vaultId = f.vaultId AND p.effectiveHidden = 1
@@ -107,6 +136,27 @@ interface FolderDao {
         ORDER BY f.sortOrder ASC, f.createdAt DESC
     """)
     fun getHiddenRoots(vaultId: String): Flow<List<FolderWithCount>>
+
+    @Query("""
+        SELECT f.*,
+            (
+                SELECT COUNT(*)
+                FROM media_items m
+                WHERE m.vaultId = f.vaultId
+                  AND m.folderId = f.id
+                  AND m.deletedAt IS NULL
+            ) +
+            (
+                SELECT COUNT(*)
+                FROM folders child
+                WHERE child.vaultId = f.vaultId
+                  AND child.parentId = f.id
+            ) AS itemCount
+        FROM folders f
+        WHERE f.vaultId = :vaultId AND f.parentId IS :parentId
+        ORDER BY f.sortOrder ASC, f.createdAt DESC
+    """)
+    fun getAllSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>>
 
     @Query("SELECT * FROM folders WHERE vaultId = :vaultId AND parentId IS :parentId ORDER BY sortOrder ASC, createdAt DESC")
     fun getAllSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>>
