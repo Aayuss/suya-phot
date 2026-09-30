@@ -228,6 +228,9 @@ interface MediaItemDao {
     @Query("UPDATE media_items SET encryptedPreviewRelativePath = :path WHERE id = :id AND vaultId = :vaultId AND deletedAt IS NULL")
     suspend fun setPreviewPathForVault(vaultId: String, id: String, path: String): Int
 
+    @Query("UPDATE media_items SET encryptedThumbRelativePath = :path WHERE id = :id AND vaultId = :vaultId")
+    suspend fun setThumbPathForVault(vaultId: String, id: String, path: String): Int
+
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND id IN (:ids)")
     suspend fun getItemsByIdsForVault(vaultId: String, ids: List<String>): List<MediaItemEntity>
 
