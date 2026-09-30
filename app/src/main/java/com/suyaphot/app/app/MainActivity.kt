@@ -52,6 +52,10 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Privacy is the safe startup default. If the user explicitly disabled screenshot
+        // protection, the collected preference below clears this flag after composition.
+        // Setting it before setContent avoids a first-frame / Recents preview exposure.
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         enableEdgeToEdge()
 
         val app = application as SuyaApp
