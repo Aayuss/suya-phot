@@ -81,4 +81,35 @@ class PrivacyQueriesTest {
             assertEquals(listOf("hidden"), db.folderDao().getHiddenRoots("vault").first().map { it.folder.id })
         } finally { db.close() }
     }
+
+    @Test fun folderItemCountIncludesDirectSubfoldersAndDirectMedia() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
+        try {
+            db.vaultDao().insert(VaultEntity("vault", 0, 1, 1, byteArrayOf(1)))
+            db.folderDao().insert(
+                FolderEntity("parent", "vault", null, byteArrayOf(1), 1, 1, null, 0)
+            )
+            db.folderDao().insert(
+                FolderEntity("child", "vault", "parent", byteArrayOf(2), 2, 2, null, 0)
+            )
+            db.mediaItemDao().insert(
+                MediaItemEntity(
+                    "media", "vault", "parent", 0, byteArrayOf(1), "media.sph", null,
+                    1, 1, "mediahash", 1, 1, false, null, null
+                )
+            )
+
+            val root = db.folderDao().getSubFoldersWithCount("vault", null).first()
+            val parent = root.single { it.folder.id == "parent" }
+            assertEquals(
+                "Folder count should include one direct media item and one direct subfolder",
+                2,
+                parent.itemCount
+            )
+        } finally {
+            db.close()
+        }
+    }
+
 }
