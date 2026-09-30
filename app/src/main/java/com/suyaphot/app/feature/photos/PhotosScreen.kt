@@ -141,9 +141,9 @@ fun PhotosScreen(
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
-    var pendingMoveConsentItems by remember { mutableStateOf<List<ImportResult.Success>>(emptyList()) }
-    var pendingMoveAlreadyDeleted by remember { mutableStateOf(0) }
+    var pendingMoveRequest by remember {
+        mutableStateOf<com.suyaphot.app.domain.importmedia.VaultMoveFinalizer.Result.RequiresConsent?>(null)
+    }
 
     fun moveSummaryText(deleted: Int, retained: Int, failed: Int): String = when {
         retained == 0 && failed == 0 -> "$deleted moved into Suya Phot. Public originals removed."
@@ -155,26 +155,31 @@ fun PhotosScreen(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         container.sessionManager.endSystemActivity()
-        val mode = pendingMoveConsentMode
-        val pending = pendingMoveConsentItems
-        val alreadyDeleted = pendingMoveAlreadyDeleted
-        pendingMoveConsentMode = null
-        pendingMoveConsentItems = emptyList()
-        pendingMoveAlreadyDeleted = 0
-        if (mode == null || pending.isEmpty()) return@rememberLauncherForActivityResult
+        val request = pendingMoveRequest ?: return@rememberLauncherForActivityResult
+        pendingMoveRequest = null
 
         scope.launch {
-            val summary = container.vaultMoveFinalizer.completeConsent(
-                pending = pending,
-                mode = mode,
+            when (val next = container.vaultMoveFinalizer.completeConsent(
+                request = request,
                 granted = result.resultCode == android.app.Activity.RESULT_OK
-            )
-            statusMessage = moveSummaryText(
-                deleted = alreadyDeleted + summary.deletedCount,
-                retained = summary.retainedCount,
-                failed = summary.failedCount
-            )
+            )) {
+                is com.suyaphot.app.domain.importmedia.VaultMoveFinalizer.Result.Completed -> {
+                    val s = next.summary
+                    statusMessage = moveSummaryText(s.deletedCount, s.retainedCount, s.failedCount)
+                }
+                is com.suyaphot.app.domain.importmedia.VaultMoveFinalizer.Result.RequiresConsent -> {
+                    pendingMoveRequest = next
+                }
+            }
         }
+    }
+
+    LaunchedEffect(pendingMoveRequest) {
+        val request = pendingMoveRequest ?: return@LaunchedEffect
+        container.sessionManager.beginSystemActivity()
+        moveConsentLauncher.launch(
+            IntentSenderRequest.Builder(request.intentSender).build()
+        )
     }
 
     fun startImport(uris: List<Uri>) {
@@ -207,14 +212,8 @@ fun PhotosScreen(
                         }
                     }
                     is com.suyaphot.app.domain.importmedia.VaultMoveFinalizer.Result.RequiresConsent -> {
-                        pendingMoveConsentMode = finalized.mode
-                        pendingMoveConsentItems = finalized.pending
-                        pendingMoveAlreadyDeleted = finalized.alreadyDeletedCount
                         statusMessage = "Encrypted copies are safe. Confirm Android's delete prompt to finish moving."
-                        container.sessionManager.beginSystemActivity()
-                        moveConsentLauncher.launch(
-                            IntentSenderRequest.Builder(finalized.intentSender).build()
-                        )
+                        pendingMoveRequest = finalized
                     }
                 }
             }
