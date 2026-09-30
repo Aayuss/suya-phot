@@ -270,7 +270,14 @@ class ImportCoordinator(
             // Photo Picker URIs are read-only mediated handles. When MediaStore identity is
             // available, persist and return the canonical MediaStore URI so MOVE can request
             // deletion of the actual public item after the vault copy is durably verified.
-            val sourceDeleteUri = sourceMeta.metadata.sourceMediaStoreId?.let { sourceId ->
+            val pickerMediaId = if (
+                uri.authority == MediaStore.AUTHORITY &&
+                uri.pathSegments.firstOrNull() == "picker"
+            ) {
+                uri.lastPathSegment?.toLongOrNull()
+            } else null
+            val sourceMediaId = sourceMeta.metadata.sourceMediaStoreId ?: pickerMediaId
+            val sourceDeleteUri = sourceMediaId?.let { sourceId ->
                 val volume = sourceMeta.metadata.sourceVolume ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
                 when (sourceMeta.mediaType) {
                     MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume, sourceId)
