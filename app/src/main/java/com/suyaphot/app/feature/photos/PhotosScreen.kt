@@ -170,7 +170,7 @@ fun PhotosScreen(
                 statusMessage = if (completed.retainedCount == 0) {
                     "Moved to Suya Phot. Public originals removed."
                 } else {
-                    "Encrypted safely. \${completed.retainedCount} original(s) remain in Gallery."
+                    "Encrypted safely. ${completed.retainedCount} original(s) remain in Gallery."
                 }
             }
         }
@@ -184,11 +184,11 @@ fun PhotosScreen(
             when (val finalized = container.moveImportFinalizer.begin(successes)) {
                 is MoveImportFinalizer.Result.Complete -> {
                     statusMessage = buildString {
-                        append("\${finalized.deletedCount} moved")
+                        append("${finalized.deletedCount} moved")
                         if (finalized.retainedCount > 0) {
-                            append(", \${finalized.retainedCount} original(s) remain in Gallery")
+                            append(", ${finalized.retainedCount} original(s) remain in Gallery")
                         }
-                        if (failedCount > 0) append(", \$failedCount failed")
+                        if (failedCount > 0) append(", $failedCount failed")
                     }
                 }
 
