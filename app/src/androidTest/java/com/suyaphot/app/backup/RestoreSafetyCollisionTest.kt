@@ -355,4 +355,57 @@ class RestoreSafetyCollisionTest {
         assertEquals(1, db.vaultDao().getAllVaults().size)
         db.close()
     }
+
+    @Test
+    fun testWrongRecoveryCodeStillWipesNewCredentialBuffer(): Unit = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val keyManager = KeyManager(context, pepper)
+        val recoveryCode = keyManager.generateRecoverySecret()
+        var wrongRecoveryCode = keyManager.generateRecoverySecret()
+        while (wrongRecoveryCode == recoveryCode) {
+            wrongRecoveryCode = keyManager.generateRecoverySecret()
+        }
+        val targetVaultId = "vault_restore_secret_wipe"
+        val backupBytes = createSampleBackupBytes(context, targetVaultId, recoveryCode)
+
+        val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
+        val fileStore = VaultFileStore(context)
+        val securityPrefs = SecurityPreferences(context)
+        val session = SessionManager(securityPrefs, CoroutineScope(Dispatchers.Unconfined))
+        val access = FolderAccessManager(db, session, CoroutineScope(Dispatchers.Unconfined))
+        val privacy = FolderPrivacyCoordinator(db)
+        val importer = VaultBackupImporter(
+            context = context,
+            database = db,
+            fileStore = fileStore,
+            keyManager = keyManager,
+            privacyCoordinator = privacy,
+            vaultCrypto = VaultCrypto(),
+            sessionManager = session,
+            accessManager = access
+        )
+
+        val newCredential = "654321".toCharArray()
+        try {
+            importer.restoreVault(
+                inputStream = ByteArrayInputStream(backupBytes),
+                recoveryCodeInput = wrongRecoveryCode,
+                newCredential = newCredential,
+                newCredentialType = 0,
+                onProgress = { _, _, _, _ -> }
+            )
+            fail("Expected incorrect Recovery Code to reject restore")
+        } catch (e: BackupException) {
+            assertEquals(BackupError.INCORRECT_RECOVERY_CODE, e.error)
+        }
+
+        org.junit.Assert.assertTrue(
+            "Restore must wipe the new credential even when failure happens before staging",
+            newCredential.all { it == '\u0000' }
+        )
+        assertEquals(0, db.vaultDao().getAllVaults().size)
+        db.close()
+        fileStore.vaultDirPath(targetVaultId).deleteRecursively()
+    }
+
 }

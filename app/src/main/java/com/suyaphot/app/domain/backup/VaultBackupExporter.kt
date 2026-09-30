@@ -72,6 +72,20 @@ class VaultBackupExporter(
         val vaultEntity = database.vaultDao().getVault(vaultId)
             ?: throw IllegalStateException("Vault entity not found")
 
+        // Snapshot the master key exactly once for this long-running export.
+        // The UI session may auto-lock/background while export is in progress; the
+        // operation-owned copy must remain stable and is wiped in the outer finally.
+        val operationMasterKey = try {
+            session.masterKeyHandle.useBytes { it.copyOf() }
+        } catch (e: IllegalStateException) {
+            throw BackupException(
+                BackupError.SOURCE_UNAVAILABLE,
+                "Vault locked before backup could start.",
+                e
+            )
+        }
+
+        try {
         // 1. Verify entered Recovery Code format
         if (!keyManager.isValidRecoverySecret(recoveryCodeInput)) {
             throw BackupException(
@@ -95,9 +109,7 @@ class VaultBackupExporter(
             )
 
         try {
-            val matches = session.masterKeyHandle.useBytes { current ->
-                MessageDigest.isEqual(current, recoveredMasterKey)
-            }
+            val matches = MessageDigest.isEqual(operationMasterKey, recoveredMasterKey)
             if (!matches) {
                 throw BackupException(
                     BackupError.INCORRECT_RECOVERY_CODE,
@@ -141,27 +153,26 @@ class VaultBackupExporter(
             throw BackupException(BackupError.INVALID_ARCHIVE, "Vault exceeds maximum media item count.")
         }
 
-        // P0/P1: Cryptographically preflight all folder recovery envelopes, folder names, and media metadata
-        session.masterKeyHandle.useBytes { masterKey ->
-            val metaSubkey = vaultCrypto.deriveMetaSubkey(masterKey)
-            try {
-                for (lock in locks) {
-                    val envelope = lock.recoveryEnvelope
-                        ?: throw BackupException(
-                            BackupError.FOLDER_LOCK_RECOVERY_NOT_READY,
-                            "Protected folder lock ${lock.id} lacks portable recovery information."
-                        )
-                    VaultBackupSemanticVerifier.verifyFolderRecoveryEnvelope(lock.id, envelope, metaSubkey)
-                }
-                for (folder in folders) {
-                    VaultBackupSemanticVerifier.verifyFolderName(folder.id, folder.encryptedName, metaSubkey)
-                }
-                for (m in mediaItems) {
-                    VaultBackupSemanticVerifier.verifyMediaMetadata(m.id, m.encryptedMetadata, metaSubkey)
-                }
-            } finally {
-                metaSubkey.fill(0)
+        // P0/P1: Cryptographically preflight all folder recovery envelopes, folder names, and media metadata.
+        // Use the operation-owned master-key snapshot rather than the mutable UI session.
+        val metadataSubkey = vaultCrypto.deriveMetaSubkey(operationMasterKey)
+        try {
+            for (lock in locks) {
+                val envelope = lock.recoveryEnvelope
+                    ?: throw BackupException(
+                        BackupError.FOLDER_LOCK_RECOVERY_NOT_READY,
+                        "Protected folder lock ${lock.id} lacks portable recovery information."
+                    )
+                VaultBackupSemanticVerifier.verifyFolderRecoveryEnvelope(lock.id, envelope, metadataSubkey)
             }
+            for (folder in folders) {
+                VaultBackupSemanticVerifier.verifyFolderName(folder.id, folder.encryptedName, metadataSubkey)
+            }
+            for (m in mediaItems) {
+                VaultBackupSemanticVerifier.verifyMediaMetadata(m.id, m.encryptedMetadata, metadataSubkey)
+            }
+        } finally {
+            metadataSubkey.fill(0)
         }
 
         val archiveId = UUID.randomUUID().toString()
@@ -171,9 +182,9 @@ class VaultBackupExporter(
         val descriptors = ArrayList<BackupFileDescriptor>()
         val mediaEntries = ArrayList<BackupMediaItemEntry>(mediaItems.size)
 
-        session.masterKeyHandle.useBytes { masterKey ->
-            val mediaSubkey = vaultCrypto.deriveMediaSubkey(masterKey)
-            val thumbSubkey = vaultCrypto.deriveThumbSubkey(masterKey)
+        run {
+            val mediaSubkey = vaultCrypto.deriveMediaSubkey(operationMasterKey)
+            val thumbSubkey = vaultCrypto.deriveThumbSubkey(operationMasterKey)
             try {
                 for (m in mediaItems) {
                     val mediaFile = fileStore.getMediaFile(vaultId, m.id)
@@ -357,7 +368,8 @@ class VaultBackupExporter(
             System.arraycopy(derivedKek, 0, recoveryKek, 0, 32)
             derivedKek.fill(0)
 
-            val (envelope, mKey) = session.masterKeyHandle.useBytes { masterKey ->
+            val (envelope, mKey) = run {
+                val masterKey = operationMasterKey
                 val envNonce = Aead.generateNonce()
                 val wrappedMasterKey = Aead.encrypt(
                     keyBytes = recoveryKek,
@@ -435,35 +447,71 @@ class VaultBackupExporter(
 
         onProgress(bytesWritten, estimatedTotalBytes, 0, mediaEntries.size)
 
-        fun writeStreamEntry(type: Byte, id: String, file: File) {
+        fun writeStreamEntry(desc: BackupFileDescriptor, file: File) {
             if (!file.exists()) {
                 throw BackupException(
                     BackupError.MISSING_MEDIA,
                     "File disappeared during backup: ${file.name}"
                 )
             }
-            val idBytes = id.toByteArray(Charsets.UTF_8)
+            if (file.length() != desc.cipherLength) {
+                throw BackupException(
+                    BackupError.CORRUPT_MEDIA,
+                    "Encrypted file changed during backup: ${file.name}"
+                )
+            }
+
+            val idBytes = desc.itemId.toByteArray(Charsets.UTF_8)
             require(idBytes.size <= Short.MAX_VALUE)
 
-            dos.writeByte(type.toInt())
+            dos.writeByte(desc.typeCode.toInt())
             dos.writeShort(idBytes.size)
             dos.write(idBytes)
-            dos.writeLong(file.length())
+            dos.writeLong(desc.cipherLength)
             bytesWritten += 1 + 2 + idBytes.size + 8
 
             val buffer = ByteArray(BackupArchiveFormat.BUFFER_SIZE)
             val digest = MessageDigest.getInstance("SHA-256")
             FileInputStream(file).use { fis ->
-                var read: Int
-                while (fis.read(buffer).also { read = it } != -1) {
+                var remaining = desc.cipherLength
+                while (remaining > 0L) {
+                    val wanted = remaining.coerceAtMost(buffer.size.toLong()).toInt()
+                    val read = fis.read(buffer, 0, wanted)
+                    if (read <= 0) {
+                        throw BackupException(
+                            BackupError.CORRUPT_MEDIA,
+                            "Encrypted file changed or was truncated during backup: ${file.name}"
+                        )
+                    }
                     dos.write(buffer, 0, read)
                     digest.update(buffer, 0, read)
                     bytesWritten += read
+                    remaining -= read
                     onProgress(bytesWritten, estimatedTotalBytes, itemsWritten, mediaEntries.size)
                 }
+
+                // Refuse a concurrent append/growth as well. The authenticated manifest
+                // describes an exact snapshot, so any byte-count drift invalidates export.
+                if (fis.read() != -1) {
+                    throw BackupException(
+                        BackupError.CORRUPT_MEDIA,
+                        "Encrypted file changed or grew during backup: ${file.name}"
+                    )
+                }
             }
+
             val sha256 = digest.digest()
+            val sha256Hex = sha256.joinToString("") { "%02x".format(it) }
+            if (!sha256Hex.equals(desc.cipherSha256Hex, ignoreCase = true)) {
+                sha256.fill(0)
+                throw BackupException(
+                    BackupError.CORRUPT_MEDIA,
+                    "Encrypted file changed after backup preflight: ${file.name}"
+                )
+            }
+
             dos.write(sha256)
+            sha256.fill(0)
             bytesWritten += 32
         }
 
@@ -475,7 +523,7 @@ class VaultBackupExporter(
                 BackupArchiveFormat.ENTRY_TYPE_PREVIEW -> fileStore.getPreviewFile(vaultId, desc.itemId)
                 else -> throw IllegalStateException("Unknown entry type ${desc.typeCode}")
             }
-            writeStreamEntry(desc.typeCode, desc.itemId, file)
+            writeStreamEntry(desc, file)
             if (desc.typeCode == BackupArchiveFormat.ENTRY_TYPE_MEDIA) {
                 itemsWritten++
                 onProgress(bytesWritten, estimatedTotalBytes, itemsWritten, mediaEntries.size)
@@ -494,5 +542,8 @@ class VaultBackupExporter(
             folderCount = folderEntries.size,
             totalBytesWritten = bytesWritten
         )
+        } finally {
+            operationMasterKey.fill(0)
+        }
     }
 }
