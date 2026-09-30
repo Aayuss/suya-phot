@@ -159,6 +159,31 @@ class PinAuthenticator(
             val session = sessionManager.sessionState.value as? VaultSession.Unlocked ?: return false
             val vault = vaultDao.getVault(session.vaultId) ?: return false
             if (vault.credentialTypeCode != currentType || replacementType !in 0..1) return false
+
+            // Keep the REAL and SECONDARY PIN namespaces disjoint. If the primary PIN is changed
+            // to the existing secondary PIN, lock-screen PIN authentication would deterministically
+            // open the REAL vault first and make the secondary vault unreachable.
+            if (vault.kindCode == VaultKind.REAL.code && replacementType == VaultCredentialValidator.TYPE_PIN) {
+                val secondary = vaultDao.getVaultByKind(VaultKind.SECONDARY.code)
+                if (secondary?.credentialTypeCode == VaultCredentialValidator.TYPE_PIN) {
+                    val secondaryEnvelope = runCatching {
+                        KeyManager.PinEnvelope.deserialize(secondary.pinEnvelope)
+                    }.getOrNull()
+                    if (secondaryEnvelope != null) {
+                        val candidate = replacement.copyOf()
+                        val matchedSecondary = try {
+                            keyManager.unwrapPinEnvelope(secondaryEnvelope, candidate)
+                        } finally {
+                            candidate.fill('\u0000')
+                        }
+                        if (matchedSecondary != null) {
+                            matchedSecondary.fill(0)
+                            return false
+                        }
+                    }
+                }
+            }
+
             val oldEnvelope = runCatching { KeyManager.PinEnvelope.deserialize(vault.pinEnvelope) }.getOrNull() ?: return false
             val master = keyManager.unwrapPinEnvelope(oldEnvelope, current) ?: return false
             try {
