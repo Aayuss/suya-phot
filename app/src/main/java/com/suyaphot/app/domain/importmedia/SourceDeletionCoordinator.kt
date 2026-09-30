@@ -6,6 +6,7 @@ import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.provider.DocumentsContract
 import com.suyaphot.app.core.util.SafeLog
 import java.io.FileNotFoundException
 
@@ -34,38 +35,22 @@ class SourceDeletionCoordinator(
      * let Android keep the source rather than risking deletion of the wrong item.
      */
     private fun canonicalDeleteUri(source: Uri): Uri {
-        if (
-            source.authority != MediaStore.AUTHORITY ||
-            source.pathSegments.firstOrNull() != "picker"
-        ) return source
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            DocumentsContract.isDocumentUri(context, source)
+        ) {
+            val mediaUri = runCatching {
+                MediaStore.getMediaUri(context, source)
+            }.getOrNull()
 
-        return runCatching {
-            val projection = arrayOf(
-                MediaStore.MediaColumns._ID,
-                MediaStore.MediaColumns.VOLUME_NAME,
-                MediaStore.MediaColumns.MIME_TYPE
-            )
-            context.contentResolver.query(source, projection, null, null, null)?.use { cursor ->
-                if (!cursor.moveToFirst()) return@use null
-                val idIndex = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
-                val volumeIndex = cursor.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
-                val mimeIndex = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
-                if (idIndex < 0 || volumeIndex < 0) return@use null
-
-                val id = cursor.getLong(idIndex)
-                val volume = cursor.getString(volumeIndex) ?: return@use null
-                val mime = if (mimeIndex >= 0) cursor.getString(mimeIndex).orEmpty() else ""
-
-                when {
-                    mime.startsWith("image/") ->
-                        MediaStore.Images.Media.getContentUri(volume, id)
-                    mime.startsWith("video/") ->
-                        MediaStore.Video.Media.getContentUri(volume, id)
-                    else ->
-                        MediaStore.Files.getContentUri(volume, id)
-                }
+            if (mediaUri != null) {
+                return mediaUri
             }
-        }.getOrNull() ?: source
+        }
+
+        // MediaStore picker URIs are intentionally read-only and cannot be converted with
+        // undocumented path parsing. If one reaches this coordinator, return it unchanged:
+        // deletion will fail safely and the UI will report that the public original remains.
+        return source
     }
 
     enum class DeleteConsentMode { API29_RETRY_REQUIRED, API30_SYSTEM_DELETE_REQUEST }
