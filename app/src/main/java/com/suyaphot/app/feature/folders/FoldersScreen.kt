@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -100,6 +101,7 @@ import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.FolderTile
 import com.suyaphot.app.ui.components.MediaTile
+import com.suyaphot.app.ui.components.dragSelectGrid
 import com.suyaphot.app.ui.components.PatternLockPad
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
@@ -263,6 +265,8 @@ fun FoldersScreen(
         else container.galleryRepository.pagedFolder(vaultId, currentParentId)
     }
     val pagedMedia = mediaFlow.collectAsLazyPagingItems()
+    val mediaGridState = rememberLazyGridState()
+    var dragBaseSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     LaunchedEffect(currentParentId) {
         selectedMediaIds.clear()
@@ -716,7 +720,32 @@ fun FoldersScreen(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1f).testTag("folder_grid")
+                    state = mediaGridState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("folder_grid")
+                        .dragSelectGrid(
+                            state = mediaGridState,
+                            onDragStartIndex = {
+                                dragBaseSelection = selectedMediaIds.keys.toSet()
+                            },
+                            onRangeChanged = { anchor, current ->
+                                val mediaStartIndex =
+                                    (if (folders.isNotEmpty()) 1 + folders.size else 0) +
+                                    (if (pagedMedia.itemCount > 0) 1 else 0)
+                                val first = (minOf(anchor, current) - mediaStartIndex).coerceAtLeast(0)
+                                val last = (maxOf(anchor, current) - mediaStartIndex)
+                                    .coerceAtMost((pagedMedia.itemCount - 1).coerceAtLeast(-1))
+                                selectedMediaIds.clear()
+                                dragBaseSelection.forEach { selectedMediaIds[it] = Unit }
+                                if (last >= first) {
+                                    for (index in first..last) {
+                                        pagedMedia.peek(index)?.id?.let { selectedMediaIds[it] = Unit }
+                                    }
+                                }
+                            },
+                            onDragFinished = { dragBaseSelection = emptySet() }
+                        )
                 ) {
                     // Child Folders section
                     if (folders.isNotEmpty()) {
