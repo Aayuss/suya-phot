@@ -20,6 +20,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,6 +37,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -64,6 +66,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -117,6 +123,7 @@ fun PhotosScreen(
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val haptic = LocalHapticFeedback.current
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
@@ -334,6 +341,7 @@ fun PhotosScreen(
         container.galleryRepository.paged(vaultId, galleryFilter, sortOrder)
     }
     val pagedEntities = pagingFlow.collectAsLazyPagingItems()
+    val gridState = rememberLazyGridState()
     var searchEntities by remember { mutableStateOf<List<MediaItemEntity>>(emptyList()) }
     var searchIndexRevision by remember { mutableStateOf(0L) }
 
@@ -647,10 +655,73 @@ fun PhotosScreen(
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
+                    state = gridState,
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .pointerInput(isSearching, searchEntities.size, pagedEntities.itemCount) {
+                            var anchorIndex = -1
+                            var originalSelection = emptySet<String>()
+
+                            fun idAt(index: Int): String? {
+                                return if (isSearching) {
+                                    searchEntities.getOrNull(index)?.id
+                                } else {
+                                    pagedEntities.peek(index)?.id
+                                }
+                            }
+
+                            fun indexAt(position: Offset): Int? {
+                                return gridState.layoutInfo.visibleItemsInfo
+                                    .firstOrNull { info ->
+                                        position.x >= info.offset.x &&
+                                            position.x < info.offset.x + info.size.width &&
+                                            position.y >= info.offset.y &&
+                                            position.y < info.offset.y + info.size.height
+                                    }
+                                    ?.index
+                            }
+
+                            fun selectThrough(index: Int) {
+                                if (anchorIndex < 0) return
+                                val start = minOf(anchorIndex, index)
+                                val end = maxOf(anchorIndex, index)
+                                val rangeIds = (start..end).mapNotNull(::idAt)
+                                selectedMediaIds.clear()
+                                originalSelection.forEach { selectedMediaIds[it] = Unit }
+                                rangeIds.forEach { selectedMediaIds[it] = Unit }
+                            }
+
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { position ->
+                                    val index = indexAt(position) ?: return@detectDragGesturesAfterLongPress
+                                    anchorIndex = index
+                                    originalSelection = allMatchingIds
+                                        ?: selectedMediaIds.keys.toSet()
+                                    allMatchingIds = null
+                                    idAt(index)?.let { selectedMediaIds[it] = Unit }
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                onDrag = { change, _ ->
+                                    val index = indexAt(change.position)
+                                    if (index != null) {
+                                        selectThrough(index)
+                                        change.consume()
+                                    }
+                                },
+                                onDragEnd = {
+                                    anchorIndex = -1
+                                    originalSelection = emptySet()
+                                },
+                                onDragCancel = {
+                                    anchorIndex = -1
+                                    originalSelection = emptySet()
+                                }
+                            )
+                        }
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
