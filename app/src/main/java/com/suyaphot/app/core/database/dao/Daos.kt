@@ -373,6 +373,9 @@ interface MediaItemDao {
     @Query("UPDATE media_items SET favorite = :favorite, updatedAt = :now WHERE id = :id AND vaultId = :vaultId AND deletedAt IS NULL")
     suspend fun updateFavoriteForVault(vaultId: String, id: String, favorite: Boolean, now: Long): Int
 
+    @Query("UPDATE media_items SET encryptedThumbRelativePath = :path WHERE id = :id AND vaultId = :vaultId")
+    suspend fun setThumbPathForVault(vaultId: String, id: String, path: String?): Int
+
     @Query("UPDATE media_items SET previousFolderId = folderId, folderId = NULL, deletedAt = :now, updatedAt = :now WHERE vaultId = :vaultId AND id IN (:ids) AND deletedAt IS NULL")
     suspend fun softDeleteForVault(vaultId: String, ids: List<String>, now: Long): Int
 
