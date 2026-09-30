@@ -564,14 +564,14 @@ fun SetupScreen(
 
                         if (canEnrollBiometrics && activity != null && createdVaultId != null) {
                             SuyaButton(
-                                text = "Enable Fingerprint Unlock",
+                                text = "Enable Biometric Unlock",
                                 onClick = {
                                     val vaultId = createdVaultId!!
                                     try {
                                         val encryptCipher = container.keyManager.createBiometricEncryptCipher(vaultId)
                                         val promptInfo = BiometricPrompt.PromptInfo.Builder()
                                             .setTitle("Enable Biometric Unlock")
-                                            .setSubtitle("Confirm your fingerprint to enable biometric unlock")
+                                            .setSubtitle("Confirm a fingerprint or strong biometric to enable biometric unlock")
                                             .setNegativeButtonText("Skip")
                                             .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                                             .build()
