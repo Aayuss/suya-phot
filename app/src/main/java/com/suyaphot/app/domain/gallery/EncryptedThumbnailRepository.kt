@@ -33,8 +33,31 @@ class EncryptedThumbnailRepository(
         val lease = sessionManager.acquireOperationKeyLease() ?: return@withContext null
         try {
             if (lease.vaultId != vaultId) return@withContext null
-            val bitmap = generator.decryptThumbnail(fileStore.getThumbFile(vaultId, mediaId), lease.thumbSubkey, mediaId)
-                ?: return@withContext null
+            val bitmap = generator.decryptThumbnail(
+                fileStore.getThumbFile(vaultId, mediaId),
+                lease.thumbSubkey,
+                mediaId
+            ) ?: generator.decryptImagePreview(
+                fileStore.getPreviewFile(vaultId, mediaId),
+                lease.thumbSubkey,
+                mediaId
+            )?.let { preview ->
+                val maxSide = 512
+                val largest = maxOf(preview.width, preview.height)
+                if (largest <= maxSide) {
+                    preview
+                } else {
+                    val ratio = maxSide.toFloat() / largest.toFloat()
+                    val scaled = Bitmap.createScaledBitmap(
+                        preview,
+                        (preview.width * ratio).toInt().coerceAtLeast(1),
+                        (preview.height * ratio).toInt().coerceAtLeast(1),
+                        true
+                    )
+                    if (scaled !== preview) preview.recycle()
+                    scaled
+                }
+            } ?: return@withContext null
             synchronized(this@EncryptedThumbnailRepository) {
                 if (generation != start || sessionManager.currentVaultId != vaultId) return@withContext null
                 cache.put(cacheKey, bitmap)
