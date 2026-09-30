@@ -125,6 +125,7 @@ class PinAuthenticator(
         val credential = try {
             PatternCredential.canonicalChars(nodes)
         } catch (_: IllegalArgumentException) {
+            nodes.fill(-1)
             return AuthResult.Error("Pattern needs at least four nodes")
         }
         nodes.fill(-1)
@@ -212,6 +213,7 @@ class PinAuthenticator(
 
         val allVaults = vaultDao.getAllVaults()
         if (allVaults.isEmpty()) {
+            pinChars.fill('\u0000')
             return AuthResult.Error("No vault configured")
         }
 
@@ -244,6 +246,9 @@ class PinAuthenticator(
                 AuthResult.Success(realVault.id, VaultKind.REAL)
             }
             secondaryResult != null && secondaryVault?.credentialTypeCode == typeCode -> {
+                // A differently typed REAL credential can still happen to derive successfully
+                // from the same character sequence. It is not the selected vault, so wipe it.
+                realResult?.fill(0)
                 preferences.resetFailedAttempts()
                 establishSession(secondaryVault!!.id, VaultKind.SECONDARY, secondaryResult)
                 AuthResult.Success(secondaryVault.id, VaultKind.SECONDARY)
@@ -272,14 +277,19 @@ class PinAuthenticator(
         val biometricEnvelope = realVault.biometricEnvelope
             ?: return AuthResult.Error("Biometric not enrolled for this vault")
 
+        var unownedMasterKey: ByteArray? = null
         return try {
             val masterKey = cipher.doFinal(biometricEnvelope)
+            unownedMasterKey = masterKey
             preferences.resetFailedAttempts()
             establishSession(realVault.id, VaultKind.REAL, masterKey)
+            unownedMasterKey = null // ownership moved into SensitiveKeyHandle
             AuthResult.Success(realVault.id, VaultKind.REAL)
         } catch (e: Exception) {
             SafeLog.e("PinAuthenticator", "Biometric unwrap failed", e)
             AuthResult.Error("Biometric authentication failed")
+        } finally {
+            unownedMasterKey?.fill(0)
         }
     }
 
