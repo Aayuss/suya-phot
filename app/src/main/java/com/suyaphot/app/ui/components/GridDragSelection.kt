@@ -21,8 +21,9 @@ fun Modifier.dragSelectGrid(
     state: LazyGridState,
     scope: CoroutineScope,
     enabled: Boolean = true,
+    keyToId: (Any) -> String? = { it as? String },
     onItemsSelected: (List<String>) -> Unit
-): Modifier = pointerInput(state, enabled) {
+): Modifier = pointerInput(state, enabled, keyToId) {
     if (!enabled) return@pointerInput
 
     var anchorIndex: Int? = null
@@ -44,7 +45,7 @@ fun Modifier.dragSelectGrid(
         val ids = state.layoutInfo.visibleItemsInfo
             .asSequence()
             .filter { it.index in rangeStart..rangeEnd }
-            .mapNotNull { it.key as? String }
+            .mapNotNull { keyToId(it.key) }
             .toList()
         if (ids.isNotEmpty()) onItemsSelected(ids)
     }
