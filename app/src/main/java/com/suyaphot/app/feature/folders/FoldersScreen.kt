@@ -87,7 +87,6 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
-import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
