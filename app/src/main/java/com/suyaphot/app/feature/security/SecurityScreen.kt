@@ -262,7 +262,10 @@ fun SecurityScreen(
                 )
 
                 // Biometric Unlock
-                if (canEnrollBiometrics) {
+                // Keep the toggle visible when already enrolled even if Android later reports
+                // that enrollment/authentication is temporarily unavailable, so the user can
+                // always disable and remove the biometric key from this vault.
+                if (canEnrollBiometrics || isBiometricEnrolled) {
                     SecurityToggleRow(
                         title = "Biometric Unlock",
                         subtitle = "Use a strong biometric supported by this device (fingerprint, or secure face when Android exposes it as strong)",
