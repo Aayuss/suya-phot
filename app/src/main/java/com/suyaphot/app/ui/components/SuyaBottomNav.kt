@@ -66,41 +66,47 @@ fun SuyaBottomNav(
         ) {
             val tabs = SuyaNavTab.entries
             val selectedIndex = tabs.indexOf(selectedTab).coerceAtLeast(0)
-            val slotWidth = maxWidth / tabs.size
+
+            // Selected = icon + horizontal label. Others = compact icon only.
+            // One orange pill physically slides between slots while widths reflow.
+            val selectedWidth = 116.dp.coerceAtMost(maxWidth - 3 * 48.dp)
+            val compactWidth = (maxWidth - selectedWidth) / (tabs.size - 1)
             val indicatorOffset by animateDpAsState(
-                targetValue = slotWidth * selectedIndex,
+                targetValue = compactWidth * selectedIndex,
                 animationSpec = tween(durationMillis = 260),
                 label = "bottom_nav_indicator_offset"
             )
 
-            // One continuous selection surface that physically slides between tabs.
             Box(
                 modifier = Modifier
                     .offset(x = indicatorOffset)
-                    .width(slotWidth)
-                    .padding(horizontal = 3.dp)
-                    .size(width = slotWidth - 6.dp, height = 50.dp)
+                    .width(selectedWidth)
+                    .size(width = selectedWidth, height = 50.dp)
                     .background(SuyaColors.Accent, RoundedCornerShape(25.dp))
             )
 
             Row(modifier = Modifier.fillMaxWidth()) {
                 tabs.forEach { tab ->
                     val selected = tab == selectedTab
+                    val tabWidth by animateDpAsState(
+                        targetValue = if (selected) selectedWidth else compactWidth,
+                        animationSpec = tween(durationMillis = 260),
+                        label = "bottom_nav_tab_width_${tab.name}"
+                    )
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .width(slotWidth)
-                            .size(width = slotWidth, height = 50.dp)
+                            .width(tabWidth)
+                            .size(width = tabWidth, height = 50.dp)
                             .clickable(
                                 interactionSource = remember(tab) { MutableInteractionSource() },
                                 indication = null,
                                 onClick = { onTabSelected(tab) }
                             )
-                            .padding(horizontal = 10.dp)
                     ) {
                         Box(
                             contentAlignment = Alignment.Center,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(
@@ -111,8 +117,14 @@ fun SuyaBottomNav(
                                 )
                                 AnimatedVisibility(
                                     visible = selected,
-                                    enter = expandHorizontally(tween(180), expandFrom = Alignment.Start) + fadeIn(tween(140)),
-                                    exit = shrinkHorizontally(tween(140), shrinkTowards = Alignment.Start) + fadeOut(tween(100))
+                                    enter = expandHorizontally(
+                                        animationSpec = tween(180),
+                                        expandFrom = Alignment.Start
+                                    ) + fadeIn(tween(140)),
+                                    exit = shrinkHorizontally(
+                                        animationSpec = tween(140),
+                                        shrinkTowards = Alignment.Start
+                                    ) + fadeOut(tween(100))
                                 ) {
                                     Text(
                                         text = tab.title,
