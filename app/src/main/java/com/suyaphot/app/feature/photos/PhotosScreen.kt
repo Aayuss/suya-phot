@@ -19,6 +19,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +37,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -62,6 +65,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -288,6 +292,23 @@ fun PhotosScreen(
         }
     }
     val isSearching = searchQuery.isNotBlank()
+    val mediaGridState = rememberLazyGridState()
+    var dragLastIndex by remember { mutableStateOf<Int?>(null) }
+
+    fun mediaIdAtGridIndex(index: Int): String? =
+        if (isSearching) searchEntities.getOrNull(index)?.id
+        else pagedEntities.peek(index)?.id
+
+    fun extendDragSelection(toIndex: Int) {
+        if (allMatchingIds != null) return
+        val fromIndex = dragLastIndex ?: toIndex
+        val start = minOf(fromIndex, toIndex)
+        val end = maxOf(fromIndex, toIndex)
+        for (index in start..end) {
+            mediaIdAtGridIndex(index)?.let { selectedMediaIds[it] = Unit }
+        }
+        dragLastIndex = toIndex
+    }
 
     Box(
         modifier = modifier
@@ -579,10 +600,52 @@ fun PhotosScreen(
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
+                    state = mediaGridState,
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .pointerInput(isSearching, allMatchingIds, pagedEntities.itemCount, searchEntities.size) {
+                            if (allMatchingIds != null) return@pointerInput
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { position ->
+                                    val hit = mediaGridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                        position.x >= info.offset.x &&
+                                            position.x < info.offset.x + info.size.width &&
+                                            position.y >= info.offset.y &&
+                                            position.y < info.offset.y + info.size.height
+                                    }?.index
+                                    dragLastIndex = hit
+                                    if (hit != null) extendDragSelection(hit)
+                                },
+                                onDrag = { change, _ ->
+                                    val position = change.position
+                                    val hit = mediaGridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                        position.x >= info.offset.x &&
+                                            position.x < info.offset.x + info.size.width &&
+                                            position.y >= info.offset.y &&
+                                            position.y < info.offset.y + info.size.height
+                                    }?.index
+                                    if (hit != null && hit != dragLastIndex) {
+                                        extendDragSelection(hit)
+                                    }
+
+                                    val layout = mediaGridState.layoutInfo
+                                    val edge = 84f
+                                    when {
+                                        position.y < layout.viewportStartOffset + edge ->
+                                            scope.launch { mediaGridState.scrollBy(-42f) }
+                                        position.y > layout.viewportEndOffset - edge ->
+                                            scope.launch { mediaGridState.scrollBy(42f) }
+                                    }
+                                    change.consume()
+                                },
+                                onDragEnd = { dragLastIndex = null },
+                                onDragCancel = { dragLastIndex = null }
+                            )
+                        }
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
