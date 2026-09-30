@@ -264,8 +264,8 @@ fun SecurityScreen(
                 // Biometric Unlock
                 if (canEnrollBiometrics) {
                     SecurityToggleRow(
-                        title = "Fingerprint Unlock",
-                        subtitle = "Biometric unwrap via Android Keystore; hardware protection depends on the device",
+                        title = "Biometric Unlock",
+                        subtitle = "Fingerprint or other strong biometrics supported by this device",
                         icon = Icons.Default.Fingerprint,
                         checked = isBiometricEnrolled,
                         onCheckedChange = { enable ->
