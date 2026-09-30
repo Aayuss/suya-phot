@@ -7,6 +7,7 @@ import android.os.StrictMode
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.suyaphot.app.BuildConfig
 import com.suyaphot.app.core.util.SafeLog
+import com.suyaphot.app.core.util.VaultStorageMutationGate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -43,11 +44,13 @@ class SuyaApp : Application() {
         // Clean up any stale partial files and temporary share files from prior abnormal terminations
         applicationScope.launch {
             try {
-                container.vaultFileStore.clearEphemeralPlaintextCaches()
-                container.vaultFileStore.clearStaleBackupRestoreStaging()
-                val vaults = container.database.vaultDao().getAllVaults()
-                val activeVaultIds = vaults.map { it.id }.toSet()
-                container.vaultFileStore.clearOrphanVaultDirs(activeVaultIds)
+                VaultStorageMutationGate.withExclusiveMutation {
+                    container.vaultFileStore.clearEphemeralPlaintextCaches()
+                    container.vaultFileStore.clearStaleBackupRestoreStaging()
+                    val vaults = container.database.vaultDao().getAllVaults()
+                    val activeVaultIds = vaults.map { it.id }.toSet()
+                    container.vaultFileStore.clearOrphanVaultDirs(activeVaultIds)
+                }
             } catch (e: Exception) {
                 SafeLog.w("SuyaApp", "Initial cleanup error", e)
             }
