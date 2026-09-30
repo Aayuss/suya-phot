@@ -1,7 +1,9 @@
 package com.suyaphot.app.domain.importmedia
 
 import android.content.Context
+import android.content.ContentUris
 import android.net.Uri
+import android.provider.MediaStore
 import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.VaultCrypto
@@ -195,6 +197,30 @@ class ImportCoordinator(
     private fun bytesToHex(bytes: ByteArray): String =
         bytes.joinToString("") { "%02x".format(it) }
 
+    /**
+     * Photo Picker URIs are often mediated read-only URIs. When metadata exposes the
+     * underlying MediaStore identity, use its canonical MediaStore URI for safe MOVE
+     * deletion/consent. Fall back to the original URI when Android does not expose one.
+     */
+    private fun deletionUriFor(
+        fallback: Uri,
+        mediaType: MediaType,
+        volumeName: String?,
+        mediaStoreId: Long?
+    ): Uri {
+        if (volumeName.isNullOrBlank() || mediaStoreId == null || mediaStoreId < 0L) {
+            return fallback
+        }
+        return runCatching {
+            val base = if (mediaType == MediaType.VIDEO) {
+                MediaStore.Video.Media.getContentUri(volumeName)
+            } else {
+                MediaStore.Images.Media.getContentUri(volumeName)
+            }
+            ContentUris.withAppendedId(base, mediaStoreId)
+        }.getOrDefault(fallback)
+    }
+
     suspend fun importSingle(
         uri: Uri,
         folderId: String?,
@@ -265,6 +291,12 @@ class ImportCoordinator(
             vaultJobDao.updateState(jobId, JobState.READING_SOURCE.code, System.currentTimeMillis())
             val resolvedSource = metadataReader.resolve(uri)
             val sourceMeta = metadataReader.read(resolvedSource)
+            val deletionUri = deletionUriFor(
+                fallback = uri,
+                mediaType = sourceMeta.mediaType,
+                volumeName = sourceMeta.metadata.sourceVolume,
+                mediaStoreId = sourceMeta.metadata.sourceMediaStoreId
+            )
 
             // 2. Encrypting stream to .partial file
             vaultJobDao.updateState(jobId, JobState.ENCRYPTING.code, System.currentTimeMillis())
@@ -318,12 +350,37 @@ class ImportCoordinator(
                             now = nowDuplicate
                         )
                     } else {
+                        // A duplicate MOVE still needs a durable, deletable source reference.
+                        // Point the recovery job at the already-verified vault item.
+                        val duplicateRaw = ImportJobPayload(
+                            sourceUri = deletionUri.toString(),
+                            targetFolderId = existing.folderId,
+                            itemId = existing.id,
+                            mode = mode
+                        ).serialize()
+                        val duplicateEncrypted = try {
+                            Aead.encryptWithPrependedNonce(
+                                keyBytes = session.metaSubkey,
+                                plaintext = duplicateRaw,
+                                aad = "job:$jobId:v1".toByteArray(Charsets.UTF_8)
+                            )
+                        } finally {
+                            duplicateRaw.fill(0)
+                        }
+                        check(
+                            vaultJobDao.updateEncryptedPayload(
+                                jobId,
+                                vaultId,
+                                duplicateEncrypted,
+                                nowDuplicate
+                            ) == 1
+                        )
                         vaultJobDao.updateState(jobId, JobState.AWAITING_SOURCE_DELETE.code, nowDuplicate)
                     }
                     return@withContext ImportResult.Success(
                         jobId = jobId,
                         itemId = existing.id,
-                        uri = uri,
+                        uri = deletionUri,
                         sha256Hex = sha256Hex,
                         alreadyExisted = true,
                         mode = mode
@@ -383,7 +440,7 @@ class ImportCoordinator(
             // 7. Transactional DB commit (Section 15)
             val now = System.currentTimeMillis()
             val stagedRaw = ImportJobPayload(
-                sourceUri = uri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
+                sourceUri = deletionUri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
                 stagedMedia = ImportJobPayload.StagedMedia(
                     mediaTypeCode = sourceMeta.mediaType.code,
                     plaintextSize = verifyResult.plaintextSize,
@@ -448,7 +505,7 @@ class ImportCoordinator(
             ImportResult.Success(
                 jobId = jobId,
                 itemId = itemId,
-                uri = uri,
+                uri = deletionUri,
                 sha256Hex = sha256Hex,
                 mode = mode
             )
