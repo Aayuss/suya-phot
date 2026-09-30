@@ -152,6 +152,7 @@ class VaultBackupImporter(
                 "A restore operation is already in progress."
             )
         }
+        var masterKeyForCleanup: ByteArray? = null
         try {
             // P1: Validate new credential format upfront before any file or DB operations
             if (!VaultCredentialValidator.isValid(newCredential, newCredentialType)) {
@@ -168,6 +169,7 @@ class VaultBackupImporter(
 
             // 1. Decrypt header, master key, and manifest
             val (manifest, masterKey) = verifier.decryptManifestAndMasterKey(dis, recoveryCodeInput)
+            masterKeyForCleanup = masterKey
 
             // 2. FAIL-SAFE: reject restore immediately if a vault of the same kind already exists
             val existingVault = database.vaultDao().getVaultByKind(manifest.vaultKindCode)
@@ -698,6 +700,11 @@ class VaultBackupImporter(
             stagingDir.deleteRecursively()
         }
         } finally {
+            // Restore credentials are caller-owned mutable buffers. Wipe them on every
+            // exit path, including wrong Recovery Code / malformed archive failures that
+            // occur before staging is created.
+            newCredential.fill('\u0000')
+            masterKeyForCleanup?.fill(0)
             restoreMutex.unlock()
         }
     }
