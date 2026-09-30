@@ -452,7 +452,7 @@ private fun PrivateTrashGate(container: AppContainer, vaultId: String, onBack: (
             )
         }
         if (biometricIv != null) {
-            SuyaButton("Use vault fingerprint", onClick = ::submitBiometric, variant = ButtonVariant.Secondary)
+            SuyaButton("Use biometric", onClick = ::submitBiometric, variant = ButtonVariant.Secondary)
         }
         error?.let { Text(it, color = SuyaColors.Negative, fontSize = 12.sp) }
     }
