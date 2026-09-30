@@ -47,7 +47,6 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.outlined.Delete
@@ -557,6 +556,18 @@ fun FoldersScreen(
         breadcrumbs.lastOrNull { it.first == currentParentId }?.second ?: "Folder"
     }
 
+    fun requestHiddenArea() {
+        if (currentParentId != null || hiddenMode) return
+        scope.launch {
+            val vault = container.database.vaultDao().getVault(vaultId)
+            gateTypeCode = vault?.credentialTypeCode ?: 0
+            hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+            gateInput = ""
+            gateError = null
+            showHiddenAuth = true
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -609,23 +620,12 @@ fun FoldersScreen(
                     onNavigationClick = if (currentParentId != null || hiddenMode) {
                         { navigateUp() }
                     } else null,
+                    // Hidden folders intentionally have no visible affordance. Long-press the root
+                    // "Folders" title to re-authenticate and enter the hidden area.
+                    onTitleLongClick = if (currentParentId == null && !hiddenMode) {
+                        { requestHiddenArea() }
+                    } else null,
                     actions = {
-                        if (currentParentId == null && !hiddenMode) {
-                            SuyaIconButton(
-                                icon = Icons.Default.VisibilityOff,
-                                contentDescription = "Hidden folders",
-                                onClick = {
-                                    scope.launch {
-                                        val vault = container.database.vaultDao().getVault(vaultId)
-                                        gateTypeCode = vault?.credentialTypeCode ?: 0
-                                        hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
-                                        gateInput = ""
-                                        gateError = null
-                                        showHiddenAuth = true
-                                    }
-                                }
-                            )
-                        }
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
                             contentDescription = "Import media here",
