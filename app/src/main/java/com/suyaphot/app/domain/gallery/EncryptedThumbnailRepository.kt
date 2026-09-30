@@ -104,23 +104,24 @@ class EncryptedThumbnailRepository(
                         check(verifiedHash.equals(entity.sha256Hex, ignoreCase = true))
 
                         val thumbFile = fileStore.getThumbFile(vaultId, mediaId)
-                        if (!thumbFile.exists()) {
-                            if (entity.mediaTypeCode == MediaType.IMAGE.code) {
-                                generator.generateAndEncryptImageThumbnail(
-                                    imageUri = Uri.fromFile(temp),
-                                    itemId = mediaId,
-                                    thumbSubkey = lease.thumbSubkey,
-                                    outputThumbFile = thumbFile,
-                                    orientation = metadata?.orientation ?: 0
-                                )
-                            } else {
-                                generator.generateAndEncryptVideoThumbnail(
-                                    videoUri = Uri.fromFile(temp),
-                                    itemId = mediaId,
-                                    thumbSubkey = lease.thumbSubkey,
-                                    outputThumbFile = thumbFile
-                                )
-                            }
+                        // Reaching this path means the existing derivative could not
+                        // be authenticated/decoded, so it is safe to discard and rebuild.
+                        if (thumbFile.exists()) thumbFile.delete()
+                        if (entity.mediaTypeCode == MediaType.IMAGE.code) {
+                            generator.generateAndEncryptImageThumbnail(
+                                imageUri = Uri.fromFile(temp),
+                                itemId = mediaId,
+                                thumbSubkey = lease.thumbSubkey,
+                                outputThumbFile = thumbFile,
+                                orientation = metadata?.orientation ?: 0
+                            )
+                        } else {
+                            generator.generateAndEncryptVideoThumbnail(
+                                videoUri = Uri.fromFile(temp),
+                                itemId = mediaId,
+                                thumbSubkey = lease.thumbSubkey,
+                                outputThumbFile = thumbFile
+                            )
                         }
 
                         bitmap = generator.decryptThumbnail(
