@@ -305,6 +305,28 @@ class PinAuthenticator(
             newPinChars.fill('\u0000')
             return false
         }
+        if (newTypeCode == VaultCredentialValidator.TYPE_PIN) {
+            val secondary = vaultDao.getVaultByKind(VaultKind.SECONDARY.code)
+            if (secondary?.credentialTypeCode == VaultCredentialValidator.TYPE_PIN) {
+                val secondaryEnvelope = runCatching {
+                    KeyManager.PinEnvelope.deserialize(secondary.pinEnvelope)
+                }.getOrNull()
+                if (secondaryEnvelope != null) {
+                    val candidate = newPinChars.copyOf()
+                    val matchedSecondary = try {
+                        keyManager.unwrapPinEnvelope(secondaryEnvelope, candidate)
+                    } finally {
+                        candidate.fill('\u0000')
+                    }
+                    if (matchedSecondary != null) {
+                        matchedSecondary.fill(0)
+                        newPinChars.fill('\u0000')
+                        return false
+                    }
+                }
+            }
+        }
+
         val realVault = vaultDao.getVaultByKind(VaultKind.REAL.code)
             ?: run { newPinChars.fill('\u0000'); return false }
         val recoveryEnvelopeBytes = realVault.recoveryEnvelope
