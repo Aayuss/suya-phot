@@ -79,6 +79,10 @@ fun SettingsScreen(
     val retentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
     val autoLockMs by container.preferences.autoLockTimeoutMs.collectAsState(initial = 0L)
     val lockOnScreenOff by container.preferences.lockOnScreenOff.collectAsState(initial = true)
+    val biometricOnLaunch by container.preferences.biometricOnLaunch.collectAsState(initial = true)
+    val realVault by container.database.vaultDao()
+        .observeVaultByKind(com.suyaphot.app.core.model.VaultKind.REAL.code)
+        .collectAsState(initial = null)
     var showSortDialog by remember { mutableStateOf(false) }
     var showRetentionDialog by remember { mutableStateOf(false) }
     var showAutoLockDialog by remember { mutableStateOf(false) }
@@ -181,10 +185,21 @@ fun SettingsScreen(
                 )
                 SettingRowItem(
                     title = "Private Trash",
-                    subtitle = "Re-authenticate to view deleted protected media",
+                    subtitle = "Deleted media from hidden or locked folders; kept separate from normal Trash",
                     icon = Icons.Default.Delete,
                     onClick = onOpenPrivateTrash
                 )
+
+                if (isRealVault && realVault?.biometricEnvelope != null && realVault?.biometricIv != null) {
+                    SettingToggleRow(
+                        title = "Biometric prompt on unlock",
+                        subtitle = "Automatically show the system biometric prompt. PIN or Pattern always remains available.",
+                        checked = biometricOnLaunch,
+                        onCheckedChange = {
+                            scope.launch { container.preferences.setBiometricOnLaunch(it) }
+                        }
+                    )
+                }
 
                 SettingRowItem(
                     title = "Gallery Sort",
