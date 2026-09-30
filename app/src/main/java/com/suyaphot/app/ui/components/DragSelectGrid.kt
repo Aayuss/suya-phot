@@ -4,7 +4,6 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.pointer.consume
 import androidx.compose.ui.input.pointer.pointerInput
 
 /**
@@ -40,7 +39,6 @@ fun Modifier.dragSelectGrid(
         onDrag = { change, _ ->
             val anchor = anchorIndex ?: return@detectDragGesturesAfterLongPress
             val current = indexAt(change.position) ?: return@detectDragGesturesAfterLongPress
-            change.consume()
             onRangeChanged(anchor, current)
         },
         onDragEnd = {
