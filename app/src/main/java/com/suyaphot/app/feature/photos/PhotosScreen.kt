@@ -444,7 +444,7 @@ fun PhotosScreen(
                         )
                         SuyaIconButton(
                             icon = Icons.Default.Add,
-                            contentDescription = "Import media",
+                            contentDescription = "Move media into vault",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(arrayOf("image/*", "video/*"))
@@ -659,8 +659,8 @@ fun PhotosScreen(
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
-                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to import private photos or videos from your gallery.",
-                    actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
+                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to move photos or videos into the vault. Android may ask permission to remove the public originals.",
+                    actionText = if (searchQuery.isBlank()) "Move Photos & Videos" else null,
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(arrayOf("image/*", "video/*"))
