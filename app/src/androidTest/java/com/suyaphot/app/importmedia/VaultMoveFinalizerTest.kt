@@ -17,6 +17,7 @@ import com.suyaphot.app.core.model.JobType
 import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.core.model.VaultKind
+import com.suyaphot.app.core.media.MetadataReader
 import com.suyaphot.app.domain.auth.SessionManager
 import com.suyaphot.app.domain.importmedia.ImportResult
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
@@ -133,7 +134,7 @@ class VaultMoveFinalizerTest {
                 },
                 probeAbsent = { false }
             )
-            val finalizer = VaultMoveFinalizer(db, sourceDeletion, session)
+            val finalizer = VaultMoveFinalizer(db, sourceDeletion, session, MetadataReader(context))
             val pickerUri = Uri.parse(
                 "content://media/picker/0/com.android.providers.media.photopicker/media/123"
             )
