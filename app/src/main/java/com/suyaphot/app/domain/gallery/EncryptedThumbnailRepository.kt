@@ -134,10 +134,10 @@ class EncryptedThumbnailRepository(
 
         return try {
             val verified = vaultCrypto.decryptVerifiedToFile(
-                inputFile = fileStore.getMediaFile(vaultId, mediaId),
+                sourceEncryptedFile = fileStore.getMediaFile(vaultId, mediaId),
                 mediaSubkey = mediaSubkey,
                 itemId = mediaId,
-                outputFile = temp
+                destinationTemp = temp
             )
 
             if (verified.plaintextSize != entity.plaintextSize) return null
