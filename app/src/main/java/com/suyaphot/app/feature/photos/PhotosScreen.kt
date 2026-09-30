@@ -71,6 +71,7 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.feature.importmedia.rememberMoveImportDeletionHandler
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.gallery.GalleryFilter
 import com.suyaphot.app.domain.gallery.ViewerCollection
@@ -124,6 +125,11 @@ fun PhotosScreen(
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
     val trashRetentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
     var statusMessage by remember { mutableStateOf<String?>(null) }
+    val finishMoveImports = rememberMoveImportDeletionHandler(
+        container = container,
+        vaultId = vaultId,
+        onStatus = { statusMessage = it }
+    )
 
     fun selectedIds(): List<String> = allMatchingIds?.toList() ?: selectedMediaIds.keys.toList()
     fun clearSelection() { selectedMediaIds.clear(); allMatchingIds = null }
@@ -143,7 +149,7 @@ fun PhotosScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
                         scope.launch { importProgressText = "Importing $current of $total items..." }
                     }
@@ -153,7 +159,9 @@ fun PhotosScreen(
                 val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
                 val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                statusMessage = "$imported moved into vault, $duplicate duplicates, $failed failed"
+                finishMoveImports(successes)
             }
         }
     }
@@ -566,8 +574,8 @@ fun PhotosScreen(
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
-                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to import private photos or videos from your gallery.",
-                    actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
+                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to move photos or videos into your private vault.",
+                    actionText = if (searchQuery.isBlank()) "Move Photos & Videos" else null,
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
