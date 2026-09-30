@@ -69,7 +69,7 @@ fun SuyaBottomNav(
 
             // Selected = icon + horizontal label. Others = compact icon only.
             // One orange pill physically slides between slots while widths reflow.
-            val selectedWidth = 116.dp.coerceAtMost(maxWidth - 3 * 48.dp)
+            val selectedWidth = 116.dp.coerceAtMost(maxWidth - 48.dp * 3)
             val compactWidth = (maxWidth - selectedWidth) / (tabs.size - 1)
             val indicatorOffset by animateDpAsState(
                 targetValue = compactWidth * selectedIndex,
