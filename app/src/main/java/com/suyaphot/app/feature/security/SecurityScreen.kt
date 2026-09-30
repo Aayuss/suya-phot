@@ -148,6 +148,7 @@ fun SecurityScreen(
                 currentCredentialInput = ""
                 newCredentialInput = ""
                 confirmCredentialInput = ""
+                firstNewPattern?.fill(-1)
                 firstNewPattern = null
                 showChangeCredentialDialog = false
             } else {
@@ -524,6 +525,7 @@ fun SecurityScreen(
                 currentCredentialInput = ""
                 newCredentialInput = ""
                 confirmCredentialInput = ""
+                firstNewPattern?.fill(-1)
                 firstNewPattern = null
             },
             title = if (targetCredentialType == oldType) {
@@ -550,9 +552,17 @@ fun SecurityScreen(
                         if (currentPatternCredential == null) {
                             PatternLockPad(
                                 onPatternComplete = { raw ->
-                                    currentPatternCredential = runCatching { PatternCredential.canonicalChars(raw) }.getOrNull()
-                                    if (currentPatternCredential == null) { changeCredentialError = "Connect at least four dots"; changePatternErrorTrigger++ }
-                                    else changeCredentialError = null
+                                    currentPatternCredential?.fill('\u0000')
+                                    currentPatternCredential = runCatching {
+                                        PatternCredential.canonicalChars(raw)
+                                    }.getOrNull()
+                                    raw.fill(-1)
+                                    if (currentPatternCredential == null) {
+                                        changeCredentialError = "Connect at least four dots"
+                                        changePatternErrorTrigger++
+                                    } else {
+                                        changeCredentialError = null
+                                    }
                                 },
                                 errorTrigger = changePatternErrorTrigger,
                                 enabled = true,
@@ -565,10 +575,24 @@ fun SecurityScreen(
                         PatternLockPad(
                             onPatternComplete = { raw ->
                                 val normalized = runCatching { PatternCredential.normalize(raw) }.getOrNull()
-                                if (normalized == null) { changeCredentialError = "Connect at least four dots"; changePatternErrorTrigger++ }
-                                else if (firstNewPattern == null) { firstNewPattern = normalized; changeCredentialError = null }
-                                else if (!normalized.contentEquals(firstNewPattern)) { firstNewPattern = null; changeCredentialError = "Patterns do not match"; changePatternErrorTrigger++ }
-                                else submitChangedCredential(PatternCredential.canonicalChars(normalized))
+                                raw.fill(-1)
+                                if (normalized == null) {
+                                    changeCredentialError = "Connect at least four dots"
+                                    changePatternErrorTrigger++
+                                } else if (firstNewPattern == null) {
+                                    firstNewPattern = normalized
+                                    changeCredentialError = null
+                                } else if (!normalized.contentEquals(firstNewPattern)) {
+                                    firstNewPattern?.fill(-1)
+                                    firstNewPattern = null
+                                    normalized.fill(-1)
+                                    changeCredentialError = "Patterns do not match"
+                                    changePatternErrorTrigger++
+                                } else {
+                                    val credential = PatternCredential.canonicalChars(normalized)
+                                    normalized.fill(-1)
+                                    submitChangedCredential(credential)
+                                }
                             },
                             errorTrigger = changePatternErrorTrigger,
                             enabled = true,
