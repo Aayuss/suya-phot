@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -86,6 +87,7 @@ import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.MediaFilter
 import com.suyaphot.app.ui.components.MediaTile
+import com.suyaphot.app.ui.components.dragSelectGrid
 import com.suyaphot.app.ui.components.SegmentedFilterChips
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
@@ -121,6 +123,7 @@ fun PhotosScreen(
     var allMatchingIds by remember { mutableStateOf<Set<String>?>(null) }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() || allMatchingIds != null } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
+    val gridState = rememberLazyGridState()
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
     val trashRetentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
     var statusMessage by remember { mutableStateOf<String?>(null) }
@@ -579,10 +582,24 @@ fun PhotosScreen(
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
+                    state = gridState,
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .dragSelectGrid(
+                            state = gridState,
+                            scope = scope,
+                            onItemsSelected = { ids ->
+                                if (allMatchingIds != null) {
+                                    allMatchingIds = allMatchingIds!! + ids
+                                } else {
+                                    ids.forEach { id -> selectedMediaIds[id] = Unit }
+                                }
+                            }
+                        )
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
