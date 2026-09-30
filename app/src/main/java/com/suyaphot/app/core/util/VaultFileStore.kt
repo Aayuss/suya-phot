@@ -75,6 +75,11 @@ class VaultFileStore(private val context: Context) {
         return normalized.takeIf { it.matches(Regex("[a-z0-9]{1,10}")) }?.let { ".$it" } ?: ".bin"
     }
 
+    fun vaultDirPath(vaultId: String): File {
+        requireInternalId(vaultId, "vault id")
+        return File(baseVaultDir, vaultId)
+    }
+
     fun getVaultDir(vaultId: String): File {
         requireInternalId(vaultId, "vault id")
         return File(baseVaultDir, vaultId).apply { mkdirs() }

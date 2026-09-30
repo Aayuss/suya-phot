@@ -242,6 +242,9 @@ class BackupRestoreIntegrationTest {
             assertEquals(1, db1.vaultDao().getAllVaults().size)
             assertEquals(1, db1.mediaItemDao().getAllForIntegrityCheck(vaultId).size)
 
+            // Clean up existing vault on disk to simulate fresh install / target device
+            fileStore.getVaultDir(vaultId).deleteRecursively()
+
             // 4. Test Restore into Fresh Database
             val db2 = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
             val session2 = SessionManager(securityPrefs, CoroutineScope(Dispatchers.Unconfined))

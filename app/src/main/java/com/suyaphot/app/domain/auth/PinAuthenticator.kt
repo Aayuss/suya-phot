@@ -38,11 +38,8 @@ class PinAuthenticator(
     private val preferences: SecurityPreferences
 ) {
 
-    private fun validCredential(chars: CharArray, typeCode: Int): Boolean = when (typeCode) {
-        0 -> chars.size == 6 && chars.all(Char::isDigit)
-        1 -> PatternCredential.isCanonical(chars)
-        else -> false
-    }
+    private fun validCredential(chars: CharArray, typeCode: Int): Boolean =
+        VaultCredentialValidator.isValid(chars, typeCode)
 
     @Volatile
     private var monotonicLockoutDeadlineMs: Long = 0L

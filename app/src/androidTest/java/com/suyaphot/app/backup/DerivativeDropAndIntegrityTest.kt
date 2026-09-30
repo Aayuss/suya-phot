@@ -14,6 +14,7 @@ import com.suyaphot.app.core.database.entity.FolderLockEntity
 import com.suyaphot.app.core.database.entity.MediaItemEntity
 import com.suyaphot.app.core.database.entity.VaultEntity
 import com.suyaphot.app.core.datastore.SecurityPreferences
+import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.SessionManager
@@ -124,9 +125,26 @@ class DerivativeDropAndIntegrityTest {
         )
         val sha256Hex = result.sha256.joinToString("") { "%02x".format(it) }
 
+        val rawMetadata = PrivateMediaMetadata(
+            originalDisplayName = "$mediaId.jpg",
+            originalRelativePath = "DCIM/Camera",
+            originalMimeType = "image/jpeg",
+            originalContentUri = null,
+            dateTakenMs = System.currentTimeMillis(),
+            dateModifiedMs = System.currentTimeMillis(),
+            width = 1920,
+            height = 1080,
+            durationMs = null,
+            orientation = 0,
+            sourceVolume = null,
+            sourceMediaStoreId = null,
+            gpsWasAvailable = false,
+            originalFileExtension = "jpg"
+        ).serialize()
+
         val encMetadata = Aead.encryptWithPrependedNonce(
             keyBytes = metaSubkey,
-            plaintext = "fake metadata".toByteArray(),
+            plaintext = rawMetadata,
             aad = mediaId.toByteArray(Charsets.UTF_8)
         )
 

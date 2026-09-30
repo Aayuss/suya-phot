@@ -17,6 +17,7 @@ import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.LockReason
 import com.suyaphot.app.domain.auth.SessionManager
+import com.suyaphot.app.domain.auth.VaultCredentialValidator
 import com.suyaphot.app.domain.folders.FolderAccessManager
 import com.suyaphot.app.domain.folders.FolderPrivacyCoordinator
 import kotlinx.coroutines.Dispatchers
@@ -64,14 +65,6 @@ class VaultBackupImporter(
         return result
     }
 
-    private fun strictUtf8(bytes: ByteArray): String {
-        val decoder = Charsets.UTF_8.newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT)
-
-        return decoder.decode(ByteBuffer.wrap(bytes)).toString()
-    }
-
     private fun verifyFolderRecoveryEnvelope(
         entry: BackupFolderLockEntry,
         metaSubkey: ByteArray
@@ -92,31 +85,19 @@ class VaultBackupImporter(
             )
         }
 
-        val token = try {
-            Aead.decryptWithPrependedNonce(
-                keyBytes = metaSubkey,
-                payload = encrypted,
-                aad = FolderLockCryptoFormat.recoveryAad(entry.id)
-            )
-        } catch (e: Exception) {
-            throw BackupException(
-                BackupError.FOLDER_LOCK_RECOVERY_CORRUPT,
-                "Corrupt recovery envelope for lock ${entry.id}",
-                cause = e
-            )
-        } finally {
-            encrypted.fill(0)
-        }
-
         try {
-            if (token.size != 32) {
+            VaultBackupSemanticVerifier.verifyFolderRecoveryEnvelope(entry.id, encrypted, metaSubkey)
+        } catch (e: BackupException) {
+            if (e.error == BackupError.VAULT_INTEGRITY_CHECK_FAILED) {
                 throw BackupException(
                     BackupError.FOLDER_LOCK_RECOVERY_CORRUPT,
-                    "Invalid recovery token size ${token.size} for lock ${entry.id}"
+                    "Corrupt recovery envelope for lock ${entry.id}: ${e.message}",
+                    cause = e
                 )
             }
+            throw e
         } finally {
-            token.fill(0)
+            encrypted.fill(0)
         }
     }
 
@@ -133,33 +114,19 @@ class VaultBackupImporter(
                 throw BackupException(BackupError.INVALID_ARCHIVE, "Invalid folder name hex", e)
             }
 
-            val plain = try {
-                Aead.decryptWithPrependedNonce(
-                    keyBytes = metaSubkey,
-                    payload = encrypted,
-                    aad = f.id.toByteArray(Charsets.UTF_8)
-                )
-            } catch (e: Exception) {
-                throw BackupException(
-                    BackupError.INVALID_ARCHIVE,
-                    "Folder name authentication failed for folder ${f.id}",
-                    e
-                )
+            val name = try {
+                VaultBackupSemanticVerifier.verifyFolderName(f.id, encrypted, metaSubkey)
+            } catch (e: BackupException) {
+                if (e.error == BackupError.VAULT_INTEGRITY_CHECK_FAILED) {
+                    throw BackupException(
+                        BackupError.INVALID_ARCHIVE,
+                        "Folder name authentication failed for folder ${f.id}: ${e.message}",
+                        cause = e
+                    )
+                }
+                throw e
             } finally {
                 encrypted.fill(0)
-            }
-
-            val name = try {
-                val decoded = strictUtf8(plain)
-                FolderManager.normalizeFolderName(decoded)
-            } catch (e: Exception) {
-                throw BackupException(
-                    BackupError.INVALID_ARCHIVE,
-                    "Invalid folder name for folder ${f.id}: ${e.message}",
-                    e
-                )
-            } finally {
-                plain.fill(0)
             }
 
             val siblings = siblingsByParent.getOrPut(f.parentId) { HashSet() }
@@ -186,23 +153,53 @@ class VaultBackupImporter(
             )
         }
         try {
+            // P1: Validate new credential format upfront before any file or DB operations
+            if (!VaultCredentialValidator.isValid(newCredential, newCredentialType)) {
+                newCredential.fill('\u0000')
+                throw BackupException(
+                    BackupError.INVALID_NEW_CREDENTIAL,
+                    "The new lock credential is not valid for this vault type."
+                )
+            }
+
             val bufferedIn = BufferedInputStream(inputStream, BackupArchiveFormat.BUFFER_SIZE)
             val dis = DataInputStream(bufferedIn)
-        val verifier = BackupVerifier(keyManager)
+            val verifier = BackupVerifier(keyManager)
 
-        // 1. Decrypt header, master key, and manifest
-        val (manifest, masterKey) = verifier.decryptManifestAndMasterKey(dis, recoveryCodeInput)
+            // 1. Decrypt header, master key, and manifest
+            val (manifest, masterKey) = verifier.decryptManifestAndMasterKey(dis, recoveryCodeInput)
 
-        // 2. FAIL-SAFE: reject restore immediately if a vault of the same kind already exists
-        val existingVault = database.vaultDao().getVaultByKind(manifest.vaultKindCode)
-        if (existingVault != null) {
-            masterKey.fill(0)
-            newCredential.fill('\u0000')
-            throw BackupException(
-                BackupError.RESTORE_REQUIRES_EMPTY_VAULT,
-                "A vault already exists on this device.\n\nFor safety, Suya Phot will not overwrite an existing vault during restore. Export the current vault first and restore the backup on a fresh installation or another device."
-            )
-        }
+            // 2. FAIL-SAFE: reject restore immediately if a vault of the same kind already exists
+            val existingVault = database.vaultDao().getVaultByKind(manifest.vaultKindCode)
+            if (existingVault != null) {
+                masterKey.fill(0)
+                newCredential.fill('\u0000')
+                throw BackupException(
+                    BackupError.RESTORE_REQUIRES_EMPTY_VAULT,
+                    "A vault already exists on this device.\n\nFor safety, Suya Phot will not overwrite an existing vault during restore. Export the current vault first and restore the backup on a fresh installation or another device."
+                )
+            }
+
+            // P1: Reject DB ID collision
+            if (database.vaultDao().getVault(manifest.vaultId) != null) {
+                masterKey.fill(0)
+                newCredential.fill('\u0000')
+                throw BackupException(
+                    BackupError.RESTORE_TARGET_COLLISION,
+                    "A vault with ID ${manifest.vaultId} already exists in the database."
+                )
+            }
+
+            // P1: Defensive Safety: Reject pre-existing target vault directory on disk
+            val finalVaultDir = fileStore.vaultDirPath(manifest.vaultId)
+            if (finalVaultDir.exists()) {
+                masterKey.fill(0)
+                newCredential.fill('\u0000')
+                throw BackupException(
+                    BackupError.RESTORE_TARGET_COLLISION,
+                    "Target storage directory for vault ${manifest.vaultId} already exists."
+                )
+            }
 
         // 3. Strict manifest validation
         val validated = try {
@@ -487,18 +484,18 @@ class VaultBackupImporter(
                     // Verify encrypted metadata blob
                     val metaBytes = m.encryptedMetadataHex.decodeHex()
                     try {
-                        val decryptedMeta = Aead.decryptWithPrependedNonce(
-                            keyBytes = metaSubkey,
-                            payload = metaBytes,
-                            aad = m.id.toByteArray(Charsets.UTF_8)
-                        )
-                        try {
-                            PrivateMediaMetadata.deserialize(decryptedMeta)
-                        } finally {
-                            decryptedMeta.fill(0.toByte())
+                        VaultBackupSemanticVerifier.verifyMediaMetadata(m.id, metaBytes, metaSubkey)
+                    } catch (e: BackupException) {
+                        if (e.error == BackupError.VAULT_INTEGRITY_CHECK_FAILED) {
+                            throw BackupException(
+                                BackupError.CORRUPT_MEDIA,
+                                "Metadata AEAD verification failed for ${m.id}: ${e.message}",
+                                cause = e
+                            )
                         }
-                    } catch (e: Exception) {
-                        throw BackupException(BackupError.CORRUPT_MEDIA, "Metadata AEAD verification failed for ${m.id}", e)
+                        throw e
+                    } finally {
+                        metaBytes.fill(0)
                     }
 
                     // Verify optional thumbnail crypto (drop if corrupt)
@@ -533,6 +530,7 @@ class VaultBackupImporter(
             val newRecoveryEnvelope = keyManager.createRecoveryEnvelope(masterKey, normalizedRecovery)
 
             // 9. Commit to database and move files inside Room transaction with crash reconciliation
+            var finalVaultDirCreatedByThisRestore = false
             try {
                 database.withTransaction {
                     // Insert restored Vault Entity
@@ -591,6 +589,7 @@ class VaultBackupImporter(
 
                     // Insert Media Items and move verified staged files into permanent vault directory
                     for (m in manifest.mediaItems) {
+                        finalVaultDirCreatedByThisRestore = true
                         val mediaFile = fileStore.getMediaFile(manifest.vaultId, m.id)
                         val stagedMedia = stagedMediaFiles[m.id]
                         if (stagedMedia != null && stagedMedia.exists()) {
@@ -621,10 +620,28 @@ class VaultBackupImporter(
                             }
                         }
 
-                        // Normalize previousFolderId safely if folder was deleted or missing
-                        val safePreviousFolderId = if (m.previousFolderId != null && validated.folderById.containsKey(m.previousFolderId)) {
-                            m.previousFolderId
-                        } else null
+                        // P0 Privacy: Use archived concealed state only when privacy cannot be derived from folder
+                        val safePreviousFolderId =
+                            m.previousFolderId?.takeIf {
+                                validated.folderById.containsKey(it)
+                            }
+
+                        val initialConcealed =
+                            when {
+                                // Active item: current folder tree is authoritative.
+                                m.deletedAt == null ->
+                                    false
+
+                                // Trash still points to a restored folder:
+                                // recompute from that folder.
+                                safePreviousFolderId != null ->
+                                    false
+
+                                // Deleted item whose provenance folder no longer exists:
+                                // preserve conservative archived privacy.
+                                else ->
+                                    m.concealed
+                            }
 
                         database.mediaItemDao().insert(
                             MediaItemEntity(
@@ -646,7 +663,7 @@ class VaultBackupImporter(
                                 dateTakenMs = m.dateTakenMs,
                                 encryptedPreviewRelativePath = previewRelPath,
                                 cleanupStateCode = 0, // P0-A: Never restore active cleanup journal
-                                concealed = false     // Derived: recomputed by privacyCoordinator below
+                                concealed = initialConcealed // P0: Preserve archived privacy for orphaned Trash
                             )
                         )
                     }
@@ -655,9 +672,11 @@ class VaultBackupImporter(
                     privacyCoordinator.recomputeInsideTransaction(manifest.vaultId)
                 }
             } catch (e: Exception) {
-                // Synchronous DB transaction rollback cleanup: delete any permanent files created for this uncommitted vault
-                runCatching {
-                    fileStore.getVaultDir(manifest.vaultId).deleteRecursively()
+                // Synchronous DB transaction rollback cleanup: delete only permanent files created by this restore
+                if (finalVaultDirCreatedByThisRestore) {
+                    runCatching {
+                        fileStore.vaultDirPath(manifest.vaultId).deleteRecursively()
+                    }
                 }
                 throw e
             }

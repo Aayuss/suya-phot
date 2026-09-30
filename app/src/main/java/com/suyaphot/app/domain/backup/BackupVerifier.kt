@@ -218,10 +218,11 @@ class BackupVerifier(private val keyManager: KeyManager) {
         inspectManifest(inputStream, recoveryCodeInput)
 
     /**
-     * Full post-write verifier that checks header, manifest, and every body entry
-     * against authenticated descriptors without writing to permanent storage.
+     * Verifies archive framing, header, authenticated manifest, and matches every archived
+     * body entry against its authenticated checksum without writing to permanent storage.
+     * Note: Full semantic media/metadata decryption occurs before restore commit.
      */
-    fun verifyFullArchive(inputStream: InputStream, recoveryCodeInput: String): BackupSummary {
+    fun verifyArchiveStructureAndBodies(inputStream: InputStream, recoveryCodeInput: String): BackupSummary {
         val dis = DataInputStream(BufferedInputStream(inputStream, BackupArchiveFormat.BUFFER_SIZE))
         val (manifest, masterKey) = decryptManifestAndMasterKey(dis, recoveryCodeInput)
         masterKey.fill(0)
@@ -399,4 +400,8 @@ class BackupVerifier(private val keyManager: KeyManager) {
             totalPlaintextSize = totalPlaintext
         )
     }
+
+    fun verifyFullArchive(inputStream: InputStream, recoveryCodeInput: String): BackupSummary =
+        verifyArchiveStructureAndBodies(inputStream, recoveryCodeInput)
 }
+

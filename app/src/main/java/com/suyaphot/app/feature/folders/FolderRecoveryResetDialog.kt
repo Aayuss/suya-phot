@@ -5,6 +5,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -13,9 +18,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.suyaphot.app.app.AppContainer
@@ -39,12 +46,22 @@ fun FolderRecoveryResetDialog(
 ) {
     val scope = rememberCoroutineScope()
     var recoveryCode by remember { mutableStateOf("") }
+    var revealRecoveryCode by remember { mutableStateOf(false) }
     var targetType by remember { mutableIntStateOf(initialTypeCode) }
     var newPin by remember { mutableStateOf("") }
     var confirmPin by remember { mutableStateOf("") }
     var firstPattern by remember { mutableStateOf<IntArray?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var errorTrigger by remember { mutableIntStateOf(0) }
+
+    fun clearState() {
+        recoveryCode = ""
+        revealRecoveryCode = false
+        newPin = ""
+        confirmPin = ""
+        firstPattern = null
+        error = null
+    }
 
     fun submit(newCredential: CharArray) {
         if (recoveryCode.isBlank()) {
@@ -54,14 +71,16 @@ fun FolderRecoveryResetDialog(
             return
         }
         scope.launch {
+            val codeToSubmit = recoveryCode.trim()
             val success = container.folderLockManager.resetWithRecovery(
                 folderId = folderId,
-                recoveryCode = recoveryCode.trim(),
+                recoveryCode = codeToSubmit,
                 replacement = newCredential,
                 replacementType = targetType
             )
             newCredential.fill('\u0000')
             if (success) {
+                clearState()
                 onResetSuccess()
             } else {
                 error = "Recovery failed. Check your Recovery Code."
@@ -71,7 +90,10 @@ fun FolderRecoveryResetDialog(
     }
 
     SuyaDialog(
-        onDismissRequest = onDismissRequest,
+        onDismissRequest = {
+            clearState()
+            onDismissRequest()
+        },
         title = "Reset Folder Lock",
         confirmText = if (targetType == 0) "Reset Lock" else null,
         onConfirm = if (targetType == 0) ({
@@ -92,11 +114,26 @@ fun FolderRecoveryResetDialog(
                     color = SuyaColors.TextMuted,
                     fontSize = 12.sp
                 )
-                SuyaTextField(
-                    value = recoveryCode,
-                    onValueChange = { recoveryCode = it.take(32) },
-                    label = "Vault Recovery Code"
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    SuyaTextField(
+                        value = recoveryCode,
+                        onValueChange = { recoveryCode = it.uppercase().take(32) },
+                        label = "Vault Recovery Code",
+                        placeholder = "XXXX-XXXX-XXXX-...",
+                        visualTransformation = if (revealRecoveryCode) VisualTransformation.None else PasswordVisualTransformation(),
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { revealRecoveryCode = !revealRecoveryCode }) {
+                        Icon(
+                            imageVector = if (revealRecoveryCode) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = if (revealRecoveryCode) "Hide Recovery Code" else "Reveal Recovery Code",
+                            tint = SuyaColors.TextMuted
+                        )
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SuyaButton(
                         text = "New PIN",

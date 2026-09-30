@@ -591,11 +591,18 @@ fun BackupRestoreScreen(
                         if (isInspectMode) {
                             val sum = restoreSummary!!
                             Text(
-                                "Backup fully verified",
+                                "Archive integrity verified",
                                 fontFamily = SoraFontFamily,
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 15.sp,
                                 color = SuyaColors.Positive
+                            )
+                            Text(
+                                "The encrypted manifest and archived file bodies are complete and match their authenticated checksums.\n\nFinal media and metadata cryptographic verification is performed before restore is committed.",
+                                fontFamily = SoraFontFamily,
+                                fontSize = 12.sp,
+                                color = SuyaColors.TextMuted,
+                                lineHeight = 16.sp
                             )
                             Text(
                                 "Contains ${sum.mediaCount} media items and ${sum.folderCount} folders (${sum.totalPlaintextSize / (1024 * 1024)} MB).",

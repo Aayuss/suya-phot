@@ -53,42 +53,6 @@ class VaultBackupExporter(
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun verifyPortableFolderRecovery(
-        lock: FolderLockEntity,
-        metaSubkey: ByteArray
-    ) {
-        val encrypted = lock.recoveryEnvelope
-            ?: throw BackupException(
-                BackupError.FOLDER_LOCK_RECOVERY_NOT_READY,
-                "Protected folder lock ${lock.id} lacks portable recovery information."
-            )
-
-        val token = try {
-            Aead.decryptWithPrependedNonce(
-                keyBytes = metaSubkey,
-                payload = encrypted,
-                aad = FolderLockCryptoFormat.recoveryAad(lock.id)
-            )
-        } catch (e: Exception) {
-            throw BackupException(
-                BackupError.FOLDER_LOCK_RECOVERY_CORRUPT,
-                "Protected folder lock ${lock.id} has corrupt recovery envelope: ${e.message}",
-                cause = e
-            )
-        }
-
-        try {
-            if (token.size != 32) {
-                throw BackupException(
-                    BackupError.FOLDER_LOCK_RECOVERY_CORRUPT,
-                    "Protected folder lock ${lock.id} has invalid recovery token size ${token.size}."
-                )
-            }
-        } finally {
-            token.fill(0)
-        }
-    }
-
     suspend fun exportVault(
         outputStream: OutputStream,
         recoveryCodeInput: String,
@@ -156,17 +120,6 @@ class VaultBackupExporter(
             )
         }
 
-        session.masterKeyHandle.useBytes { masterKey ->
-            val metaSubkey = vaultCrypto.deriveMetaSubkey(masterKey)
-            try {
-                for (lock in locks) {
-                    verifyPortableFolderRecovery(lock, metaSubkey)
-                }
-            } finally {
-                metaSubkey.fill(0)
-            }
-        }
-
         if (folders.size > BackupLimits.MAX_FOLDERS) {
             throw BackupException(BackupError.INVALID_ARCHIVE, "Vault exceeds maximum folder count.")
         }
@@ -186,6 +139,29 @@ class VaultBackupExporter(
         val mediaItems = database.mediaItemDao().getAllForIntegrityCheck(vaultId)
         if (mediaItems.size > BackupLimits.MAX_MEDIA_ITEMS_V2) {
             throw BackupException(BackupError.INVALID_ARCHIVE, "Vault exceeds maximum media item count.")
+        }
+
+        // P0/P1: Cryptographically preflight all folder recovery envelopes, folder names, and media metadata
+        session.masterKeyHandle.useBytes { masterKey ->
+            val metaSubkey = vaultCrypto.deriveMetaSubkey(masterKey)
+            try {
+                for (lock in locks) {
+                    val envelope = lock.recoveryEnvelope
+                        ?: throw BackupException(
+                            BackupError.FOLDER_LOCK_RECOVERY_NOT_READY,
+                            "Protected folder lock ${lock.id} lacks portable recovery information."
+                        )
+                    VaultBackupSemanticVerifier.verifyFolderRecoveryEnvelope(lock.id, envelope, metaSubkey)
+                }
+                for (folder in folders) {
+                    VaultBackupSemanticVerifier.verifyFolderName(folder.id, folder.encryptedName, metaSubkey)
+                }
+                for (m in mediaItems) {
+                    VaultBackupSemanticVerifier.verifyMediaMetadata(m.id, m.encryptedMetadata, metaSubkey)
+                }
+            } finally {
+                metaSubkey.fill(0)
+            }
         }
 
         val archiveId = UUID.randomUUID().toString()
@@ -424,6 +400,14 @@ class VaultBackupExporter(
             secretBytes.fill(0)
             recoveryKek.fill(0)
             manifestKey.fill(0)
+        }
+
+        // P1: Writer and reader must agree on the V2 manifest size before output
+        if (manifestCiphertext.size > BackupLimits.MAX_MANIFEST_CIPHERTEXT_BYTES) {
+            throw BackupException(
+                BackupError.BACKUP_TOO_LARGE,
+                "This vault is too large for the current backup format. Your vault was not modified."
+            )
         }
 
         // Calculate total estimated bytes

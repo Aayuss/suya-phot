@@ -18,6 +18,10 @@ enum class BackupError {
     BACKUP_PENDING_LOCAL_CLEANUP,
     LEGACY_PROTECTED_FOLDER_NOT_PORTABLE,
     RESTORE_ALREADY_RUNNING,
+    VAULT_INTEGRITY_CHECK_FAILED,
+    INVALID_NEW_CREDENTIAL,
+    BACKUP_TOO_LARGE,
+    RESTORE_TARGET_COLLISION,
     UNKNOWN;
 
     fun userFriendlyMessage(): String = when (this) {
@@ -38,6 +42,10 @@ enum class BackupError {
         BACKUP_PENDING_LOCAL_CLEANUP -> "Trash cleanup is still pending. Suya Phot will not create a backup while a permanent-delete operation is unfinished. Open Trash and let cleanup finish, or restart Suya Phot and try again."
         LEGACY_PROTECTED_FOLDER_NOT_PORTABLE -> "This older backup contains protected folders that cannot be safely unlocked on a new device. Open the original vault in the latest Suya Phot, unlock those folders once, and create a new backup."
         RESTORE_ALREADY_RUNNING -> "A restore operation is already in progress."
+        VAULT_INTEGRITY_CHECK_FAILED -> "Suya Phot found damaged private metadata and did not create the backup.\nYour encrypted media was not modified."
+        INVALID_NEW_CREDENTIAL -> "The new lock credential is not valid for this vault type."
+        BACKUP_TOO_LARGE -> "This vault is too large for the current backup format.\nYour vault was not modified."
+        RESTORE_TARGET_COLLISION -> "A conflicting vault already exists on this device."
         UNKNOWN -> "An unexpected error occurred during backup operation."
     }
 }
