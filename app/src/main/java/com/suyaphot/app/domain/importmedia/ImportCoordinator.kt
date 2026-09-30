@@ -348,7 +348,7 @@ class ImportCoordinator(
                     return@withContext ImportResult.Success(
                         jobId = jobId,
                         itemId = existing.id,
-                        uri = uri,
+                        uri = deletionUri,
                         sha256Hex = sha256Hex,
                         alreadyExisted = true,
                         mode = mode
