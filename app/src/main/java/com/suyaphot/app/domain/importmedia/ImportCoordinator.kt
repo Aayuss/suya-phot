@@ -2,6 +2,7 @@ package com.suyaphot.app.domain.importmedia
 
 import android.content.Context
 import android.net.Uri
+import android.provider.MediaStore
 import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.VaultCrypto
@@ -265,6 +266,15 @@ class ImportCoordinator(
             vaultJobDao.updateState(jobId, JobState.READING_SOURCE.code, System.currentTimeMillis())
             val resolvedSource = metadataReader.resolve(uri)
             val sourceMeta = metadataReader.read(resolvedSource)
+            // Photo Picker URIs are read-only proxy URIs. When MediaStore identity is
+            // available, retain the canonical public MediaStore URI for MOVE deletion.
+            val sourceDeleteUri = sourceMeta.metadata.sourceMediaStoreId?.let { sourceId ->
+                val volume = sourceMeta.metadata.sourceVolume ?: MediaStore.VOLUME_EXTERNAL
+                when (sourceMeta.mediaType) {
+                    MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume, sourceId)
+                    MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume, sourceId)
+                }
+            } ?: resolvedSource.sourceUri
 
             // 2. Encrypting stream to .partial file
             vaultJobDao.updateState(jobId, JobState.ENCRYPTING.code, System.currentTimeMillis())
@@ -308,6 +318,24 @@ class ImportCoordinator(
                 if (existing != null) {
                     partialFile.delete()
                     val nowDuplicate = System.currentTimeMillis()
+                    if (mode == ImportMode.MOVE) {
+                        val movePayload = ImportJobPayload(
+                            sourceUri = sourceDeleteUri.toString(),
+                            targetFolderId = folderId,
+                            itemId = itemId,
+                            mode = mode
+                        ).serialize()
+                        val encryptedMovePayload = try {
+                            Aead.encryptWithPrependedNonce(
+                                keyBytes = session.metaSubkey,
+                                plaintext = movePayload,
+                                aad = "job:$jobId:v1".toByteArray(Charsets.UTF_8)
+                            )
+                        } finally {
+                            movePayload.fill(0)
+                        }
+                        check(vaultJobDao.updateEncryptedPayload(jobId, vaultId, encryptedMovePayload, nowDuplicate) == 1)
+                    }
                     if (mode == ImportMode.COPY) {
                         vaultJobDao.updateTerminalImportState(
                             id = jobId,
@@ -323,7 +351,7 @@ class ImportCoordinator(
                     return@withContext ImportResult.Success(
                         jobId = jobId,
                         itemId = existing.id,
-                        uri = uri,
+                        uri = if (mode == ImportMode.MOVE) sourceDeleteUri else uri,
                         sha256Hex = sha256Hex,
                         alreadyExisted = true,
                         mode = mode
@@ -383,7 +411,8 @@ class ImportCoordinator(
             // 7. Transactional DB commit (Section 15)
             val now = System.currentTimeMillis()
             val stagedRaw = ImportJobPayload(
-                sourceUri = uri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
+                sourceUri = (if (mode == ImportMode.MOVE) sourceDeleteUri else uri).toString(),
+                targetFolderId = folderId, itemId = itemId, mode = mode,
                 stagedMedia = ImportJobPayload.StagedMedia(
                     mediaTypeCode = sourceMeta.mediaType.code,
                     plaintextSize = verifyResult.plaintextSize,
@@ -448,7 +477,7 @@ class ImportCoordinator(
             ImportResult.Success(
                 jobId = jobId,
                 itemId = itemId,
-                uri = uri,
+                uri = if (mode == ImportMode.MOVE) sourceDeleteUri else uri,
                 sha256Hex = sha256Hex,
                 mode = mode
             )
