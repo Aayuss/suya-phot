@@ -33,7 +33,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -86,7 +85,7 @@ fun SetupScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var currentStep by rememberSaveable { mutableStateOf(SetupStep.WELCOME) }
+    var currentStep by remember { mutableStateOf(SetupStep.WELCOME) }
 
     var initialPin by remember { mutableStateOf("") }
     var confirmPin by remember { mutableStateOf("") }
@@ -100,7 +99,7 @@ fun SetupScreen(
     var group2Input by remember { mutableStateOf("") }
     var recoveryErrorMessage by remember { mutableStateOf<String?>(null) }
 
-    var createdVaultId by rememberSaveable { mutableStateOf<String?>(null) }
+    var createdVaultId by remember { mutableStateOf<String?>(null) }
     var showRestoreScreen by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
