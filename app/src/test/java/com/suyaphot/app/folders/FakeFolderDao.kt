@@ -61,6 +61,18 @@ class FakeFolderDao : FolderDao {
     override fun getAllSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>> =
         getSubFolders(vaultId, parentId)
 
+    override fun getAllSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>> =
+        flowOf(
+            folders.values
+                .filter { it.vaultId == vaultId && it.parentId == parentId }
+                .map { folder ->
+                    val childCount = folders.values.count {
+                        it.vaultId == vaultId && it.parentId == folder.id
+                    }
+                    FolderWithCount(folder, childCount)
+                }
+        )
+
     override suspend fun getSubFoldersSync(vaultId: String, parentId: String?): List<FolderEntity> =
         folders.values.filter { it.vaultId == vaultId && it.parentId == parentId }
 
