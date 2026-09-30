@@ -61,7 +61,7 @@ class EncryptedThumbnailRepository(
         try {
             if (lease.vaultId != vaultId) return@withContext null
 
-            val thumbFile = thumbFile
+            val thumbFile = fileStore.getThumbFile(vaultId, mediaId)
             var bitmap = generator.decryptThumbnail(
                 thumbFile,
                 lease.thumbSubkey,
@@ -121,7 +121,7 @@ class EncryptedThumbnailRepository(
         // If load() reached repair, an existing thumbnail failed authenticated decryption.
         // Thumbnails are replaceable derivatives, so remove only that bad derivative before
         // regenerating it from the verified original.
-        val thumbFile = thumbFile
+        val thumbFile = fileStore.getThumbFile(vaultId, mediaId)
         if (thumbFile.exists()) {
             runCatching { thumbFile.delete() }
         }
