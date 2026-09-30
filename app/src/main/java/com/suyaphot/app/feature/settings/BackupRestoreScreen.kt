@@ -111,7 +111,7 @@ fun BackupRestoreScreen(
     var showExportSecretDialog by remember { mutableStateOf(false) }
     var exportRecoveryCode by remember { mutableStateOf("") }
     var exportCodeRevealed by remember { mutableStateOf(false) }
-    var exportTargetUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingExportCode by remember { mutableStateOf<String?>(null) }
     var showFolderPrepDialog by remember { mutableStateOf(false) }
     var unreadyFolderCount by remember { mutableIntStateOf(0) }
 
@@ -138,6 +138,7 @@ fun BackupRestoreScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            pendingExportCode = null
             exportRecoveryCode = ""
             restoreRecoveryCode = ""
             newPin = ""
@@ -147,34 +148,7 @@ fun BackupRestoreScreen(
         }
     }
 
-    // SAF Document Launchers
-    val exportDocumentLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri ->
-        if (uri != null) {
-            exportTargetUri = uri
-            exportRecoveryCode = ""
-            exportCodeRevealed = false
-            showExportSecretDialog = true
-        }
-    }
-
-    val restoreDocumentLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            restoreUri = uri
-            restoreRecoveryCode = ""
-            restoreCodeRevealed = false
-            restoreSummary = null
-            restoreError = null
-            credentialStep = false
-            showRestoreSecretDialog = true
-        }
-    }
-
-    fun startExport(code: String) {
-        val uri = exportTargetUri ?: return
+    fun startExport(uri: Uri, code: String) {
         isExporting = true
         exportProgressFraction = 0f
         exportProgressText = "Preparing archive..."
@@ -331,6 +305,35 @@ fun BackupRestoreScreen(
         }
     }
 
+    // SAF Document Launchers
+    val exportDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        container.sessionManager.endSystemActivity()
+        val code = pendingExportCode
+        pendingExportCode = null
+        if (uri != null) {
+            if (!code.isNullOrBlank()) {
+                startExport(uri, code)
+            }
+        }
+    }
+
+    val restoreDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        container.sessionManager.endSystemActivity()
+        if (uri != null) {
+            restoreUri = uri
+            restoreRecoveryCode = ""
+            restoreCodeRevealed = false
+            restoreSummary = null
+            restoreError = null
+            credentialStep = false
+            showRestoreSecretDialog = true
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -401,16 +404,34 @@ fun BackupRestoreScreen(
                                 color = SuyaColors.TextMuted
                             )
                             Spacer(Modifier.height(14.dp))
-                            SuyaButton(
-                                text = "Export .suyavault",
-                                onClick = {
-                                    val timestamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
-                                    exportDocumentLauncher.launch("suya_phot_backup_$timestamp.suyavault")
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("backup_export_button")
-                            )
+                            if (isExporting) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    LinearProgressIndicator(
+                                        progress = { exportProgressFraction },
+                                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                                        color = SuyaColors.Accent,
+                                        trackColor = SuyaColors.Line
+                                    )
+                                    Text(
+                                        text = exportProgressText,
+                                        fontFamily = SoraFontFamily,
+                                        fontSize = 12.sp,
+                                        color = SuyaColors.TextMuted
+                                    )
+                                }
+                            } else {
+                                SuyaButton(
+                                    text = "Export .suyavault",
+                                    onClick = {
+                                        exportRecoveryCode = ""
+                                        exportCodeRevealed = false
+                                        showExportSecretDialog = true
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("backup_export_button")
+                                )
+                            }
                         }
                     }
                 }
@@ -450,6 +471,7 @@ fun BackupRestoreScreen(
                             SuyaButton(
                                 text = "Open Backup File",
                                 onClick = {
+                                    container.sessionManager.beginSystemActivity()
                                     restoreDocumentLauncher.launch(arrayOf("*/*"))
                                 },
                                 variant = ButtonVariant.Secondary,
@@ -469,6 +491,7 @@ fun BackupRestoreScreen(
                             SuyaButton(
                                 text = "Inspect Backup (Read-Only)",
                                 onClick = {
+                                    container.sessionManager.beginSystemActivity()
                                     restoreDocumentLauncher.launch(arrayOf("*/*"))
                                 },
                                 variant = ButtonVariant.Secondary,
@@ -516,10 +539,13 @@ fun BackupRestoreScreen(
                 confirmText = "Begin Export",
                 onConfirm = {
                     if (container.keyManager.isValidRecoverySecret(exportRecoveryCode)) {
-                        showExportSecretDialog = false
                         val codeToExport = exportRecoveryCode
+                        showExportSecretDialog = false
                         exportRecoveryCode = ""
-                        startExport(codeToExport)
+                        pendingExportCode = codeToExport
+                        val timestamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+                        container.sessionManager.beginSystemActivity()
+                        exportDocumentLauncher.launch("suya_phot_backup_$timestamp.suyavault")
                     } else {
                         Toast.makeText(context, "Recovery code must be exactly 26 Base32 characters", Toast.LENGTH_SHORT).show()
                     }

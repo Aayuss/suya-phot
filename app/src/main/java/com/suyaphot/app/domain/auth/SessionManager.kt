@@ -76,6 +76,17 @@ class SessionManager(
 
     private var backgroundedAt: Long? = null
     private val lifecycleGeneration = AtomicLong(0L)
+    private val pendingSystemActivityCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+    fun beginSystemActivity() {
+        pendingSystemActivityCount.incrementAndGet()
+    }
+
+    fun endSystemActivity() {
+        if (pendingSystemActivityCount.decrementAndGet() < 0) {
+            pendingSystemActivityCount.set(0)
+        }
+    }
 
     val isUnlocked: Boolean
         get() = _sessionState.value is VaultSession.Unlocked
@@ -132,6 +143,7 @@ class SessionManager(
      */
     @Synchronized
     fun lock(reason: LockReason) {
+        pendingSystemActivityCount.set(0)
         val current = _sessionState.value
         if (current is VaultSession.Unlocked) {
             current.masterKeyHandle.close()
@@ -151,7 +163,7 @@ class SessionManager(
 
         scope.launch {
             val timeoutMs = preferences.autoLockTimeoutMs.first()
-            if (lifecycleGeneration.get() == generation && timeoutMs == 0L) {
+            if (lifecycleGeneration.get() == generation && timeoutMs == 0L && pendingSystemActivityCount.get() <= 0) {
                 lock(LockReason.Background)
             }
         }

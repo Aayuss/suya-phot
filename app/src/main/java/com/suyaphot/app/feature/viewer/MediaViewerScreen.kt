@@ -2,6 +2,8 @@ package com.suyaphot.app.feature.viewer
 
 import android.content.Intent
 import android.content.ClipData
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapRegionDecoder
@@ -14,10 +16,14 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -310,6 +316,12 @@ private fun MediaViewerPage(
     val sessionState by container.sessionManager.sessionState.collectAsState()
     val session = sessionState as? VaultSession.Unlocked
 
+    val shareLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        container.sessionManager.endSystemActivity()
+    }
+
     var mediaEntity by remember { mutableStateOf<MediaItemEntity?>(null) }
     var metadata by remember { mutableStateOf<PrivateMediaMetadata?>(null) }
     var fullBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -564,15 +576,39 @@ private fun MediaViewerPage(
                         modifier = Modifier
                             .fillMaxSize()
                             .onSizeChanged { viewport = it }
-                            .pointerInput(Unit) {
-                                detectTransformGestures { _, pan, zoom, _ ->
-                                    scale = (scale * zoom).coerceIn(1f, 5f)
-                                    val maxOffsetX = (size.width * (scale - 1)) / 2
-                                    val maxOffsetY = (size.height * (scale - 1)) / 2
-                                    offset = Offset(
-                                        x = (offset.x + pan.x).coerceIn(-maxOffsetX, maxOffsetX),
-                                        y = (offset.y + pan.y).coerceIn(-maxOffsetY, maxOffsetY)
-                                    )
+                            .pointerInput(scale > 1f) {
+                                if (scale > 1f) {
+                                    detectTransformGestures { _, pan, zoom, _ ->
+                                        scale = (scale * zoom).coerceIn(1f, 5f)
+                                        if (scale <= 1f) {
+                                            scale = 1f
+                                            offset = Offset.Zero
+                                        } else {
+                                            val maxOffsetX = (size.width * (scale - 1)) / 2
+                                            val maxOffsetY = (size.height * (scale - 1)) / 2
+                                            offset = Offset(
+                                                x = (offset.x + pan.x).coerceIn(-maxOffsetX, maxOffsetX),
+                                                y = (offset.y + pan.y).coerceIn(-maxOffsetY, maxOffsetY)
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    awaitEachGesture {
+                                        awaitFirstDown(requireUnconsumed = false)
+                                        do {
+                                            val event = awaitPointerEvent()
+                                            val canceled = event.changes.any { it.isConsumed }
+                                            if (!canceled && event.changes.size > 1) {
+                                                val zoomChange = event.calculateZoom()
+                                                if (zoomChange != 1f) {
+                                                    scale = (scale * zoomChange).coerceIn(1f, 5f)
+                                                    event.changes.forEach {
+                                                        if (it.positionChanged()) it.consume()
+                                                    }
+                                                }
+                                            }
+                                        } while (!canceled && event.changes.any { it.pressed })
+                                    }
                                 }
                             }
                             .pointerInput(Unit) {
@@ -762,7 +798,8 @@ private fun MediaViewerPage(
                                             clipData = ClipData.newUri(context.contentResolver, "Suya Phot media", prepared.uri)
                                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                         }
-                                        context.startActivity(Intent.createChooser(send, "Share media"))
+                                        container.sessionManager.beginSystemActivity()
+                                        shareLauncher.launch(Intent.createChooser(send, "Share media"))
                                     }
                                 } catch (_: Exception) {
                                     shareError = "Sharing was cancelled or unavailable"

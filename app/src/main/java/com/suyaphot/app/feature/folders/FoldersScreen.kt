@@ -224,6 +224,7 @@ fun FoldersScreen(
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
+        container.sessionManager.endSystemActivity()
         val uris = pendingImportUris
         pendingImportUris = emptyList()
         if (!granted) folderActionStatus = "Location permission denied; GPS/original bytes may be redacted."
@@ -232,9 +233,11 @@ fun FoldersScreen(
     val pickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia()
     ) { uris ->
+        container.sessionManager.endSystemActivity()
         if (uris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             pendingImportUris = uris
+            container.sessionManager.beginSystemActivity()
             locationPermissionLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
         } else startImport(uris)
     }
@@ -627,6 +630,7 @@ fun FoldersScreen(
                             icon = Icons.Default.Add,
                             contentDescription = "Import media here",
                             onClick = {
+                                container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                                 )
@@ -695,6 +699,7 @@ fun FoldersScreen(
                     subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Import media or create subfolders inside.",
                     actionText = if (hiddenMode && currentParentId == null) null else "Import Photos & Videos",
                     onActionClick = {
+                        container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                         )
