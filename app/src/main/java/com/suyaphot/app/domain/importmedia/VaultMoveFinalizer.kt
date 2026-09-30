@@ -31,7 +31,17 @@ class VaultMoveFinalizer(
         val deletedCount: Int,
         val retainedCount: Int,
         val failedCount: Int
-    )
+    ) {
+        operator fun plus(other: Summary) = Summary(
+            deletedCount = deletedCount + other.deletedCount,
+            retainedCount = retainedCount + other.retainedCount,
+            failedCount = failedCount + other.failedCount
+        )
+
+        companion object {
+            val Empty = Summary(0, 0, 0)
+        }
+    }
 
     private data class SourceTarget(
         val result: ImportResult.Success,
@@ -44,7 +54,8 @@ class VaultMoveFinalizer(
             val intentSender: IntentSender,
             val mode: SourceDeletionCoordinator.DeleteConsentMode,
             val pending: List<ImportResult.Success>,
-            val alreadyDeletedCount: Int
+            val remaining: List<ImportResult.Success>,
+            val accumulated: Summary
         ) : Result
     }
 
@@ -113,8 +124,11 @@ class VaultMoveFinalizer(
         }
     }
 
-    suspend fun begin(successes: List<ImportResult.Success>): Result = withContext(Dispatchers.IO) {
-        if (successes.isEmpty()) return@withContext Result.Completed(Summary(0, 0, 0))
+    suspend fun begin(
+        successes: List<ImportResult.Success>,
+        accumulated: Summary = Summary.Empty
+    ): Result = withContext(Dispatchers.IO) {
+        if (successes.isEmpty()) return@withContext Result.Completed(accumulated)
         val vaultId = sessionManager.currentVaultId
             ?: return@withContext Result.Completed(Summary(0, successes.size, successes.size))
         val targets = resolveSourceTargets(successes)
@@ -126,7 +140,7 @@ class VaultMoveFinalizer(
                 mark(deleted, vaultId, SourceDisposition.DELETED, null)
                 val retainedCount = successes.size - deleted.size
                 Result.Completed(
-                    Summary(
+                    accumulated + Summary(
                         deletedCount = deleted.size,
                         retainedCount = retainedCount,
                         failedCount = retainedCount
@@ -138,11 +152,18 @@ class VaultMoveFinalizer(
                 val direct = outcome.deletedUris.mapNotNull { byUri[it]?.result }
                 mark(direct, vaultId, SourceDisposition.DELETED, null)
                 val pending = outcome.uris.mapNotNull { byUri[it]?.result }
+                val handledIds = (direct + pending).mapTo(mutableSetOf()) { it.jobId }
+                val remaining = successes.filter { it.jobId !in handledIds }
                 Result.RequiresConsent(
                     intentSender = outcome.intentSender,
                     mode = outcome.mode,
                     pending = pending,
-                    alreadyDeletedCount = direct.size
+                    remaining = remaining,
+                    accumulated = accumulated + Summary(
+                        deletedCount = direct.size,
+                        retainedCount = 0,
+                        failedCount = 0
+                    )
                 )
             }
 
@@ -157,7 +178,7 @@ class VaultMoveFinalizer(
                     "SOURCE_DELETE_FAILED_VAULT_SAFE"
                 )
                 Result.Completed(
-                    Summary(
+                    accumulated + Summary(
                         deletedCount = direct.size,
                         retainedCount = retained.size,
                         failedCount = retained.size
@@ -168,22 +189,35 @@ class VaultMoveFinalizer(
     }
 
     suspend fun completeConsent(
-        pending: List<ImportResult.Success>,
-        mode: SourceDeletionCoordinator.DeleteConsentMode,
+        request: Result.RequiresConsent,
         granted: Boolean
-    ): Summary = withContext(Dispatchers.IO) {
-        if (pending.isEmpty()) return@withContext Summary(0, 0, 0)
+    ): Result = withContext(Dispatchers.IO) {
         val vaultId = sessionManager.currentVaultId
-            ?: return@withContext Summary(0, pending.size, pending.size)
+            ?: return@withContext Result.Completed(
+                request.accumulated + Summary(
+                    deletedCount = 0,
+                    retainedCount = request.pending.size + request.remaining.size,
+                    failedCount = request.pending.size + request.remaining.size
+                )
+            )
 
         if (!granted) {
-            mark(pending, vaultId, SourceDisposition.RETAINED_BY_USER, null)
-            return@withContext Summary(0, pending.size, 0)
+            // A denial is interpreted as "keep the remaining public originals" for this
+            // batch rather than repeatedly presenting one API-29 consent dialog per item.
+            val keep = request.pending + request.remaining
+            mark(keep, vaultId, SourceDisposition.RETAINED_BY_USER, null)
+            return@withContext Result.Completed(
+                request.accumulated + Summary(
+                    deletedCount = 0,
+                    retainedCount = keep.size,
+                    failedCount = 0
+                )
+            )
         }
 
-        val targets = resolveSourceTargets(pending)
+        val targets = resolveSourceTargets(request.pending)
         val byUri = targets.associateBy { it.deleteUri }
-        val verified = sourceDeletionCoordinator.completeConsent(targets.map { it.deleteUri }, mode)
+        val verified = sourceDeletionCoordinator.completeConsent(targets.map { it.deleteUri }, request.mode)
         val deleted = verified.deletedUris.mapNotNull { byUri[it]?.result }
         val retained = verified.retainedUris.mapNotNull { byUri[it]?.result }
 
@@ -195,11 +229,17 @@ class VaultMoveFinalizer(
             "SOURCE_DELETE_FAILED_VAULT_SAFE"
         )
 
-        Summary(
+        val afterCurrent = request.accumulated + Summary(
             deletedCount = deleted.size,
             retainedCount = retained.size,
             failedCount = retained.size
         )
+
+        if (request.remaining.isEmpty()) {
+            Result.Completed(afterCurrent)
+        } else {
+            begin(request.remaining, afterCurrent)
+        }
     }
 
     private suspend fun mark(
