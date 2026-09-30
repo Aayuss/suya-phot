@@ -27,6 +27,72 @@ import java.security.MessageDigest
 @RunWith(AndroidJUnit4::class)
 class CredentialValidationTest {
     @Test
+    fun recoveryResetCannotShadowExistingSecondaryPin() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
+        val pepper = object : PepperProvider {
+            override fun hmacSha256(input: ByteArray): ByteArray =
+                MessageDigest.getInstance("SHA-256").digest(input)
+        }
+        val keys = KeyManager(context, pepper)
+        val vaultCrypto = VaultCrypto()
+        val preferences = SecurityPreferences(context)
+        val session = SessionManager(preferences, CoroutineScope(Dispatchers.Unconfined))
+        val realMaster = ByteArray(32) { 0x31 }
+        val secondaryMaster = ByteArray(32) { 0x41 }
+
+        try {
+            val recoveryCode = keys.generateRecoverySecret()
+            val normalizedRecovery = keys.normalizeRecoverySecret(recoveryCode)
+            val realPinEnvelope = keys.createPinEnvelope(realMaster, "123456".toCharArray(), 50_000)
+            val recoveryEnvelope = keys.createRecoveryEnvelope(realMaster, normalizedRecovery)
+            val secondaryEnvelope = keys.createPinEnvelope(secondaryMaster, "654321".toCharArray(), 50_000)
+
+            db.vaultDao().insert(
+                VaultEntity(
+                    id = "real-recovery-vault",
+                    kindCode = VaultKind.REAL.code,
+                    createdAt = 1,
+                    schemaVersion = 1,
+                    pinEnvelope = realPinEnvelope.serialize(),
+                    recoveryEnvelope = recoveryEnvelope.serialize(),
+                    credentialTypeCode = 0
+                )
+            )
+            db.vaultDao().insert(
+                VaultEntity(
+                    id = "secondary-recovery-vault",
+                    kindCode = VaultKind.SECONDARY.code,
+                    createdAt = 1,
+                    schemaVersion = 1,
+                    pinEnvelope = secondaryEnvelope.serialize(),
+                    credentialTypeCode = 0
+                )
+            )
+
+            val auth = PinAuthenticator(db.vaultDao(), keys, vaultCrypto, session, preferences)
+            assertFalse(
+                auth.recoverWithCode(
+                    recoveryCode,
+                    "654321".toCharArray(),
+                    0
+                )
+            )
+
+            val unchanged = KeyManager.PinEnvelope.deserialize(
+                db.vaultDao().getVault("real-recovery-vault")!!.pinEnvelope
+            )
+            val oldMaster = keys.unwrapPinEnvelope(unchanged, "123456".toCharArray())
+            assertTrue(oldMaster != null && oldMaster.contentEquals(realMaster))
+            oldMaster?.fill(0)
+        } finally {
+            realMaster.fill(0)
+            secondaryMaster.fill(0)
+            db.close()
+        }
+    }
+
+    @Test
     fun primaryPinCannotBeChangedToExistingSecondaryPin() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
