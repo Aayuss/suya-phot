@@ -327,10 +327,30 @@ class ImportCoordinator(
 
             val sha256Hex = bytesToHex(verifyResult.sha256)
 
-            // Section 16: Duplicate check (active items only)
+            // Section 16: Duplicate check (active items only).
+            // Never delete/retain a public source merely because a DB hash matches:
+            // first prove that the already-vaulted ciphertext is still a healthy,
+            // authenticated copy of the same plaintext.
             if (skipDuplicates) {
                 val existing = mediaItemDao.findBySha256(vaultId, sha256Hex)
-                if (existing != null) {
+                val existingIsHealthy = if (existing != null) {
+                    runCatching {
+                        val existingFile = fileStore.getMediaFile(vaultId, existing.id)
+                        val verifiedExisting = vaultCrypto.verifyAndHash(
+                            existingFile,
+                            session.mediaSubkey,
+                            existing.id
+                        )
+                        val existingHash = bytesToHex(verifiedExisting.sha256)
+                        verifiedExisting.plaintextSize == existing.plaintextSize &&
+                            existingHash.equals(existing.sha256Hex, ignoreCase = true) &&
+                            existingHash.equals(sha256Hex, ignoreCase = true)
+                    }.getOrDefault(false)
+                } else {
+                    false
+                }
+
+                if (existing != null && existingIsHealthy) {
                     partialFile.delete()
                     val nowDuplicate = System.currentTimeMillis()
                     if (mode == ImportMode.COPY) {
