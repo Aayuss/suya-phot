@@ -8,7 +8,6 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -248,7 +247,7 @@ fun FoldersScreen(
         startImport(uris)
     }
     val pickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia()
+        contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         container.sessionManager.endSystemActivity()
         if (uris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
@@ -790,9 +789,7 @@ fun FoldersScreen(
                             contentDescription = "Import media here",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
-                                pickerLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                                )
+                                pickerLauncher.launch(arrayOf("image/*", "video/*"))
                             }
                         )
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
@@ -859,9 +856,7 @@ fun FoldersScreen(
                     actionText = if (hiddenMode && currentParentId == null) null else "Move Photos & Videos",
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
-                        pickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                        )
+                        pickerLauncher.launch(arrayOf("image/*", "video/*"))
                     },
                     modifier = Modifier.weight(1f)
                 )
