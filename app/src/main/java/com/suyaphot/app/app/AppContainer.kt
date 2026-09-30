@@ -26,6 +26,7 @@ import com.suyaphot.app.domain.gallery.VaultSearchIndex
 import com.suyaphot.app.domain.importmedia.ImportCoordinator
 import com.suyaphot.app.domain.importmedia.ImportRecoveryManager
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
+import com.suyaphot.app.domain.importmedia.VaultMoveFinalizer
 import com.suyaphot.app.domain.restore.RestoreCoordinator
 import com.suyaphot.app.domain.restore.RestoreRecoveryManager
 import com.suyaphot.app.domain.backup.BackupVerifier
@@ -112,6 +113,14 @@ class AppContainer(val context: Context) {
 
     val sourceDeletionCoordinator: SourceDeletionCoordinator by lazy {
         SourceDeletionCoordinator(context)
+    }
+
+    val vaultMoveFinalizer: VaultMoveFinalizer by lazy {
+        VaultMoveFinalizer(
+            database = database,
+            sourceDeletionCoordinator = sourceDeletionCoordinator,
+            sessionManager = sessionManager
+        )
     }
 
     val restoreCoordinator: RestoreCoordinator by lazy {
