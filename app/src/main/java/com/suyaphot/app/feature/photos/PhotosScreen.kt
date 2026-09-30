@@ -7,6 +7,8 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.testTag
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -19,6 +21,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +37,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -61,6 +65,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -346,6 +351,38 @@ fun PhotosScreen(
         }
     }
     val isSearching = searchQuery.isNotBlank()
+    val photoGridState = rememberLazyGridState()
+    val dragHaptic = LocalHapticFeedback.current
+    var dragAnchorIndex by remember { mutableStateOf<Int?>(null) }
+
+    fun mediaIdAtGridIndex(index: Int): String? {
+        return if (isSearching) {
+            searchEntities.getOrNull(index)?.id
+        } else {
+            pagedEntities.peek(index)?.id
+        }
+    }
+
+    fun gridIndexAt(positionX: Float, positionY: Float): Int? {
+        return photoGridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+            val left = info.offset.x.toFloat()
+            val top = info.offset.y.toFloat()
+            val right = left + info.size.width
+            val bottom = top + info.size.height
+            positionX >= left && positionX < right && positionY >= top && positionY < bottom
+        }?.index
+    }
+
+    fun selectDragRange(currentIndex: Int) {
+        val anchor = dragAnchorIndex ?: return
+        val start = minOf(anchor, currentIndex)
+        val end = maxOf(anchor, currentIndex)
+        allMatchingIds = null
+        selectedMediaIds.clear()
+        for (index in start..end) {
+            mediaIdAtGridIndex(index)?.let { selectedMediaIds[it] = Unit }
+        }
+    }
 
     Box(
         modifier = modifier
@@ -637,10 +674,31 @@ fun PhotosScreen(
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
+                    state = photoGridState,
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .pointerInput(isSearching, searchEntities.size, pagedEntities.itemCount) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { position ->
+                                    val index = gridIndexAt(position.x, position.y)
+                                    if (index != null && mediaIdAtGridIndex(index) != null) {
+                                        dragAnchorIndex = index
+                                        dragHaptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        selectDragRange(index)
+                                    }
+                                },
+                                onDrag = { change, _ ->
+                                    gridIndexAt(change.position.x, change.position.y)
+                                        ?.let(::selectDragRange)
+                                },
+                                onDragEnd = { dragAnchorIndex = null },
+                                onDragCancel = { dragAnchorIndex = null }
+                            )
+                        }
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
