@@ -104,7 +104,8 @@ fun LockScreen(
         it.biometricEnvelope != null && it.biometricIv != null
     }
 
-    val isBiometricEnrolled = realVaultWithBiometric != null
+    val biometricEnabled by container.preferences.biometricOnLaunch.collectAsState(initial = true)
+    val isBiometricEnrolled = realVaultWithBiometric != null && biometricEnabled
 
     // Lockout countdown timer
     LaunchedEffect(lockoutTimestamp) {
@@ -168,12 +169,9 @@ fun LockScreen(
     }
 
     // Launch biometric on screen entry if enabled and available
-    LaunchedEffect(isBiometricEnrolled) {
-        if (isBiometricEnrolled && lockoutSecondsLeft <= 0) {
-            val autoPrompt = container.preferences.biometricOnLaunch.first()
-            if (autoPrompt) {
-                launchBiometricPrompt()
-            }
+    LaunchedEffect(isBiometricEnrolled, biometricEnabled) {
+        if (isBiometricEnrolled && biometricEnabled && lockoutSecondsLeft <= 0) {
+            launchBiometricPrompt()
         }
     }
 
