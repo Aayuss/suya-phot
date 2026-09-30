@@ -419,7 +419,7 @@ private fun PrivateTrashGate(container: AppContainer, vaultId: String, onBack: (
                         scope.launch {
                             if (container.pinAuthenticator.verifyCurrentBiometric(authorized)) {
                                 container.folderAccessManager.grantHidden(vaultId)
-                            } else error = "Fingerprint unavailable; use your vault credential"
+                            } else error = "Biometric unavailable; use your vault credential"
                         }
                     }
                 }
@@ -432,7 +432,7 @@ private fun PrivateTrashGate(container: AppContainer, vaultId: String, onBack: (
                     .build(),
                 BiometricPrompt.CryptoObject(cipher)
             )
-        } catch (_: Exception) { error = "Fingerprint unavailable; use your vault credential" }
+        } catch (_: Exception) { error = "Biometric unavailable; use your vault credential" }
     }
     Column(modifier = Modifier.fillMaxSize().background(SuyaColors.Background).padding(18.dp)) {
         SuyaTopBar("Private Trash", navigationIcon = Icons.AutoMirrored.Filled.ArrowBack, onNavigationClick = onBack)
