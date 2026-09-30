@@ -1,8 +1,14 @@
 package com.suyaphot.app.domain.importmedia
 
+import android.content.ContentUris
 import android.content.IntentSender
+import android.net.Uri
+import android.provider.MediaStore
+import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.database.SuyaDatabase
 import com.suyaphot.app.core.model.JobState
+import com.suyaphot.app.core.model.MediaType
+import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.domain.auth.SessionManager
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +31,11 @@ class VaultMoveFinalizer(
         val failedCount: Int
     )
 
+    private data class SourceTarget(
+        val result: ImportResult.Success,
+        val deleteUri: Uri
+    )
+
     sealed interface Result {
         data class Completed(val summary: Summary) : Result
         data class RequiresConsent(
@@ -35,22 +46,85 @@ class VaultMoveFinalizer(
         ) : Result
     }
 
+    /**
+     * Android Photo Picker URIs can be mediated/read-only URIs. Where import metadata gives
+     * us the original MediaStore volume + row id, reconstruct the canonical MediaStore URI
+     * for the delete request so a successful vault move actually removes the Gallery/Files
+     * source. Fall back to the picker URI when the provider does not expose canonical data.
+     */
+    private suspend fun resolveSourceTargets(
+        successes: List<ImportResult.Success>
+    ): List<SourceTarget> {
+        val lease = sessionManager.acquireOperationKeyLease()
+            ?: return successes.map { SourceTarget(it, it.uri) }
+
+        return try {
+            successes.map { success ->
+                val entity = database.mediaItemDao().getItemForVault(success.itemId, lease.vaultId)
+                val canonical = entity?.let { media ->
+                    val metadataBytes = runCatching {
+                        Aead.decryptWithPrependedNonce(
+                            lease.metaSubkey,
+                            media.encryptedMetadata,
+                            media.id.toByteArray(Charsets.UTF_8)
+                        )
+                    }.getOrNull()
+
+                    metadataBytes?.let { bytes ->
+                        try {
+                            val metadata = PrivateMediaMetadata.deserialize(bytes)
+                            val volume = metadata.sourceVolume
+                            val sourceId = metadata.sourceMediaStoreId
+                            if (!volume.isNullOrBlank() && sourceId != null && sourceId >= 0L) {
+                                val collection = if (media.mediaTypeCode == MediaType.VIDEO.code) {
+                                    MediaStore.Video.Media.getContentUri(volume)
+                                } else {
+                                    MediaStore.Images.Media.getContentUri(volume)
+                                }
+                                ContentUris.withAppendedId(collection, sourceId)
+                            } else {
+                                null
+                            }
+                        } catch (_: Exception) {
+                            null
+                        } finally {
+                            bytes.fill(0)
+                        }
+                    }
+                }
+
+                SourceTarget(success, canonical ?: success.uri)
+            }
+        } finally {
+            lease.close()
+        }
+    }
+
     suspend fun begin(successes: List<ImportResult.Success>): Result = withContext(Dispatchers.IO) {
         if (successes.isEmpty()) return@withContext Result.Completed(Summary(0, 0, 0))
         val vaultId = sessionManager.currentVaultId
             ?: return@withContext Result.Completed(Summary(0, successes.size, successes.size))
+        val targets = resolveSourceTargets(successes)
+        val byUri = targets.associateBy { it.deleteUri }
 
-        when (val outcome = sourceDeletionCoordinator.deleteSources(successes.map { it.uri })) {
+        when (val outcome = sourceDeletionCoordinator.deleteSources(targets.map { it.deleteUri })) {
             is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
-                val deleted = successes.filter { it.uri in outcome.deletedUris }
+                val deleted = outcome.deletedUris.mapNotNull { byUri[it]?.result }
                 mark(deleted, vaultId, SourceDisposition.DELETED, null)
-                Result.Completed(Summary(deleted.size, 0, 0))
+                val retainedCount = successes.size - deleted.size
+                Result.Completed(
+                    Summary(
+                        deletedCount = deleted.size,
+                        retainedCount = retainedCount,
+                        failedCount = retainedCount
+                    )
+                )
             }
 
             is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
-                val direct = successes.filter { it.uri in outcome.deletedUris }
+                val direct = outcome.deletedUris.mapNotNull { byUri[it]?.result }
                 mark(direct, vaultId, SourceDisposition.DELETED, null)
-                val pending = successes.filter { it.uri in outcome.uris }
+                val pending = outcome.uris.mapNotNull { byUri[it]?.result }
                 Result.RequiresConsent(
                     intentSender = outcome.intentSender,
                     mode = outcome.mode,
@@ -60,8 +134,8 @@ class VaultMoveFinalizer(
             }
 
             is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
-                val direct = successes.filter { it.uri in outcome.deletedUris }
-                val retained = successes.filter { it.uri in outcome.uris }
+                val direct = outcome.deletedUris.mapNotNull { byUri[it]?.result }
+                val retained = outcome.uris.mapNotNull { byUri[it]?.result }
                 mark(direct, vaultId, SourceDisposition.DELETED, null)
                 mark(
                     retained,
@@ -94,9 +168,11 @@ class VaultMoveFinalizer(
             return@withContext Summary(0, pending.size, 0)
         }
 
-        val verified = sourceDeletionCoordinator.completeConsent(pending.map { it.uri }, mode)
-        val deleted = pending.filter { it.uri in verified.deletedUris }
-        val retained = pending.filter { it.uri in verified.retainedUris }
+        val targets = resolveSourceTargets(pending)
+        val byUri = targets.associateBy { it.deleteUri }
+        val verified = sourceDeletionCoordinator.completeConsent(targets.map { it.deleteUri }, mode)
+        val deleted = verified.deletedUris.mapNotNull { byUri[it]?.result }
+        val retained = verified.retainedUris.mapNotNull { byUri[it]?.result }
 
         mark(deleted, vaultId, SourceDisposition.DELETED, null)
         mark(
