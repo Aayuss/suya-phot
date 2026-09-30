@@ -1,5 +1,13 @@
 package com.suyaphot.app.core.util
 
+import android.content.Context
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.UUID
+
 data class VaultArtifactCleanupResult(
     val mediaRemoved: Boolean,
     val thumbRemoved: Boolean,
@@ -8,14 +16,6 @@ data class VaultArtifactCleanupResult(
     val allRemoved: Boolean
         get() = mediaRemoved && thumbRemoved && previewRemoved
 }
-
-import android.content.Context
-import java.io.File
-import java.io.FileOutputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
-import java.util.UUID
 
 /**
  * Manages physical storage paths and atomic file operations in app-private storage.
