@@ -156,7 +156,7 @@ fun LockScreen(
                     }
 
                     override fun onAuthenticationFailed() {
-                        errorMessage = "Fingerprint not recognized"
+                        errorMessage = "Biometric not recognized"
                     }
                 }
             )
