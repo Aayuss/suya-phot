@@ -30,9 +30,10 @@ Optimized for the **Samsung Galaxy S23 Ultra** and modern Android devices (API 2
    - Operates as a distinct decoy session without UI leaks or cross-vault database references, hiding the real vault's existence during casual inspection.
 
 3. **Transactional Import & Restore Pipelines**:
-   - Share target: **"Move to Suya Phot"** (`ACTION_SEND` and `ACTION_SEND_MULTIPLE`) plus in-app photo picker.
-   - Crash-safe imports: verifies SHA-256 and GCM integrity before requesting deletion of public gallery originals; unfinished jobs are reconciled on startup via `ImportRecoveryManager`.
-   - Restores media to public MediaStore with a full SHA-256 recheck before any private vault copy is removed. Source deletion uses standard Android scoped-storage consent APIs.
+   - Both the share target **"Move to Suya Phot"** (`ACTION_SEND` / `ACTION_SEND_MULTIPLE`) and the in-app photo picker use safe MOVE semantics.
+   - Public originals are requested for deletion only after the encrypted vault copy is durably committed and cryptographically verified. Android scoped-storage consent is honored; if the user or provider refuses deletion, the public original is retained and Suya Phot reports that state rather than pretending the move completed.
+   - Crash-safe imports reconcile unfinished jobs on startup via `ImportRecoveryManager`.
+   - Restores media to public MediaStore with a full SHA-256 recheck before any private vault copy is removed.
 
 4. **Arbitrarily Nested Folders & Media Management**:
    - Multi-level folder hierarchy with media moves that do not re-encrypt files.
