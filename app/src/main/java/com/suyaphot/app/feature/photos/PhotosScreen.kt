@@ -120,6 +120,7 @@ fun PhotosScreen(
     var searchQuery by remember { mutableStateOf("") }
 
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
+    var dragSelectionBase by remember { mutableStateOf<Set<String>>(emptySet()) }
     var allMatchingIds by remember { mutableStateOf<Set<String>?>(null) }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() || allMatchingIds != null } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
@@ -650,16 +651,33 @@ fun PhotosScreen(
                     modifier = Modifier
                         .weight(1f)
                         .testTag("photos_grid")
-                        .longPressDragSelect(photoGridState) { anchor, current ->
-                            if (allMatchingIds != null) return@longPressDragSelect
-                            val from = minOf(anchor, current)
-                            val to = maxOf(anchor, current)
-                            for (index in from..to) {
-                                val id = if (isSearching) searchEntities.getOrNull(index)?.id
-                                else pagedEntities.peek(index)?.id ?: pagedEntities[index]?.id
-                                if (id != null) selectedMediaIds[id] = Unit
+                        .longPressDragSelect(
+                            gridState = photoGridState,
+                            onStart = {
+                                if (allMatchingIds == null) {
+                                    dragSelectionBase = selectedMediaIds.keys.toSet()
+                                }
+                            },
+                            onRange = { anchor, current ->
+                                if (allMatchingIds != null) return@longPressDragSelect
+                                selectedMediaIds.clear()
+                                dragSelectionBase.forEach { selectedMediaIds[it] = Unit }
+
+                                val from = minOf(anchor, current)
+                                val to = maxOf(anchor, current)
+                                for (index in from..to) {
+                                    val id = if (isSearching) {
+                                        searchEntities.getOrNull(index)?.id
+                                    } else {
+                                        pagedEntities.peek(index)?.id ?: pagedEntities[index]?.id
+                                    }
+                                    if (id != null) selectedMediaIds[id] = Unit
+                                }
+                            },
+                            onEnd = {
+                                dragSelectionBase = emptySet()
                             }
-                        }
+                        )
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
