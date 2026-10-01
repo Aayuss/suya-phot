@@ -71,10 +71,10 @@ fun SuyaBottomNav(
                 .height(50.dp)
         ) {
             val tabs = SuyaNavTab.entries
-            val slotWidth = maxWidth / tabs.size
+            val slotWidth = maxWidth / tabs.size.toFloat()
             val selectedIndex = tabs.indexOf(selectedTab).coerceAtLeast(0)
             val indicatorX by animateDpAsState(
-                targetValue = slotWidth * selectedIndex,
+                targetValue = slotWidth * selectedIndex.toFloat(),
                 animationSpec = spring(dampingRatio = 0.86f, stiffness = 520f),
                 label = "nav_indicator_x"
             )
