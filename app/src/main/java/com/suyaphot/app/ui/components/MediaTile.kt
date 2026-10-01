@@ -48,6 +48,7 @@ import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -72,7 +73,19 @@ fun MediaTile(
     var thumbnailBitmap by remember(item.id, item.updatedAt) { mutableStateOf<Bitmap?>(null) }
 
     LaunchedEffect(item.id, item.updatedAt) {
-        thumbnailBitmap = withContext(Dispatchers.IO) { thumbLoader(item.id) }
+        thumbnailBitmap = null
+        var loaded = withContext(Dispatchers.IO) { thumbLoader(item.id) }
+        // Derivatives are committed just before/around media publication. A tiny bounded
+        // retry avoids a permanent placeholder if the first frame races that commit.
+        if (loaded == null) {
+            delay(120)
+            loaded = withContext(Dispatchers.IO) { thumbLoader(item.id) }
+        }
+        if (loaded == null) {
+            delay(280)
+            loaded = withContext(Dispatchers.IO) { thumbLoader(item.id) }
+        }
+        thumbnailBitmap = loaded
     }
 
     Box(
