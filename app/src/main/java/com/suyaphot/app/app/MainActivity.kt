@@ -120,6 +120,7 @@ fun MainAppHost(container: AppContainer) {
         val s = sessionState
         if (s is VaultSession.Unlocked) {
             withContext(Dispatchers.IO) {
+                container.pendingShareManager.processPendingShares(s)
                 container.importRecoveryManager.reconcileActiveJobs(s)
                 container.restoreRecoveryManager.reconcile(s)
                 container.trashCoordinator.reconcilePending(s.vaultId)

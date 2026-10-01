@@ -32,12 +32,20 @@ import com.suyaphot.app.domain.backup.BackupVerifier
 import com.suyaphot.app.domain.backup.VaultBackupExporter
 import com.suyaphot.app.domain.backup.VaultBackupImporter
 import com.suyaphot.app.domain.trash.TrashCoordinator
+import com.suyaphot.app.domain.importmedia.PendingShareManager
+import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.feature.intruder.IntruderCaptureManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Lightweight, zero-overhead manual dependency container.
  */
 class AppContainer(val context: Context) {
+
+    val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     val database: SuyaDatabase by lazy { SuyaDatabase.create(context) }
     val preferences: SecurityPreferences by lazy { SecurityPreferences(context) }
@@ -174,5 +182,24 @@ class AppContainer(val context: Context) {
             sessionManager = sessionManager,
             accessManager = folderAccessManager
         )
+    }
+
+    val pendingShareManager: PendingShareManager by lazy {
+        PendingShareManager(
+            context = context,
+            metadataReader = metadataReader,
+            importCoordinator = importCoordinator,
+            sessionManager = sessionManager
+        )
+    }
+
+    init {
+        applicationScope.launch {
+            sessionManager.sessionState.collect { session ->
+                if (session is VaultSession.Unlocked) {
+                    pendingShareManager.processPendingShares(session)
+                }
+            }
+        }
     }
 }

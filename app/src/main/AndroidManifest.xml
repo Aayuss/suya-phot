@@ -45,14 +45,14 @@
             </intent-filter>
         </activity>
 
-        <!-- Share Receiver: Move to Suya Phot from Samsung Gallery or files -->
+        <!-- Share Receiver: Save to Suya Phot directly without UI -->
         <activity
             android:name=".feature.importmedia.ShareReceiverActivity"
             android:exported="true"
             android:label="@string/share_receiver_label"
-            android:theme="@style/Theme.SuyaPhot"
+            android:theme="@style/Theme.SuyaPhot.Translucent"
             android:excludeFromRecents="true"
-            android:windowSoftInputMode="adjustResize">
+            android:noHistory="true">
             <intent-filter android:label="@string/share_receiver_label">
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

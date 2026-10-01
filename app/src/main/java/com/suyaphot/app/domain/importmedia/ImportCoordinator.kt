@@ -295,6 +295,7 @@ class ImportCoordinator(
         folderId: String?,
         mode: ImportMode,
         skipDuplicates: Boolean = true,
+        overrideMetadata: PrivateMediaMetadata? = null,
         onProgress: ((bytes: Long, total: Long) -> Unit)? = null
     ): ImportResult = withContext(Dispatchers.IO) {
         if (sessionManager.sessionState.value !is VaultSession.Unlocked) {
@@ -359,7 +360,18 @@ class ImportCoordinator(
             // 1. Reading source metadata
             vaultJobDao.updateState(jobId, JobState.READING_SOURCE.code, System.currentTimeMillis())
             val resolvedSource = metadataReader.resolve(uri)
-            val sourceMeta = metadataReader.read(resolvedSource)
+            val sourceMeta = if (overrideMetadata != null) {
+                val isVideo = overrideMetadata.originalMimeType.startsWith("video/")
+                val type = if (isVideo) MediaType.VIDEO else MediaType.IMAGE
+                val size = if (uri.scheme == "file" && uri.path != null) {
+                    java.io.File(uri.path!!).length()
+                } else {
+                    runCatching { context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } }.getOrNull() ?: 0L
+                }
+                MetadataReader.ExtractedSourceMetadata(type, size, overrideMetadata)
+            } else {
+                metadataReader.read(resolvedSource)
+            }
             val deletionUri = if (mode == ImportMode.MOVE) {
                 canonicalDeletionUri(uri, sourceMeta.mediaType, sourceMeta.metadata, context)
             } else {
