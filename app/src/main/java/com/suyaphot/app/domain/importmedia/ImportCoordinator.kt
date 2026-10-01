@@ -196,9 +196,30 @@ internal fun canonicalDeletionUri(
     mediaType: MediaType,
     metadata: PrivateMediaMetadata
 ): Uri {
-    val id = metadata.sourceMediaStoreId ?: return fallback
-    val volume = metadata.sourceVolume?.takeIf { it.isNotBlank() } ?: return fallback
+    // Photo Picker grants a read-only wrapper URI. AOSP local picker URIs encode
+    // the underlying local MediaStore row ID in their final path segment:
+    // content://media/picker/<user>/<local-provider>/media/<local-id>.
+    // Use that only for the known local picker provider; never reinterpret cloud
+    // provider IDs as local MediaStore rows.
+    val segments = fallback.pathSegments
+    val isLocalPhotoPickerUri =
+        fallback.authority == MediaStore.AUTHORITY &&
+            segments.size >= 5 &&
+            (segments[0] == "picker" || segments[0] == "picker_get_content") &&
+            segments[2] == "com.android.providers.media.photopicker" &&
+            segments[3] == "media"
+
+    val pickerLocalId = if (isLocalPhotoPickerUri) {
+        segments.lastOrNull()?.toLongOrNull()
+    } else {
+        null
+    }
+
+    val id = metadata.sourceMediaStoreId ?: pickerLocalId ?: return fallback
     if (id < 0L) return fallback
+
+    val volume = metadata.sourceVolume?.takeIf { it.isNotBlank() }
+        ?: if (pickerLocalId != null) MediaStore.VOLUME_EXTERNAL_PRIMARY else return fallback
 
     return runCatching {
         val collection = when (mediaType) {
