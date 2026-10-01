@@ -438,7 +438,7 @@ class RestoreDatePreservationTest {
 
         // Insert dummy image with 'Suya Phot Restored' as relative path to verify it gets sanitized to DCIM/Camera/
         val initialValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, "test_fallback_photo.jpg")
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "test_fallback_photo_unique.jpg")
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
             put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Suya Phot Restored/")
             put(MediaStore.MediaColumns.IS_PENDING, 1)
@@ -448,7 +448,9 @@ class RestoreDatePreservationTest {
         assertNotNull("Failed to insert source media", sourceUri)
 
         try {
-            val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+            val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888).apply {
+                eraseColor(android.graphics.Color.BLUE)
+            }
             resolver.openFileDescriptor(sourceUri!!, "w")?.use { pfd ->
                 FileOutputStream(pfd.fileDescriptor).use { out ->
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
