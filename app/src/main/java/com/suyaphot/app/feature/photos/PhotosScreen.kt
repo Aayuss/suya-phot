@@ -273,6 +273,10 @@ fun PhotosScreen(
             vaultId = vaultId,
             typeCode = JobType.IMPORT.code,
             dispositionCodes = listOf(
+                // NOT_APPLICABLE covers legacy in-app COPY imports from builds before
+                // the vault switched to MOVE-by-default. Surface them once so existing
+                // test/user media can be converted safely rather than staying public.
+                SourceDisposition.NOT_APPLICABLE.code,
                 SourceDisposition.RETAINED_AFTER_INTERRUPTION.code,
                 SourceDisposition.DELETE_FAILED.code
             )
@@ -480,7 +484,7 @@ fun PhotosScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "The encrypted copy is safe in Suya Phot, but the original still remains in Gallery.",
+                            text = "The encrypted copy is safe in Suya Phot. A public original may still remain; Finish Moving verifies/removes it, or Keep Original leaves it public.",
                             fontFamily = SoraFontFamily,
                             fontSize = 13.sp,
                             color = SuyaColors.TextMuted,
