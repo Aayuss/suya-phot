@@ -36,6 +36,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -109,6 +110,7 @@ import com.suyaphot.app.ui.components.SuyaDialog
 import com.suyaphot.app.ui.components.SuyaIconButton
 import com.suyaphot.app.ui.components.SuyaTextField
 import com.suyaphot.app.ui.components.SuyaTopBar
+import com.suyaphot.app.ui.components.longPressDragSelect
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
 import androidx.paging.LoadState
@@ -192,6 +194,8 @@ fun FoldersScreen(
 
     // Media Multi-selection in current folder
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
+    val folderGridState = rememberLazyGridState()
+    var dragSelectionBase by remember { mutableStateOf<Set<String>>(emptySet()) }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     val retentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
@@ -765,12 +769,56 @@ fun FoldersScreen(
                     modifier = Modifier.weight(1f)
                 )
             } else {
+                // LazyGrid indices include the optional FOLDERS header/folder rows and
+                // the MEDIA header. Translate drag indices back to Paging indices so
+                // long-press drag selection behaves exactly like the main Photos grid.
+                val mediaGridStartIndex =
+                    (if (folders.isNotEmpty()) folders.size + 1 else 0) +
+                        (if (pagedMedia.itemCount > 0) 1 else 0)
+
                 LazyVerticalGrid(
+                    state = folderGridState,
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1f).testTag("folder_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("folder_grid")
+                        .longPressDragSelect(
+                            gridState = folderGridState,
+                            enabled = pagedMedia.itemCount > 0,
+                            onStart = { anchor ->
+                                val mediaIndex = anchor - mediaGridStartIndex
+                                dragSelectionBase = if (mediaIndex in 0 until pagedMedia.itemCount) {
+                                    selectedMediaIds.keys.toSet()
+                                } else {
+                                    emptySet()
+                                }
+                            },
+                            onRange = { anchor, current ->
+                                val anchorMediaIndex = anchor - mediaGridStartIndex
+                                val currentMediaIndex = current - mediaGridStartIndex
+                                if (anchorMediaIndex !in 0 until pagedMedia.itemCount ||
+                                    currentMediaIndex !in 0 until pagedMedia.itemCount
+                                ) {
+                                    return@longPressDragSelect
+                                }
+
+                                selectedMediaIds.clear()
+                                dragSelectionBase.forEach { selectedMediaIds[it] = Unit }
+
+                                val from = minOf(anchorMediaIndex, currentMediaIndex)
+                                val to = maxOf(anchorMediaIndex, currentMediaIndex)
+                                for (index in from..to) {
+                                    val id = pagedMedia.peek(index)?.id ?: pagedMedia[index]?.id
+                                    if (id != null) selectedMediaIds[id] = Unit
+                                }
+                            },
+                            onEnd = {
+                                dragSelectionBase = emptySet()
+                            }
+                        )
                 ) {
                     // Child Folders section
                     if (folders.isNotEmpty()) {

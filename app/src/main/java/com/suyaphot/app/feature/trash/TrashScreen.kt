@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.compose.material.icons.Icons
@@ -62,6 +63,7 @@ import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
 import com.suyaphot.app.ui.components.SuyaIconButton
 import com.suyaphot.app.ui.components.SuyaTopBar
+import com.suyaphot.app.ui.components.longPressDragSelect
 import com.suyaphot.app.ui.theme.SuyaColors
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
@@ -116,6 +118,8 @@ fun TrashScreen(
     }
 
     val selectedIds = remember { mutableStateMapOf<String, Unit>() }
+    val trashGridState = rememberLazyGridState()
+    var dragSelectionBase by remember { mutableStateOf<Set<String>>(emptySet()) }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     var showEmptyTrashDialog by remember { mutableStateOf(false) }
     var showDeleteSelectedDialog by remember { mutableStateOf(false) }
@@ -212,11 +216,39 @@ fun TrashScreen(
                 )
             } else {
                 LazyVerticalGrid(
+                    state = trashGridState,
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(2.dp),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .longPressDragSelect(
+                            gridState = trashGridState,
+                            onStart = {
+                                dragSelectionBase = selectedIds.keys.toSet()
+                            },
+                            onRange = { anchor, current ->
+                                if (anchor !in 0 until pagedEntities.itemCount ||
+                                    current !in 0 until pagedEntities.itemCount
+                                ) {
+                                    return@longPressDragSelect
+                                }
+
+                                selectedIds.clear()
+                                dragSelectionBase.forEach { selectedIds[it] = Unit }
+
+                                val from = minOf(anchor, current)
+                                val to = maxOf(anchor, current)
+                                for (index in from..to) {
+                                    val id = pagedEntities.peek(index)?.id ?: pagedEntities[index]?.id
+                                    if (id != null) selectedIds[id] = Unit
+                                }
+                            },
+                            onEnd = {
+                                dragSelectionBase = emptySet()
+                            }
+                        )
                 ) {
                     items(count = pagedEntities.itemCount,
                         key = { index -> pagedEntities.peek(index)?.id ?: "placeholder_$index" }) { index ->
