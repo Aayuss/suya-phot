@@ -56,4 +56,18 @@ class SourceDeletionConsentTest {
         assertEquals(listOf(uri, third), result.deletedUris)
         assertEquals(listOf(second), result.retainedUris)
     }
+
+    @Test fun directDeleteTreatsAlreadyAbsentSourceAsCompleted() {
+        var calls = 0
+        val coordinator = SourceDeletionCoordinator(
+            context,
+            deleteUri = { calls++; 0 },
+            probeAbsent = { true }
+        )
+        val result = coordinator.deleteSources(listOf(uri))
+        assertEquals(1, calls)
+        val completed = result as SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly
+        assertEquals(listOf(uri), completed.deletedUris)
+    }
+
 }
