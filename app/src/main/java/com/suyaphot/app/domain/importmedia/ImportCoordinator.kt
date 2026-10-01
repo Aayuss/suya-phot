@@ -1,7 +1,9 @@
 package com.suyaphot.app.domain.importmedia
 
+import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
+import android.provider.MediaStore
 import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.VaultCrypto
@@ -16,6 +18,7 @@ import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.JobType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.core.model.MediaType
+import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
@@ -151,7 +154,14 @@ sealed interface ImportResult {
     data class Success(
         val jobId: String,
         val itemId: String,
+        /** URI used to read the source during import. */
         val uri: Uri,
+        /**
+         * Canonical MediaStore URI used for MOVE deletion when it can be resolved.
+         * Android Photo Picker URIs are intentionally read-only and cannot reliably
+         * be passed to MediaStore.createDeleteRequest().
+         */
+        val deletionUri: Uri = uri,
         val sha256Hex: String,
         val alreadyExisted: Boolean = false,
         val mode: ImportMode = ImportMode.COPY
@@ -174,6 +184,29 @@ enum class ImportErrorCode {
     DATABASE_FAILED,
     CANCELLED,
     UNKNOWN
+}
+
+/**
+ * Photo Picker URIs are mediated read-only handles. When the provider exposes the
+ * original MediaStore volume + row ID, reconstruct the canonical item URI so MOVE
+ * can request deletion consent against the real public media row.
+ */
+internal fun canonicalDeletionUri(
+    fallback: Uri,
+    mediaType: MediaType,
+    metadata: PrivateMediaMetadata
+): Uri {
+    val id = metadata.sourceMediaStoreId ?: return fallback
+    val volume = metadata.sourceVolume?.takeIf { it.isNotBlank() } ?: return fallback
+    if (id < 0L) return fallback
+
+    return runCatching {
+        val collection = when (mediaType) {
+            MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume)
+            MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume)
+        }
+        ContentUris.withAppendedId(collection, id)
+    }.getOrDefault(fallback)
 }
 
 /**
@@ -265,6 +298,11 @@ class ImportCoordinator(
             vaultJobDao.updateState(jobId, JobState.READING_SOURCE.code, System.currentTimeMillis())
             val resolvedSource = metadataReader.resolve(uri)
             val sourceMeta = metadataReader.read(resolvedSource)
+            val deletionUri = if (mode == ImportMode.MOVE) {
+                canonicalDeletionUri(uri, sourceMeta.mediaType, sourceMeta.metadata)
+            } else {
+                uri
+            }
 
             // 2. Encrypting stream to .partial file
             vaultJobDao.updateState(jobId, JobState.ENCRYPTING.code, System.currentTimeMillis())
@@ -324,6 +362,7 @@ class ImportCoordinator(
                         jobId = jobId,
                         itemId = existing.id,
                         uri = uri,
+                        deletionUri = deletionUri,
                         sha256Hex = sha256Hex,
                         alreadyExisted = true,
                         mode = mode
@@ -383,7 +422,7 @@ class ImportCoordinator(
             // 7. Transactional DB commit (Section 15)
             val now = System.currentTimeMillis()
             val stagedRaw = ImportJobPayload(
-                sourceUri = uri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
+                sourceUri = deletionUri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
                 stagedMedia = ImportJobPayload.StagedMedia(
                     mediaTypeCode = sourceMeta.mediaType.code,
                     plaintextSize = verifyResult.plaintextSize,
@@ -449,6 +488,7 @@ class ImportCoordinator(
                 jobId = jobId,
                 itemId = itemId,
                 uri = uri,
+                deletionUri = deletionUri,
                 sha256Hex = sha256Hex,
                 mode = mode
             )
