@@ -332,9 +332,7 @@ class FolderManager(
         val source = if (hiddenMode && parentId == null) {
             folderDao.getHiddenRoots(session.vaultId)
         } else if (hiddenMode) {
-            folderDao.getAllSubFolders(session.vaultId, parentId).map { folders ->
-                folders.map { com.suyaphot.app.core.database.dao.FolderWithCount(it, 0) }
-            }
+            folderDao.getAllSubFoldersWithCount(session.vaultId, parentId)
         } else {
             folderDao.getSubFoldersWithCount(session.vaultId, parentId)
         }
