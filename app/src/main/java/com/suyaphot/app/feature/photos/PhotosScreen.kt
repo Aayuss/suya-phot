@@ -140,6 +140,130 @@ fun PhotosScreen(
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+
+    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
+    var pendingMoveConsentItems by remember { mutableStateOf<List<ImportResult.Success>>(emptyList()) }
+
+    val moveConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val mode = pendingMoveConsentMode
+        val items = pendingMoveConsentItems
+        pendingMoveConsentMode = null
+        pendingMoveConsentItems = emptyList()
+
+        if (items.isEmpty()) return@rememberLauncherForActivityResult
+
+        if (result.resultCode == android.app.Activity.RESULT_OK && mode != null) {
+            scope.launch(Dispatchers.IO) {
+                val verified = container.sourceDeletionCoordinator.completeConsent(items.map { it.uri }, mode)
+                val now = System.currentTimeMillis()
+                items.forEach { imported ->
+                    val deleted = imported.uri in verified.deletedUris
+                    container.database.vaultJobDao().updateTerminalImportState(
+                        id = imported.jobId,
+                        vaultId = vaultId,
+                        stateCode = JobState.COMPLETED.code,
+                        sourceDispositionCode = if (deleted) SourceDisposition.DELETED.code else SourceDisposition.DELETE_FAILED.code,
+                        errorCode = if (deleted) null else "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                        now = now
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    statusMessage = if (verified.retainedUris.isEmpty()) {
+                        "Moved to Suya Phot. Originals removed from Gallery."
+                    } else {
+                        "Vault copies are safe, but Android could not remove some originals."
+                    }
+                }
+            }
+        } else {
+            scope.launch(Dispatchers.IO) {
+                val now = System.currentTimeMillis()
+                items.forEach { imported ->
+                    container.database.vaultJobDao().updateTerminalImportState(
+                        id = imported.jobId,
+                        vaultId = vaultId,
+                        stateCode = JobState.COMPLETED.code,
+                        sourceDispositionCode = SourceDisposition.RETAINED_BY_USER.code,
+                        errorCode = null,
+                        now = now
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    statusMessage = "Vault copies are safe. Originals were kept because deletion was not approved."
+                }
+            }
+        }
+    }
+
+    fun finishMoveDeletion(items: List<ImportResult.Success>) {
+        if (items.isEmpty()) return
+        scope.launch(Dispatchers.IO) {
+            when (val outcome = container.sourceDeletionCoordinator.deleteSources(items.map { it.uri })) {
+                is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
+                    val now = System.currentTimeMillis()
+                    items.forEach { imported ->
+                        val deleted = imported.uri in outcome.deletedUris
+                        container.database.vaultJobDao().updateTerminalImportState(
+                            id = imported.jobId,
+                            vaultId = vaultId,
+                            stateCode = JobState.COMPLETED.code,
+                            sourceDispositionCode = if (deleted) SourceDisposition.DELETED.code else SourceDisposition.DELETE_FAILED.code,
+                            errorCode = if (deleted) null else "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                            now = now
+                        )
+                    }
+                    withContext(Dispatchers.Main) {
+                        statusMessage = "Moved to Suya Phot. Originals removed from Gallery."
+                    }
+                }
+                is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
+                    val now = System.currentTimeMillis()
+                    val alreadyDeleted = outcome.deletedUris.toSet()
+                    items.filter { it.uri in alreadyDeleted }.forEach { imported ->
+                        container.database.vaultJobDao().updateTerminalImportState(
+                            id = imported.jobId,
+                            vaultId = vaultId,
+                            stateCode = JobState.COMPLETED.code,
+                            sourceDispositionCode = SourceDisposition.DELETED.code,
+                            errorCode = null,
+                            now = now
+                        )
+                    }
+                    val remaining = items.filter { it.uri in outcome.uris }
+                    withContext(Dispatchers.Main) {
+                        pendingMoveConsentItems = remaining
+                        pendingMoveConsentMode = outcome.mode
+                        container.sessionManager.beginSystemActivity()
+                        moveConsentLauncher.launch(
+                            IntentSenderRequest.Builder(outcome.intentSender).build()
+                        )
+                    }
+                }
+                is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
+                    val now = System.currentTimeMillis()
+                    val deleted = outcome.deletedUris.toSet()
+                    items.forEach { imported ->
+                        val removed = imported.uri in deleted
+                        container.database.vaultJobDao().updateTerminalImportState(
+                            id = imported.jobId,
+                            vaultId = vaultId,
+                            stateCode = JobState.COMPLETED.code,
+                            sourceDispositionCode = if (removed) SourceDisposition.DELETED.code else SourceDisposition.DELETE_FAILED.code,
+                            errorCode = if (removed) null else "SOURCE_DELETE_FAILED_VAULT_SAFE",
+                            now = now
+                        )
+                    }
+                    withContext(Dispatchers.Main) {
+                        statusMessage = "Vault copies are safe, but Android could not remove some originals."
+                    }
+                }
+            }
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -147,7 +271,7 @@ fun PhotosScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
                         scope.launch { importProgressText = "Importing $current of $total items..." }
                     }
@@ -157,7 +281,9 @@ fun PhotosScreen(
                 val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
                 val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+                val moved = results.filterIsInstance<ImportResult.Success>()
+                statusMessage = "$imported secured, $duplicate duplicates, $failed failed. Removing originals…"
+                finishMoveDeletion(moved)
             }
         }
     }
