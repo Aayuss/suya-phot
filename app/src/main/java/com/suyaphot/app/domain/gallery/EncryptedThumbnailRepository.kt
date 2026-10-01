@@ -107,69 +107,60 @@ class EncryptedThumbnailRepository(
                     if (!source.exists()) return@withPermit null
 
                     var metadata: PrivateMediaMetadata? = null
-                val metadataPlain = runCatching {
-                    Aead.decryptWithPrependedNonce(
-                        lease.metaSubkey,
-                        entity.encryptedMetadata,
-                        mediaId.toByteArray(Charsets.UTF_8)
-                    )
-                }.getOrNull()
-                if (metadataPlain != null) {
-                    try {
-                        metadata = runCatching { PrivateMediaMetadata.deserialize(metadataPlain) }.getOrNull()
-                    } finally {
-                        metadataPlain.fill(0)
-                    }
-                }
-
-                val extension = metadata?.originalFileExtension?.let { ".$it" }
-                    ?: if (entity.mediaTypeCode == MediaType.VIDEO.code) ".mp4" else ".jpg"
-                val temp = fileStore.createViewerTempFile(mediaId, extension)
-                try {
-                    val verified = vaultCrypto.decryptVerifiedToFile(
-                        source,
-                        lease.mediaSubkey,
-                        mediaId,
-                        temp
-                    )
-                    if (verified.plaintextSize != entity.plaintextSize ||
-                        !sha256Hex(verified.sha256).equals(entity.sha256Hex, ignoreCase = true)
-                    ) {
-                        return@withContext null
-                    }
-
-                    val thumbFile = fileStore.getThumbFile(vaultId, mediaId)
-                    // A failed decrypt means this replaceable derivative is corrupt/stale.
-                    runCatching { thumbFile.delete() }
-                    val generated = if (entity.mediaTypeCode == MediaType.VIDEO.code) {
-                        generator.generateAndEncryptVideoThumbnail(
-                            Uri.fromFile(temp),
-                            mediaId,
-                            lease.thumbSubkey,
-                            thumbFile
+                    val metadataPlain = runCatching {
+                        Aead.decryptWithPrependedNonce(
+                            lease.metaSubkey,
+                            entity.encryptedMetadata,
+                            mediaId.toByteArray(Charsets.UTF_8)
                         )
-                    } else {
-                        generator.generateAndEncryptImageThumbnail(
+                    }.getOrNull()
+                    if (metadataPlain != null) {
+                        try {
+                            metadata = runCatching {
+                                PrivateMediaMetadata.deserialize(metadataPlain)
+                            }.getOrNull()
+                        } finally {
+                            metadataPlain.fill(0)
+                        }
+                    }
+
+                    val extension = metadata?.originalFileExtension?.let { ".$it" } ?: ".jpg"
+                    val temp = fileStore.createViewerTempFile(mediaId, extension)
+                    try {
+                        val verified = vaultCrypto.decryptVerifiedToFile(
+                            source,
+                            lease.mediaSubkey,
+                            mediaId,
+                            temp
+                        )
+                        val digestMatches = sha256Hex(verified.sha256)
+                            .equals(entity.sha256Hex, ignoreCase = true)
+                        verified.sha256.fill(0)
+                        if (verified.plaintextSize != entity.plaintextSize || !digestMatches) {
+                            return@withPermit null
+                        }
+
+                        val thumbFile = fileStore.getThumbFile(vaultId, mediaId)
+                        // A failed decrypt means this replaceable derivative is corrupt/stale.
+                        runCatching { thumbFile.delete() }
+                        val generated = generator.generateAndEncryptImageThumbnail(
                             Uri.fromFile(temp),
                             mediaId,
                             lease.thumbSubkey,
                             thumbFile,
                             metadata?.orientation ?: 0
                         )
-                    }
-                    if (generated) {
-                        bitmap = generator.decryptThumbnail(thumbFile, lease.thumbSubkey, mediaId)
-                    }
+                        if (!generated) return@withPermit null
+
+                        generator.decryptThumbnail(
+                            thumbFile,
+                            lease.thumbSubkey,
+                            mediaId
+                        )
                     } finally {
                         runCatching { temp.delete() }
                     }
-
-                    generator.decryptThumbnail(
-                        fileStore.getThumbFile(vaultId, mediaId),
-                        lease.thumbSubkey,
-                        mediaId
-                    )
-                }
+                }}
             }
 
             val loaded = bitmap ?: return@withContext null
