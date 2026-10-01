@@ -545,7 +545,7 @@ class ImportCoordinator(
                 favorite = false,
                 deletedAt = null,
                 previousFolderId = null,
-                dateTakenMs = sourceMeta.metadata.dateTakenMs,
+                dateTakenMs = sourceMeta.metadata.effectiveDateTakenMs.takeIf { it > 0L } ?: now,
                 encryptedPreviewRelativePath = previewFile.name.takeIf { previewFile.exists() },
                 concealed = targetFolder?.let { it.effectiveHidden || it.effectiveProtected } ?: false
             )

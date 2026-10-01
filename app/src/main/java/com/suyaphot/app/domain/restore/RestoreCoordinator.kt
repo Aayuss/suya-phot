@@ -146,18 +146,29 @@ class RestoreCoordinator(
             collectionUri = collectionUri
         )
 
+        val targetDateTakenMs = metadata.dateTakenMs
+            ?: item.dateTakenMs
+            ?: metadata.dateModifiedMs
+            ?: metadata.additional["dateAddedSec"]?.toLongOrNull()?.times(1000L)
+            ?: System.currentTimeMillis()
+
+        val targetDateModifiedMs = metadata.dateModifiedMs
+            ?: metadata.dateTakenMs
+            ?: item.dateTakenMs
+            ?: metadata.additional["dateAddedSec"]?.toLongOrNull()?.times(1000L)
+            ?: System.currentTimeMillis()
+
+        val targetDateAddedSec = metadata.additional["dateAddedSec"]?.toLongOrNull()
+            ?: (targetDateTakenMs / 1000L)
+
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, safeDisplayName)
             put(MediaStore.MediaColumns.MIME_TYPE, safeMimeType)
             put(MediaStore.MediaColumns.RELATIVE_PATH, restoreRelPath)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
-            metadata.dateTakenMs?.let {
-                if (isVideo) {
-                    put(MediaStore.Video.Media.DATE_TAKEN, it)
-                } else {
-                    put(MediaStore.Images.Media.DATE_TAKEN, it)
-                }
-            }
+            put(MediaStore.MediaColumns.DATE_TAKEN, targetDateTakenMs)
+            put(MediaStore.MediaColumns.DATE_ADDED, targetDateAddedSec)
+            put(MediaStore.MediaColumns.DATE_MODIFIED, targetDateModifiedMs / 1000L)
         }
 
         val resolver = context.contentResolver
@@ -209,6 +220,21 @@ class RestoreCoordinator(
                 }
             }
 
+            // Set file last-modified timestamp while pending
+            runCatching {
+                resolver.query(insertedUri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val pathCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                        if (pathCol != -1 && !cursor.isNull(pathCol)) {
+                            val path = cursor.getString(pathCol)
+                            if (!path.isNullOrBlank()) {
+                                java.io.File(path).setLastModified(targetDateModifiedMs)
+                            }
+                        }
+                    }
+                }
+            }
+
             // 3. Verify integrity
             val restoredSha256Hex = bytesToHex(verify.sha256)
             check(restoredSha256Hex.equals(item.sha256Hex, ignoreCase = true)) {
@@ -219,9 +245,34 @@ class RestoreCoordinator(
             // 4. Publish to MediaStore (IS_PENDING = 0) & verify publish succeeded (Section 20)
             val publishValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.IS_PENDING, 0)
+                put(MediaStore.MediaColumns.DATE_TAKEN, targetDateTakenMs)
+                put(MediaStore.MediaColumns.DATE_ADDED, targetDateAddedSec)
+                put(MediaStore.MediaColumns.DATE_MODIFIED, targetDateModifiedMs / 1000L)
             }
             val updatedRows = resolver.update(insertedUri, publishValues, null, null)
             check(updatedRows == 1) { "Failed to publish restored MediaStore item: update returned $updatedRows" }
+
+            // Ensure MediaScanner does not wipe original dates post-publish
+            val postPublishValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DATE_TAKEN, targetDateTakenMs)
+                put(MediaStore.MediaColumns.DATE_ADDED, targetDateAddedSec)
+                put(MediaStore.MediaColumns.DATE_MODIFIED, targetDateModifiedMs / 1000L)
+            }
+            runCatching { resolver.update(insertedUri, postPublishValues, null, null) }
+            runCatching {
+                resolver.query(insertedUri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val pathCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                        if (pathCol != -1 && !cursor.isNull(pathCol)) {
+                            val path = cursor.getString(pathCol)
+                            if (!path.isNullOrBlank()) {
+                                java.io.File(path).setLastModified(targetDateModifiedMs)
+                            }
+                        }
+                    }
+                }
+            }
+
             publicPublished = true
             database.restoreJobDao().updatePhase(jobId, RestorePhase.PUBLIC_PUBLISHED.code, null, System.currentTimeMillis())
 

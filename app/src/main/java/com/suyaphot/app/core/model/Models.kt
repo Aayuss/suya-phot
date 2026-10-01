@@ -93,6 +93,23 @@ data class PrivateMediaMetadata(
     val originalFileExtension: String?,
     val additional: Map<String, String> = emptyMap()
 ) {
+    val dateAddedSec: Long?
+        get() = additional["dateAddedSec"]?.toLongOrNull()
+            ?: dateModifiedMs?.div(1000L)
+            ?: dateTakenMs?.div(1000L)
+
+    val effectiveDateTakenMs: Long
+        get() = dateTakenMs
+            ?: dateModifiedMs
+            ?: (additional["dateAddedSec"]?.toLongOrNull()?.times(1000L))
+            ?: 0L
+
+    val effectiveDateModifiedMs: Long
+        get() = dateModifiedMs
+            ?: dateTakenMs
+            ?: (additional["dateAddedSec"]?.toLongOrNull()?.times(1000L))
+            ?: 0L
+
     fun serialize(): ByteArray {
         val baos = ByteArrayOutputStream()
         DataOutputStream(baos).use { out ->

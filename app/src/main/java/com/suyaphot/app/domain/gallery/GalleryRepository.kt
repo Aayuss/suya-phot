@@ -28,7 +28,7 @@ class GalleryRepository(private val dao: MediaItemDao, private val access: Folde
             return@flow
         }
         val sql = "SELECT * FROM media_items WHERE vaultId = ? AND folderId IS ? AND deletedAt IS NULL " +
-            "AND (? IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC, id DESC"
+            "AND (? IS NOT NULL OR concealed = 0) ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC"
         emitAll(Pager(pagingConfig) {
             dao.pagingSource(SimpleSQLiteQuery(sql, arrayOf(vaultId, folderId, folderId)))
         }.flow)

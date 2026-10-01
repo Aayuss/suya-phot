@@ -221,7 +221,7 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND id IN (:ids)")
     suspend fun getItemsByIdsForVault(vaultId: String, ids: List<String>): List<MediaItemEntity>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC")
     fun getAllActive(vaultId: String): Flow<List<MediaItemEntity>>
 
     @Query("SELECT COUNT(*) FROM media_items WHERE vaultId = :vaultId")
@@ -232,10 +232,10 @@ interface MediaItemDao {
             OR (:filterCode = 2 AND mediaTypeCode = 1) OR (:filterCode = 3 AND favorite = 1))""")
     suspend fun getAllVisibleIdsForFilter(vaultId: String, filterCode: Int): List<String>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC")
     suspend fun getAllActiveOnce(vaultId: String): List<MediaItemEntity>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC LIMIT :limit OFFSET :offset")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0 ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC LIMIT :limit OFFSET :offset")
     suspend fun getSearchBatch(vaultId: String, limit: Int, offset: Int): List<MediaItemEntity>
 
     @Query("SELECT id, mediaTypeCode, favorite, importedAt, dateTakenMs, plaintextSize FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NULL AND concealed = 0")
@@ -255,25 +255,25 @@ interface MediaItemDao {
             OR (:filterCode = 2 AND mediaTypeCode = 1) OR (:filterCode = 3 AND favorite = 1))""")
     suspend fun getVisibleIdsAmong(vaultId: String, candidateIds: List<String>, filterCode: Int): List<String>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC, id DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC")
     fun getByFolderPrivileged(vaultId: String, folderId: String?): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC, id DESC")
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC")
     suspend fun getAllIdsInFolder(vaultId: String, folderId: String?): List<String>
 
-    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY importedAt DESC, id DESC LIMIT :limit OFFSET :offset")
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0) ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC LIMIT :limit OFFSET :offset")
     suspend fun getPagedIdsInFolder(vaultId: String, folderId: String?, limit: Int, offset: Int): List<String>
 
     @Query("SELECT COUNT(*) FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL AND (:folderId IS NOT NULL OR concealed = 0)")
     suspend fun countAuthorizedInFolder(vaultId: String, folderId: String?): Int
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND favorite = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND favorite = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC")
     fun getFavorites(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 0 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 0 AND deletedAt IS NULL AND concealed = 0 ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC")
     fun getPhotosOnly(vaultId: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY importedAt DESC, id DESC")
+    @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND mediaTypeCode = 1 AND deletedAt IS NULL AND concealed = 0 ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC")
     fun getVideosOnly(vaultId: String): Flow<List<MediaItemEntity>>
 
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND deletedAt IS NOT NULL AND concealed = 0 ORDER BY deletedAt DESC, id DESC")
@@ -305,7 +305,7 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND sha256Hex = :sha256Hex AND deletedAt IS NOT NULL LIMIT 1")
     suspend fun findTrashBySha256(vaultId: String, sha256Hex: String): MediaItemEntity?
 
-    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId = :folderId AND deletedAt IS NULL ORDER BY importedAt DESC, id DESC")
+    @Query("SELECT id FROM media_items WHERE vaultId = :vaultId AND folderId = :folderId AND deletedAt IS NULL ORDER BY COALESCE(dateTakenMs, importedAt) DESC, id DESC")
     suspend fun getActiveIdsInFolder(vaultId: String, folderId: String): List<String>
 
     @Query("SELECT COUNT(*) FROM media_items WHERE vaultId = :vaultId AND folderId IS :folderId AND deletedAt IS NULL")
