@@ -74,9 +74,12 @@ fun SuyaBottomNav(
         ) {
             val tabs = SuyaNavTab.entries
             val selectedIndex = tabs.indexOf(selectedTab).coerceAtLeast(0)
-            val slotWidth = maxWidth / tabs.size
+            // Give the selected destination enough room for "icon + label" while
+            // keeping the other three destinations compact icon-only targets.
+            val selectedWidth = minOf(116.dp, maxWidth * 0.36f)
+            val compactWidth = (maxWidth - selectedWidth) / (tabs.size - 1)
             val indicatorX by animateDpAsState(
-                targetValue = slotWidth * selectedIndex,
+                targetValue = compactWidth * selectedIndex,
                 animationSpec = spring(
                     dampingRatio = 0.86f,
                     stiffness = Spring.StiffnessMediumLow
@@ -88,7 +91,7 @@ fun SuyaBottomNav(
             Box(
                 modifier = Modifier
                     .offset(x = indicatorX)
-                    .width(slotWidth)
+                    .width(selectedWidth)
                     .fillMaxHeight()
                     .background(
                         color = SuyaColors.Accent,
@@ -105,10 +108,11 @@ fun SuyaBottomNav(
                         label = "nav_icon_tint"
                     )
 
+                    val tabWidth = if (selected) selectedWidth else compactWidth
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .width(slotWidth)
+                            .width(tabWidth)
                             .fillMaxHeight()
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
