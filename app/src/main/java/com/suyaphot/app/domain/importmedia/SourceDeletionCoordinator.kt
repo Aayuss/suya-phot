@@ -17,7 +17,19 @@ class SourceDeletionCoordinator(
     private val context: Context,
     private val deleteUri: (Uri) -> Int = { uri ->
         if (DocumentsContract.isDocumentUri(context, uri)) {
-            if (DocumentsContract.deleteDocument(context.contentResolver, uri)) 1 else 0
+            // Never issue a generic DocumentsContract delete against arbitrary/cloud
+            // document providers: "move into vault" is a local-device operation and
+            // must not unexpectedly delete a cloud original. Restrict direct document
+            // deletion to Android's local media/storage providers.
+            val localDocumentProvider = when (uri.authority) {
+                "com.android.providers.media.documents",
+                "com.android.externalstorage.documents",
+                "com.android.providers.downloads.documents" -> true
+                else -> false
+            }
+            if (localDocumentProvider &&
+                DocumentsContract.deleteDocument(context.contentResolver, uri)
+            ) 1 else 0
         } else {
             context.contentResolver.delete(uri, null, null)
         }
