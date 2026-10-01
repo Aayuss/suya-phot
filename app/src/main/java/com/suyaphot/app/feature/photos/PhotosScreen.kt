@@ -19,6 +19,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +35,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -62,6 +64,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -118,6 +121,7 @@ fun PhotosScreen(
     var searchQuery by remember { mutableStateOf("") }
 
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
+    val gridState = rememberLazyGridState()
     var allMatchingIds by remember { mutableStateOf<Set<String>?>(null) }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() || allMatchingIds != null } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
@@ -582,7 +586,78 @@ fun PhotosScreen(
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    state = gridState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .pointerInput(
+                            isSearching,
+                            searchEntities.size,
+                            pagedEntities.itemCount,
+                            allMatchingIds
+                        ) {
+                            if (allMatchingIds != null) return@pointerInput
+
+                            fun indexAt(x: Float, y: Float): Int? {
+                                return gridState.layoutInfo.visibleItemsInfo
+                                    .firstOrNull { info ->
+                                        x >= info.offset.x &&
+                                            x < info.offset.x + info.size.width &&
+                                            y >= info.offset.y &&
+                                            y < info.offset.y + info.size.height
+                                    }
+                                    ?.index
+                            }
+
+                            fun idAt(index: Int): String? {
+                                return if (isSearching) {
+                                    searchEntities.getOrNull(index)?.id
+                                } else {
+                                    pagedEntities.peek(index)?.id
+                                }
+                            }
+
+                            var anchorIndex: Int? = null
+                            var baselineSelection = emptySet<String>()
+
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { position ->
+                                    val index = indexAt(position.x, position.y)
+                                        ?: return@detectDragGesturesAfterLongPress
+                                    val id = idAt(index)
+                                        ?: return@detectDragGesturesAfterLongPress
+
+                                    anchorIndex = index
+                                    baselineSelection = selectedMediaIds.keys.toSet()
+                                    selectedMediaIds[id] = Unit
+                                },
+                                onDragEnd = {
+                                    anchorIndex = null
+                                    baselineSelection = emptySet()
+                                },
+                                onDragCancel = {
+                                    anchorIndex = null
+                                    baselineSelection = emptySet()
+                                },
+                                onDrag = { change, _ ->
+                                    val anchor = anchorIndex
+                                        ?: return@detectDragGesturesAfterLongPress
+                                    val current = indexAt(change.position.x, change.position.y)
+                                        ?: return@detectDragGesturesAfterLongPress
+
+                                    change.consume()
+
+                                    val from = minOf(anchor, current)
+                                    val to = maxOf(anchor, current)
+                                    val rangeIds = (from..to)
+                                        .mapNotNull(::idAt)
+
+                                    selectedMediaIds.clear()
+                                    baselineSelection.forEach { selectedMediaIds[it] = Unit }
+                                    rangeIds.forEach { selectedMediaIds[it] = Unit }
+                                }
+                            )
+                        }
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
