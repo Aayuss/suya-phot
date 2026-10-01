@@ -6,6 +6,7 @@ import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.provider.DocumentsContract
 import com.suyaphot.app.core.util.SafeLog
 import java.io.FileNotFoundException
 
@@ -14,7 +15,13 @@ import java.io.FileNotFoundException
  */
 class SourceDeletionCoordinator(
     private val context: Context,
-    private val deleteUri: (Uri) -> Int = { context.contentResolver.delete(it, null, null) },
+    private val deleteUri: (Uri) -> Int = { uri ->
+        if (DocumentsContract.isDocumentUri(context, uri)) {
+            if (DocumentsContract.deleteDocument(context.contentResolver, uri)) 1 else 0
+        } else {
+            context.contentResolver.delete(uri, null, null)
+        }
+    },
     private val probeAbsent: (Uri) -> Boolean = { uri ->
         try {
             context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { false } ?: true
