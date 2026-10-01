@@ -529,7 +529,44 @@ class ImportCoordinator(
                 MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume)
                 MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume)
             }
-            ContentUris.withAppendedId(collection, id)
+            val candidate = ContentUris.withAppendedId(collection, id)
+
+            // Picker/cloud providers can expose an opaque _ID that is not guaranteed to
+            // be a local MediaStore row ID. Never turn such an ID into a deletion target
+            // unless the candidate row can be proven to describe the same source item.
+            val expectedName = source.metadata.originalDisplayName
+            val expectedSize = source.size
+            val expectedMime = source.metadata.originalMimeType
+            val matches = context.contentResolver.query(
+                candidate,
+                arrayOf(
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.SIZE,
+                    MediaStore.MediaColumns.MIME_TYPE
+                ),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) {
+                    false
+                } else {
+                    val name = cursor.getString(
+                        cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                    )
+                    val size = cursor.getLong(
+                        cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+                    )
+                    val mime = cursor.getString(
+                        cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                    )
+                    name == expectedName &&
+                        (expectedSize <= 0L || size == expectedSize) &&
+                        mime == expectedMime
+                }
+            } ?: false
+
+            if (matches) candidate else fallback
         }.getOrDefault(fallback)
     }
 
