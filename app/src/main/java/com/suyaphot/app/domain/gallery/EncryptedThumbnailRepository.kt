@@ -14,6 +14,8 @@ import com.suyaphot.app.domain.auth.SessionManager
 import com.suyaphot.app.domain.folders.FolderAccessManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * Session-scoped, bounded decoded-thumbnail cache.
@@ -36,6 +38,9 @@ class EncryptedThumbnailRepository(
             (value.byteCount / 1024).coerceAtLeast(1)
     }
     private var generation = 0L
+    // Regenerating a missing derivative verifies/decrypts the original to private cache.
+    // Serialize repairs so a grid of legacy items cannot create many large plaintext temps at once.
+    private val repairSemaphore = Semaphore(1)
 
     @Synchronized
     fun clear() {
@@ -94,14 +99,21 @@ class EncryptedThumbnailRepository(
             // Avoid doing this automatically for videos because a missing video thumb
             // could require decrypting a multi-gigabyte file merely to draw a grid tile.
             if (bitmap == null && entity.mediaTypeCode == MediaType.IMAGE.code) {
-                bitmap = regenerateImageThumbnail(
-                    vaultId = vaultId,
-                    mediaId = mediaId,
-                    lease = lease,
-                    encryptedMetadata = entity.encryptedMetadata,
-                    expectedPlaintextSize = entity.plaintextSize,
-                    expectedSha256Hex = entity.sha256Hex
-                )
+                bitmap = repairSemaphore.withPermit {
+                    // Another visible tile may have repaired it while this request waited.
+                    generator.decryptThumbnail(
+                        fileStore.getThumbFile(vaultId, mediaId),
+                        lease.thumbSubkey,
+                        mediaId
+                    ) ?: regenerateImageThumbnail(
+                        vaultId = vaultId,
+                        mediaId = mediaId,
+                        lease = lease,
+                        encryptedMetadata = entity.encryptedMetadata,
+                        expectedPlaintextSize = entity.plaintextSize,
+                        expectedSha256Hex = entity.sha256Hex
+                    )
+                }
             }
 
             if (bitmap == null) return@withContext null
