@@ -82,6 +82,7 @@ import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.domain.importmedia.ImportJobPayload
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
+import com.suyaphot.app.feature.importmedia.rememberMoveSourceDeletionHandler
 import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.MediaFilter
@@ -136,6 +137,10 @@ fun PhotosScreen(
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    val finishMoveImport = rememberMoveSourceDeletionHandler(container) { status ->
+        statusMessage = status
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -143,17 +148,26 @@ fun PhotosScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    // The + picker means "add to the private vault": after the encrypted
+                    // verified copy commits, request removal of the public originals.
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                val imported = successes.count { !it.alreadyExisted }
+                val duplicate = successes.count { it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+
+                if (successes.isNotEmpty()) {
+                    statusMessage = "$imported secured, $duplicate already protected, $failed failed. Removing public originals…"
+                    finishMoveImport(successes)
+                } else {
+                    statusMessage = "0 secured, $failed failed"
+                }
             }
         }
     }
