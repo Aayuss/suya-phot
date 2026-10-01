@@ -150,10 +150,10 @@ class EncryptedThumbnailRepository(
 
         return try {
             val verification = vaultCrypto.decryptVerifiedToFile(
-                encryptedFile = fileStore.getMediaFile(vaultId, mediaId),
+                sourceEncryptedFile = fileStore.getMediaFile(vaultId, mediaId),
                 mediaSubkey = lease.mediaSubkey,
                 itemId = mediaId,
-                outputFile = temp
+                destinationTemp = temp
             )
             if (verification.plaintextSize != expectedPlaintextSize) return null
             val actualSha = verification.sha256.joinToString("") { "%02x".format(it) }
