@@ -13,6 +13,8 @@ import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.SessionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /** Session-scoped, bounded decoded-thumbnail cache with operation-owned key copies. */
 class EncryptedThumbnailRepository(
@@ -26,6 +28,7 @@ class EncryptedThumbnailRepository(
         override fun sizeOf(key: String, value: Bitmap): Int = (value.byteCount / 1024).coerceAtLeast(1)
     }
     private var generation = 0L
+    private val regenerationGate = Semaphore(1)
 
     @Synchronized fun clear() {
         generation++
@@ -82,10 +85,28 @@ class EncryptedThumbnailRepository(
             if (bitmap == null) {
                 val entity = database.mediaItemDao().getItemForVault(mediaId, vaultId)
                     ?: return@withContext null
-                val source = fileStore.getMediaFile(vaultId, mediaId)
-                if (!source.exists()) return@withContext null
 
-                var metadata: PrivateMediaMetadata? = null
+                // Never create a multi-GB plaintext video temp merely to repair a replaceable
+                // thumbnail. Normal imports generate video thumbs eagerly; image derivatives can
+                // be rebuilt cheaply and serially when missing after an old/test restore.
+                if (entity.mediaTypeCode != MediaType.IMAGE.code ||
+                    entity.plaintextSize > 256L * 1024L * 1024L
+                ) {
+                    return@withContext null
+                }
+
+                bitmap = regenerationGate.withPermit {
+                    // Another tile may have repaired this while we waited.
+                    generator.decryptThumbnail(
+                        fileStore.getThumbFile(vaultId, mediaId),
+                        lease.thumbSubkey,
+                        mediaId
+                    )?.let { return@withPermit it }
+
+                    val source = fileStore.getMediaFile(vaultId, mediaId)
+                    if (!source.exists()) return@withPermit null
+
+                    var metadata: PrivateMediaMetadata? = null
                 val metadataPlain = runCatching {
                     Aead.decryptWithPrependedNonce(
                         lease.metaSubkey,
@@ -139,8 +160,15 @@ class EncryptedThumbnailRepository(
                     if (generated) {
                         bitmap = generator.decryptThumbnail(thumbFile, lease.thumbSubkey, mediaId)
                     }
-                } finally {
-                    runCatching { temp.delete() }
+                    } finally {
+                        runCatching { temp.delete() }
+                    }
+
+                    generator.decryptThumbnail(
+                        fileStore.getThumbFile(vaultId, mediaId),
+                        lease.thumbSubkey,
+                        mediaId
+                    )
                 }
             }
 
