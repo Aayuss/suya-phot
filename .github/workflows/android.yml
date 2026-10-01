@@ -106,22 +106,13 @@ jobs:
           cp apk/app-release.apk suya-phot.apk
           cp apk/app-release.apk app-release.apk
 
+          TAG="v1.0.${{ github.run_number }}"
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-          else
-            TAG="v1.0.${{ github.run_number }}"
           fi
 
           TITLE="Suya Phot $TAG"
-          NOTES="### 📱 Suya Phot $TAG
-
-Executable signed release APK for Android 10+ (API 29+).
-
-#### Direct Downloads:
-- **[suya-phot.apk](https://github.com/${{ github.repository }}/releases/download/$TAG/suya-phot.apk)**
-- **[app-release.apk](https://github.com/${{ github.repository }}/releases/download/$TAG/app-release.apk)**
-
-**Commit**: \`${{ github.sha }}\`"
+          NOTES="Executable signed release APK for Android 10+ (API 29+). Commit: ${{ github.sha }}"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists, updating assets..."
