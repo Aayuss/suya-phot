@@ -81,4 +81,48 @@ class PrivacyQueriesTest {
             assertEquals(listOf("hidden"), db.folderDao().getHiddenRoots("vault").first().map { it.folder.id })
         } finally { db.close() }
     }
+
+    @Test fun folderItemCountIncludesImmediateChildFoldersAndMediaWithoutLeakingHiddenChildren() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
+        try {
+            db.vaultDao().insert(VaultEntity("vault", 0, 1, 1, byteArrayOf(1)))
+            db.folderDao().insert(FolderEntity("parent", "vault", null, byteArrayOf(1), 1, 1, null, 0))
+            db.folderDao().insert(FolderEntity("child", "vault", "parent", byteArrayOf(1), 1, 1, null, 0))
+            db.folderDao().insert(FolderEntity(
+                "hidden-child", "vault", "parent", byteArrayOf(1), 1, 1, null, 0,
+                directHidden = true, effectiveHidden = true
+            ))
+            db.mediaItemDao().insert(MediaItemEntity(
+                "media", "vault", "parent", 0, byteArrayOf(1), "media.sph", null,
+                1, 1, "hash", 1, 1, false, null, null
+            ))
+
+            val parent = db.folderDao().getSubFoldersWithCount("vault", null).first()
+                .single { it.folder.id == "parent" }
+            // 1 visible media + 1 visible child folder. Hidden child is deliberately not leaked.
+            assertEquals(2, parent.itemCount)
+
+            val hiddenRoot = FolderEntity(
+                "hidden-root", "vault", null, byteArrayOf(1), 1, 1, null, 1,
+                directHidden = true, effectiveHidden = true
+            )
+            db.folderDao().insert(hiddenRoot)
+            db.folderDao().insert(FolderEntity(
+                "hidden-nested", "vault", "hidden-root", byteArrayOf(1), 1, 1, null, 0,
+                effectiveHidden = true
+            ))
+            db.mediaItemDao().insert(MediaItemEntity(
+                "hidden-media", "vault", "hidden-root", 0, byteArrayOf(1), "hidden.sph", null,
+                1, 1, "hash2", 1, 1, false, null, null, concealed = true
+            ))
+
+            val authorizedHiddenRoot = db.folderDao().getHiddenRoots("vault").first()
+                .single { it.folder.id == "hidden-root" }
+            assertEquals(2, authorizedHiddenRoot.itemCount)
+        } finally {
+            db.close()
+        }
+    }
+
 }
