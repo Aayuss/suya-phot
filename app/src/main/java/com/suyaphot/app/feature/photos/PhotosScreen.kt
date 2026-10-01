@@ -19,6 +19,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +36,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -62,6 +65,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -121,6 +126,9 @@ fun PhotosScreen(
 
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
     var allMatchingIds by remember { mutableStateOf<Set<String>?>(null) }
+    val gridState = rememberLazyGridState()
+    var dragAnchorIndex by remember { mutableStateOf<Int?>(null) }
+    var dragBaseSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() || allMatchingIds != null } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
@@ -659,12 +667,79 @@ fun PhotosScreen(
                     modifier = Modifier.weight(1f)
                 )
             } else {
+                fun mediaIdAt(index: Int): String? =
+                    if (isSearching) searchEntities.getOrNull(index)?.id
+                    else pagedEntities.peek(index)?.id
+
+                fun gridIndexAt(position: Offset): Int? =
+                    gridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                        val left = info.offset.x.toFloat()
+                        val top = info.offset.y.toFloat()
+                        position.x >= left &&
+                            position.x < left + info.size.width &&
+                            position.y >= top &&
+                            position.y < top + info.size.height
+                    }?.index
+
+                fun selectDragRange(currentIndex: Int) {
+                    val anchor = dragAnchorIndex ?: return
+                    val first = minOf(anchor, currentIndex)
+                    val last = maxOf(anchor, currentIndex)
+                    val rangeIds = (first..last).mapNotNull(::mediaIdAt).toSet()
+
+                    allMatchingIds = null
+                    selectedMediaIds.clear()
+                    (dragBaseSelection + rangeIds).forEach { selectedMediaIds[it] = Unit }
+                }
+
                 LazyVerticalGrid(
+                    state = gridState,
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .pointerInput(isSearching, gridCols, pagedEntities.itemCount, searchEntities.size) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { position ->
+                                    val index = gridIndexAt(position) ?: return@detectDragGesturesAfterLongPress
+                                    dragAnchorIndex = index
+                                    dragBaseSelection = selectedMediaIds.keys.toSet()
+                                    allMatchingIds = null
+                                    mediaIdAt(index)?.let { selectedMediaIds[it] = Unit }
+                                },
+                                onDrag = { change, _ ->
+                                    val currentIndex = gridIndexAt(change.position)
+                                    if (currentIndex != null) selectDragRange(currentIndex)
+
+                                    // Keep range-selection moving naturally when the finger reaches an edge.
+                                    val edge = 80.dp.toPx()
+                                    val viewportHeight = size.height.toFloat()
+                                    val delta = when {
+                                        change.position.y < edge -> -22.dp.toPx()
+                                        change.position.y > viewportHeight - edge -> 22.dp.toPx()
+                                        else -> 0f
+                                    }
+                                    if (delta != 0f) {
+                                        scope.launch {
+                                            gridState.scrollBy(delta)
+                                            gridIndexAt(change.position)?.let(::selectDragRange)
+                                        }
+                                    }
+                                    change.consume()
+                                },
+                                onDragEnd = {
+                                    dragAnchorIndex = null
+                                    dragBaseSelection = emptySet()
+                                },
+                                onDragCancel = {
+                                    dragAnchorIndex = null
+                                    dragBaseSelection = emptySet()
+                                }
+                            )
+                        }
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
