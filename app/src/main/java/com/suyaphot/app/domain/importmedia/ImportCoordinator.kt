@@ -356,6 +356,34 @@ class ImportCoordinator(
                             now = nowDuplicate
                         )
                     } else {
+                        // Persist the canonical deletion URI before entering the
+                        // crash-recoverable source-delete phase. This is especially
+                        // important for Android Photo Picker URIs, which are read-only
+                        // handles and may not be valid delete-request targets after a
+                        // process restart.
+                        val deletePayloadRaw = ImportJobPayload(
+                            sourceUri = deletionUri.toString(),
+                            targetFolderId = existing.folderId,
+                            itemId = existing.id,
+                            mode = mode
+                        ).serialize()
+                        val deletePayloadEncrypted = try {
+                            Aead.encryptWithPrependedNonce(
+                                session.metaSubkey,
+                                deletePayloadRaw,
+                                "job:$jobId:v1".toByteArray(Charsets.UTF_8)
+                            )
+                        } finally {
+                            deletePayloadRaw.fill(0)
+                        }
+                        check(
+                            vaultJobDao.updateEncryptedPayload(
+                                jobId,
+                                vaultId,
+                                deletePayloadEncrypted,
+                                nowDuplicate
+                            ) == 1
+                        )
                         vaultJobDao.updateState(jobId, JobState.AWAITING_SOURCE_DELETE.code, nowDuplicate)
                     }
                     return@withContext ImportResult.Success(
