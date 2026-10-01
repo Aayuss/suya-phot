@@ -160,7 +160,7 @@ class EncryptedThumbnailRepository(
                     } finally {
                         runCatching { temp.delete() }
                     }
-                }}
+                }
             }
 
             val loaded = bitmap ?: return@withContext null
