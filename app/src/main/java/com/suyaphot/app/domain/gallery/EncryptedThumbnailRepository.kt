@@ -33,8 +33,19 @@ class EncryptedThumbnailRepository(
         val lease = sessionManager.acquireOperationKeyLease() ?: return@withContext null
         try {
             if (lease.vaultId != vaultId) return@withContext null
-            val bitmap = generator.decryptThumbnail(fileStore.getThumbFile(vaultId, mediaId), lease.thumbSubkey, mediaId)
-                ?: return@withContext null
+            // Prefer the compact encrypted thumbnail, but fall back to the encrypted
+            // image preview. Older/failed imports can legitimately have a preview even if
+            // thumbnail generation failed; showing the preview is still private because it
+            // is authenticated with the same session-scoped thumbnail key.
+            val bitmap = generator.decryptThumbnail(
+                fileStore.getThumbFile(vaultId, mediaId),
+                lease.thumbSubkey,
+                mediaId
+            ) ?: generator.decryptImagePreview(
+                fileStore.getPreviewFile(vaultId, mediaId),
+                lease.thumbSubkey,
+                mediaId
+            ) ?: return@withContext null
             synchronized(this@EncryptedThumbnailRepository) {
                 if (generation != start || sessionManager.currentVaultId != vaultId) return@withContext null
                 cache.put(cacheKey, bitmap)
