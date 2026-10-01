@@ -142,7 +142,8 @@ class DirectShareImportTest {
 
             // 2. Stage via PendingShareManager while locked
             val staged = container.pendingShareManager.stageSharedMedia(listOf(mediaUri))
-            assertEquals("Must stage 1 shared media item", 1, staged)
+            assertEquals("Must stage 1 shared media item", 1, staged.stagedCount)
+            assertEquals("Must have 1 deletion target", 1, staged.deletionTargets.size)
             assertTrue("Must have pending shares", container.pendingShareManager.hasPendingShares())
 
             // 3. Unlock vault: AppContainer automatically ingests pending shares upon unlock

@@ -39,15 +39,21 @@ class PendingShareManager(
         return pendingDir.listFiles { _, name -> name.endsWith(".meta") }?.isNotEmpty() == true
     }
 
+    data class StagedSharesResult(
+        val stagedCount: Int,
+        val deletionTargets: List<Uri>
+    )
+
     /**
      * Immediately reads and stages shared media streams and metadata to app-private storage.
      * Must be called while the caller's URI permission is active.
      */
-    suspend fun stageSharedMedia(uris: List<Uri>): Int = withContext(Dispatchers.IO) {
-        if (uris.isEmpty()) return@withContext 0
+    suspend fun stageSharedMedia(uris: List<Uri>): StagedSharesResult = withContext(Dispatchers.IO) {
+        if (uris.isEmpty()) return@withContext StagedSharesResult(0, emptyList())
         if (!pendingDir.exists()) pendingDir.mkdirs()
 
         var stagedCount = 0
+        val deletionTargets = mutableListOf<Uri>()
         val now = System.currentTimeMillis()
 
         for (uri in uris) {
@@ -102,14 +108,29 @@ class PendingShareManager(
                 val serializedMeta = metadata.serialize()
                 metaFile.writeBytes(serializedMeta)
 
+                val deletionUri = com.suyaphot.app.core.media.CanonicalMediaResolver.resolveCanonicalMediaStoreUri(
+                    context = context,
+                    rawUri = uri,
+                    mimeType = metadata.originalMimeType
+                ) ?: runCatching { Uri.parse(metadata.originalContentUri) }.getOrNull()
+
+                if (deletionUri != null &&
+                    deletionUri.authority == android.provider.MediaStore.AUTHORITY &&
+                    !deletionUri.toString().contains("/picker")
+                ) {
+                    if (deletionUri !in deletionTargets) {
+                        deletionTargets.add(deletionUri)
+                    }
+                }
+
                 stagedCount++
-                SafeLog.d("PendingShareManager", "Staged shared item: $shareId (${metadata.originalDisplayName})")
+                SafeLog.d("PendingShareManager", "Staged shared item: $shareId (${metadata.originalDisplayName}), deletionTarget=$deletionUri")
             } catch (e: Exception) {
                 SafeLog.e("PendingShareManager", "Error staging shared item from URI: $uri", e)
             }
         }
 
-        stagedCount
+        StagedSharesResult(stagedCount, deletionTargets)
     }
 
     /**

@@ -197,78 +197,54 @@ internal fun canonicalDeletionUri(
     metadata: PrivateMediaMetadata,
     context: Context? = null
 ): Uri {
-    val segments = fallback.pathSegments
-    val isLocalPhotoPickerUri =
-        fallback.authority == MediaStore.AUTHORITY &&
-            segments.size >= 4 &&
-            (segments[0] == "picker" || segments[0] == "picker_get_content") &&
-            isLocalPhotoPickerProvider(segments) &&
-            segments.getOrNull(segments.size - 2) == "media"
-
-    val pickerLocalId = if (isLocalPhotoPickerUri) {
-        segments.lastOrNull()?.toLongOrNull()?.takeIf { it > 0L }
-    } else {
-        null
-    }
-
     val id = metadata.sourceMediaStoreId?.takeIf { it > 0L }
-        ?: pickerLocalId
-        ?: resolveMediaStoreIdFromCatalog(context, mediaType, metadata)
-        ?: return fallback
-
-    if (id <= 0L) return fallback
-
     val volume = metadata.sourceVolume?.takeIf { it.isNotBlank() }
         ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
 
-    return runCatching {
-        val collection = when (mediaType) {
-            MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume)
-            MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume)
-        }
-        ContentUris.withAppendedId(collection, id)
-    }.getOrDefault(fallback)
-}
-
-private fun isLocalPhotoPickerProvider(segments: List<String>): Boolean {
-    val provider = if (segments.size >= 5) segments[2] else if (segments.size >= 4) segments[1] else null
-    if (provider == null || provider == "media") return true
-    if (provider.startsWith("com.example.") || provider.contains("cloud") || provider.contains("drive")) {
-        return false
+    if (id != null && id > 0L) {
+        return runCatching {
+            val collection = when (mediaType) {
+                MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume)
+                MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume)
+            }
+            ContentUris.withAppendedId(collection, id)
+        }.getOrDefault(fallback)
     }
-    return provider == "com.android.providers.media.photopicker" ||
-        provider == "com.google.android.providers.media.module" ||
-        provider == "com.android.providers.media" ||
-        provider.endsWith(".providers.media.photopicker") ||
-        provider.endsWith(".providers.media.module") ||
-        provider.endsWith(".providers.media")
-}
 
-private fun resolveMediaStoreIdFromCatalog(
-    context: Context?,
-    mediaType: MediaType,
-    metadata: PrivateMediaMetadata
-): Long? {
-    val ctx = context ?: return null
-    val displayName = metadata.originalDisplayName.takeIf { it.isNotBlank() } ?: return null
-    return runCatching {
-        val collection = when (mediaType) {
-            MediaType.IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            MediaType.VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+    if (context != null) {
+        val resolved = com.suyaphot.app.core.media.CanonicalMediaResolver.resolveCanonicalMediaStoreUri(
+            context = context,
+            rawUri = fallback,
+            mimeType = metadata.originalMimeType
+        )
+        if (resolved != null) return resolved
+    } else {
+        val segments = fallback.pathSegments
+        val isLocalPhotoPickerUri =
+            fallback.authority == MediaStore.AUTHORITY &&
+                segments.size >= 4 &&
+                (segments[0] == "picker" || segments[0] == "picker_get_content") &&
+                com.suyaphot.app.core.media.CanonicalMediaResolver.isLocalPhotoPickerProvider(segments) &&
+                segments.getOrNull(segments.size - 2) == "media"
+
+        val pickerLocalId = if (isLocalPhotoPickerUri) {
+            segments.lastOrNull()?.toLongOrNull()?.takeIf { it > 0L }
+        } else {
+            null
         }
-        val projection = arrayOf(MediaStore.MediaColumns._ID)
-        val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
-        val selectionArgs = arrayOf(displayName)
-        ctx.contentResolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
-            if (cursor.moveToFirst() && cursor.count == 1) {
-                val idCol = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
-                if (idCol != -1 && !cursor.isNull(idCol)) {
-                    val candidate = cursor.getLong(idCol)
-                    if (candidate > 0L) candidate else null
-                } else null
-            } else null
+
+        if (pickerLocalId != null && pickerLocalId > 0L) {
+            return runCatching {
+                val collection = when (mediaType) {
+                    MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume)
+                    MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume)
+                }
+                ContentUris.withAppendedId(collection, pickerLocalId)
+            }.getOrDefault(fallback)
         }
-    }.getOrNull()
+    }
+
+    return fallback
 }
 
 /**

@@ -16,6 +16,7 @@ import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.util.SafeLog
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.TimeZone
 
 data class ResolvedMediaSource(val sourceUri: Uri, val readUri: Uri)
 
@@ -78,31 +79,23 @@ class MetadataReader(private val context: Context) {
             MediaStore.MediaColumns.VOLUME_NAME
         )
 
-        // If source is a local Photo Picker URI, attempt querying the underlying MediaStore row first
-        val pickerLocalId = run {
-            val segments = source.sourceUri.pathSegments
-            val isPicker = source.sourceUri.authority == MediaStore.AUTHORITY &&
-                segments.size >= 4 &&
-                (segments[0] == "picker" || segments[0] == "picker_get_content") &&
-                segments.getOrNull(segments.size - 2) == "media"
-            if (isPicker) segments.lastOrNull()?.toLongOrNull()?.takeIf { it > 0L } else null
-        }
+        // Attempt querying the underlying canonical MediaStore row first
+        val canonicalMediaStoreUri = CanonicalMediaResolver.resolveCanonicalMediaStoreUri(
+            context = context,
+            rawUri = source.sourceUri,
+            mimeType = mimeType
+        ) ?: CanonicalMediaResolver.resolveCanonicalMediaStoreUri(
+            context = context,
+            rawUri = source.readUri,
+            mimeType = mimeType
+        )
 
-        if (pickerLocalId != null) {
-            mediaStoreId = pickerLocalId
-            val isVideoGuess = mimeType?.startsWith("video/") == true ||
-                uri.lastPathSegment?.lowercase()?.let {
-                    it.endsWith(".mp4") || it.endsWith(".mkv") || it.endsWith(".mov") || it.endsWith(".3gp")
-                } == true
-            val canonicalCollection = if (isVideoGuess) {
-                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            } else {
-                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        if (canonicalMediaStoreUri != null) {
+            runCatching {
+                android.content.ContentUris.parseId(canonicalMediaStoreUri).takeIf { it > 0L }?.let { mediaStoreId = it }
             }
-            val canonicalUri = android.content.ContentUris.withAppendedId(canonicalCollection, pickerLocalId)
-
             try {
-                resolver.query(canonicalUri, projection, null, null, null)?.use { cursor ->
+                resolver.query(canonicalMediaStoreUri, projection, null, null, null)?.use { cursor ->
                     if (cursor.moveToFirst()) {
                         val nameCol = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
                         if (nameCol != -1 && !cursor.isNull(nameCol)) displayName = cursor.getString(nameCol)
@@ -210,13 +203,37 @@ class MetadataReader(private val context: Context) {
         }
         val isVideo = mediaType == MediaType.VIDEO
 
-        // Determine actual size if query returned -1
-        if (size <= 0) {
-            try {
-                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+        // Determine actual size and timestamps via file descriptor
+        try {
+            resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                if (size <= 0) {
                     size = pfd.statSize
                 }
-            } catch (ignored: Exception) {}
+                runCatching {
+                    val stat = android.system.Os.fstat(pfd.fileDescriptor)
+                    if (stat.st_mtime > 0L) {
+                        val fdModMs = stat.st_mtime * 1000L
+                        if (dateModified == null) {
+                            dateModified = fdModMs
+                        }
+                        if (dateTaken == null) {
+                            dateTaken = fdModMs
+                        }
+                        if (dateAdded == null) {
+                            val ctime = stat.st_ctime
+                            dateAdded = if (ctime > 0L) ctime else stat.st_mtime
+                        }
+                    }
+                }
+            }
+        } catch (ignored: Exception) {}
+
+        // Fallback to filename timestamp if dateTaken is still unresolved
+        if (dateTaken == null) {
+            extractTimestampFromFilename(finalDisplayName)?.let { ts ->
+                dateTaken = ts
+                if (dateModified == null) dateModified = ts
+            }
         }
 
         // Additional metadata via ExifInterface for images
@@ -308,14 +325,14 @@ class MetadataReader(private val context: Context) {
             originalDisplayName = finalDisplayName,
             originalRelativePath = relPath,
             originalMimeType = finalMimeType,
-            originalContentUri = uri.toString(),
+            originalContentUri = canonicalMediaStoreUri?.toString() ?: uri.toString(),
             dateTakenMs = finalDateTaken,
             dateModifiedMs = finalDateModified,
             width = width,
             height = height,
             durationMs = duration,
             orientation = orientation,
-            sourceVolume = volume,
+            sourceVolume = volume ?: (if (canonicalMediaStoreUri != null) android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY else null),
             sourceMediaStoreId = mediaStoreId,
             gpsWasAvailable = gpsAvailable,
             originalFileExtension = extension.ifEmpty { null },
@@ -327,6 +344,20 @@ class MetadataReader(private val context: Context) {
             size = size,
             metadata = metadata
         )
+    }
+
+    private fun extractTimestampFromFilename(filename: String): Long? {
+        val regex = Regex("""(20\d\d)[-_]?(0[1-9]|1[0-2])[-_]?(0[1-9]|[12]\d|3[01])(?:[-_]?(0\d|1\d|2[0-3])[-_]?([0-5]\d)[-_]?([0-5]\d)?)?""")
+        val match = regex.find(filename) ?: return null
+        val (year, month, day, hour, minute, second) = match.destructured
+        val h = hour.ifEmpty { "00" }
+        val m = minute.ifEmpty { "00" }
+        val s = second.ifEmpty { "00" }
+        val dateStr = "$year-$month-$day $h:$m:$s"
+        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).apply {
+            timeZone = java.util.TimeZone.getDefault()
+        }
+        return runCatching { sdf.parse(dateStr)?.time }.getOrNull()
     }
 
     private fun parseDateStringToEpochMs(dateStr: String?): Long? {

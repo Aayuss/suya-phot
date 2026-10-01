@@ -51,8 +51,7 @@
             android:exported="true"
             android:label="@string/share_receiver_label"
             android:theme="@style/Theme.SuyaPhot.Translucent"
-            android:excludeFromRecents="true"
-            android:noHistory="true">
+            android:excludeFromRecents="true">
             <intent-filter android:label="@string/share_receiver_label">
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
