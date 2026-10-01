@@ -13,6 +13,8 @@ import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.SessionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /** Session-scoped, bounded decoded-thumbnail cache with operation-owned key copies. */
 class EncryptedThumbnailRepository(
@@ -26,6 +28,7 @@ class EncryptedThumbnailRepository(
         override fun sizeOf(key: String, value: Bitmap): Int = (value.byteCount / 1024).coerceAtLeast(1)
     }
     private var generation = 0L
+    private val repairSemaphore = Semaphore(2)
 
     @Synchronized
     fun clear() {
@@ -62,63 +65,75 @@ class EncryptedThumbnailRepository(
             // Self-heal older/missing derivatives from the authenticated vault original.
             // The temporary plaintext is private app cache and is always removed here.
             if (bitmap == null) {
-                val entity = database.mediaItemDao().getItemForVault(mediaId, vaultId)
-                    ?: return@withContext null
-                if (entity.deletedAt != null) return@withContext null
+                bitmap = repairSemaphore.withPermit {
+                    // Another tile may have repaired this derivative while this request
+                    // waited for the bounded repair slot.
+                    generator.decryptThumbnail(
+                        fileStore.getThumbFile(vaultId, mediaId),
+                        lease.thumbSubkey,
+                        mediaId
+                    ) ?: run {
+                        val entity = database.mediaItemDao().getItemForVault(mediaId, vaultId)
+                            ?: return@withPermit null
+                        if (entity.deletedAt != null) return@withPermit null
 
-                val extension = if (entity.mediaTypeCode == MediaType.VIDEO.code) "mp4" else "img"
-                val temp = fileStore.createViewerTempFile(mediaId, extension)
-                try {
-                    val verified = vaultCrypto.decryptVerifiedToFile(
-                        fileStore.getMediaFile(vaultId, mediaId),
-                        lease.mediaSubkey,
-                        mediaId,
-                        temp
-                    )
-                    if (verified.plaintextSize != entity.plaintextSize) return@withContext null
-                    val verifiedHex = verified.sha256.joinToString("") { "%02x".format(it) }
-                    if (!verifiedHex.equals(entity.sha256Hex, ignoreCase = true)) return@withContext null
-
-                    val thumbFile = fileStore.getThumbFile(vaultId, mediaId)
-                    val generated = if (entity.mediaTypeCode == MediaType.VIDEO.code) {
-                        generator.generateAndEncryptVideoThumbnail(
-                            Uri.fromFile(temp),
-                            mediaId,
-                            lease.thumbSubkey,
-                            thumbFile
-                        )
-                    } else {
-                        val orientation = runCatching {
-                            val raw = Aead.decryptWithPrependedNonce(
-                                lease.metaSubkey,
-                                entity.encryptedMetadata,
-                                mediaId.toByteArray(Charsets.UTF_8)
+                        val extension = if (entity.mediaTypeCode == MediaType.VIDEO.code) "mp4" else "img"
+                        val temp = fileStore.createViewerTempFile(mediaId, extension)
+                        try {
+                            val verified = vaultCrypto.decryptVerifiedToFile(
+                                fileStore.getMediaFile(vaultId, mediaId),
+                                lease.mediaSubkey,
+                                mediaId,
+                                temp
                             )
-                            try {
-                                PrivateMediaMetadata.deserialize(raw).orientation ?: 1
-                            } finally {
-                                raw.fill(0)
+                            if (verified.plaintextSize != entity.plaintextSize) return@withPermit null
+                            val verifiedHex = verified.sha256.joinToString("") { "%02x".format(it) }
+                            if (!verifiedHex.equals(entity.sha256Hex, ignoreCase = true)) return@withPermit null
+
+                            val thumbFile = fileStore.getThumbFile(vaultId, mediaId)
+                            val generated = if (entity.mediaTypeCode == MediaType.VIDEO.code) {
+                                generator.generateAndEncryptVideoThumbnail(
+                                    Uri.fromFile(temp),
+                                    mediaId,
+                                    lease.thumbSubkey,
+                                    thumbFile
+                                )
+                            } else {
+                                val orientation = runCatching {
+                                    val raw = Aead.decryptWithPrependedNonce(
+                                        lease.metaSubkey,
+                                        entity.encryptedMetadata,
+                                        mediaId.toByteArray(Charsets.UTF_8)
+                                    )
+                                    try {
+                                        PrivateMediaMetadata.deserialize(raw).orientation ?: 1
+                                    } finally {
+                                        raw.fill(0)
+                                    }
+                                }.getOrDefault(1)
+
+                                generator.generateAndEncryptImageThumbnail(
+                                    Uri.fromFile(temp),
+                                    mediaId,
+                                    lease.thumbSubkey,
+                                    thumbFile,
+                                    orientation
+                                )
                             }
-                        }.getOrDefault(1)
 
-                        generator.generateAndEncryptImageThumbnail(
-                            Uri.fromFile(temp),
-                            mediaId,
-                            lease.thumbSubkey,
-                            thumbFile,
-                            orientation
-                        )
+                            if (generated) {
+                                generator.decryptThumbnail(
+                                    thumbFile,
+                                    lease.thumbSubkey,
+                                    mediaId
+                                )
+                            } else {
+                                null
+                            }
+                        } finally {
+                            temp.delete()
+                        }
                     }
-
-                    if (generated) {
-                        bitmap = generator.decryptThumbnail(
-                            thumbFile,
-                            lease.thumbSubkey,
-                            mediaId
-                        )
-                    }
-                } finally {
-                    temp.delete()
                 }
             }
 
