@@ -158,9 +158,9 @@ fun PhotosScreen(
         pendingMoveConsentMode = null
         scope.launch {
             if (result.resultCode == android.app.Activity.RESULT_OK && mode != null) {
-                val verified = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.completeConsent(current.map { it.uri }, mode) }
-                val deleted = current.filter { it.uri in verified.deletedUris }
-                val retained = current.filter { it.uri in verified.retainedUris }
+                val verified = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.completeConsent(current.map { it.deletionUri }, mode) }
+                val deleted = current.filter { it.deletionUri in verified.deletedUris }
+                val retained = current.filter { it.deletionUri in verified.retainedUris }
                 markMoveResults(deleted, SourceDisposition.DELETED)
                 markMoveResults(retained, SourceDisposition.DELETE_FAILED, "SOURCE_DELETE_FAILED_VAULT_SAFE")
                 statusMessage = if (retained.isEmpty()) "Moved into Suya Phot. Originals removed from Gallery."
@@ -175,23 +175,23 @@ fun PhotosScreen(
     fun finishMovedSources(successes: List<ImportResult.Success>) {
         if (successes.isEmpty()) return
         scope.launch {
-            when (val outcome = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.deleteSources(successes.map { it.uri }) }) {
+            when (val outcome = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.deleteSources(successes.map { it.deletionUri }) }) {
                 is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
-                    val deleted = successes.filter { it.uri in outcome.deletedUris }
+                    val deleted = successes.filter { it.deletionUri in outcome.deletedUris }
                     markMoveResults(deleted, SourceDisposition.DELETED)
                     statusMessage = "Moved " + deleted.size + " item(s) into Suya Phot."
                 }
                 is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
-                    val directlyDeleted = successes.filter { it.uri in outcome.deletedUris }
+                    val directlyDeleted = successes.filter { it.deletionUri in outcome.deletedUris }
                     markMoveResults(directlyDeleted, SourceDisposition.DELETED)
-                    pendingMoveConsent = successes.filter { it.uri in outcome.uris }
+                    pendingMoveConsent = successes.filter { it.deletionUri in outcome.uris }
                     pendingMoveConsentMode = outcome.mode
                     container.sessionManager.beginSystemActivity()
                     moveConsentLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
                 }
                 is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
-                    val directlyDeleted = successes.filter { it.uri in outcome.deletedUris }
-                    val retained = successes.filter { it.uri in outcome.uris }
+                    val directlyDeleted = successes.filter { it.deletionUri in outcome.deletedUris }
+                    val retained = successes.filter { it.deletionUri in outcome.uris }
                     markMoveResults(directlyDeleted, SourceDisposition.DELETED)
                     markMoveResults(retained, SourceDisposition.DELETE_FAILED, "SOURCE_DELETE_FAILED_VAULT_SAFE")
                     statusMessage = "Vault copies are safe, but Android kept " + retained.size + " original(s)."
