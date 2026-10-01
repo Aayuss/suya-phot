@@ -273,7 +273,7 @@ fun PhotosScreen(
                     folderId = null,
                     mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
                 isImporting = false
@@ -479,7 +479,7 @@ fun PhotosScreen(
                         )
                         SuyaIconButton(
                             icon = Icons.Default.Add,
-                            contentDescription = "Import media",
+                            contentDescription = "Move media to vault",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(
@@ -696,8 +696,8 @@ fun PhotosScreen(
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
-                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to import private photos or videos from your gallery.",
-                    actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
+                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to move photos or videos into your private vault.",
+                    actionText = if (searchQuery.isBlank()) "Move Photos & Videos" else null,
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
