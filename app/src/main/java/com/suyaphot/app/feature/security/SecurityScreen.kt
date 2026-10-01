@@ -88,6 +88,7 @@ fun SecurityScreen(
     val screenshotProtection by container.preferences.screenshotProtection.collectAsState(initial = true)
     val intruderEnabled by container.preferences.intruderSelfieEnabled.collectAsState(initial = false)
     val intruderThreshold by container.preferences.intruderTriggerCount.collectAsState(initial = 3)
+    val biometricOnLaunch by container.preferences.biometricOnLaunch.collectAsState(initial = true)
 
     var showSecondaryPinDialog by remember { mutableStateOf(false) }
     var currentSecondaryPinInput by remember { mutableStateOf("") }
@@ -264,8 +265,8 @@ fun SecurityScreen(
                 // Biometric Unlock
                 if (canEnrollBiometrics) {
                     SecurityToggleRow(
-                        title = "Fingerprint Unlock",
-                        subtitle = "Biometric unwrap via Android Keystore; hardware protection depends on the device",
+                        title = "Biometric Unlock",
+                        subtitle = "Use a strong biometric supported by Android (fingerprint, or face only when the device classifies it as strong)",
                         icon = Icons.Default.Fingerprint,
                         checked = isBiometricEnrolled,
                         onCheckedChange = { enable ->
@@ -276,7 +277,7 @@ fun SecurityScreen(
                                     val encryptCipher = container.keyManager.createBiometricEncryptCipher(real.id)
                                     val promptInfo = BiometricPrompt.PromptInfo.Builder()
                                         .setTitle("Enable Biometric Unlock")
-                                        .setSubtitle("Confirm fingerprint to link biometric key to vault")
+                                        .setSubtitle("Confirm your biometric to link the secure key to this vault")
                                         .setNegativeButtonText("Cancel")
                                         .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                                         .build()
@@ -294,6 +295,7 @@ fun SecurityScreen(
                                                         val iv = authCipher.iv
                                                         scope.launch(Dispatchers.IO) {
                                                             container.database.vaultDao().updateBiometricEnvelope(real.id, envelope, iv)
+                                                            container.preferences.setBiometricOnLaunch(true)
                                                         }
                                                     }
                                                 }
@@ -306,8 +308,21 @@ fun SecurityScreen(
                                 scope.launch(Dispatchers.IO) {
                                     container.keyManager.deleteBiometricKey(real.id)
                                     container.database.vaultDao().updateBiometricEnvelope(real.id, null, null)
+                                    container.preferences.setBiometricOnLaunch(false)
                                 }
                             }
+                        }
+                    )
+                }
+
+                if (isBiometricEnrolled) {
+                    SecurityToggleRow(
+                        title = "Auto biometric prompt",
+                        subtitle = "Prompt for biometric unlock automatically on the lock screen. Turn this off to start with PIN or Pattern instead.",
+                        icon = Icons.Default.Fingerprint,
+                        checked = biometricOnLaunch,
+                        onCheckedChange = { enabled ->
+                            scope.launch { container.preferences.setBiometricOnLaunch(enabled) }
                         }
                     )
                 }
