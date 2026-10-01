@@ -115,14 +115,16 @@ class DirectShareImportTest {
                 }
             }
 
-            resolver.query(mediaUri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val p = cursor.getString(0)
-                    if (!p.isNullOrBlank()) {
-                        val exif = ExifInterface(p)
-                        exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, "2020:01:01 00:00:00")
-                        exif.saveAttributes()
-                        File(p).setLastModified(historicalDateModifiedSec * 1000L)
+            runCatching {
+                resolver.query(mediaUri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val p = cursor.getString(0)
+                        if (!p.isNullOrBlank()) {
+                            val exif = ExifInterface(p)
+                            exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, "2020:01:01 00:00:00")
+                            exif.saveAttributes()
+                            File(p).setLastModified(historicalDateModifiedSec * 1000L)
+                        }
                     }
                 }
             }
@@ -209,14 +211,16 @@ class DirectShareImportTest {
                 }
             }
 
-            resolver.query(mediaUri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val p = cursor.getString(0)
-                    if (!p.isNullOrBlank()) {
-                        val exif = ExifInterface(p)
-                        exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifDateStr)
-                        exif.saveAttributes()
-                        File(p).setLastModified(historicalDateModifiedSec * 1000L)
+            runCatching {
+                resolver.query(mediaUri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val p = cursor.getString(0)
+                        if (!p.isNullOrBlank()) {
+                            val exif = ExifInterface(p)
+                            exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifDateStr)
+                            exif.saveAttributes()
+                            File(p).setLastModified(historicalDateModifiedSec * 1000L)
+                        }
                     }
                 }
             }
