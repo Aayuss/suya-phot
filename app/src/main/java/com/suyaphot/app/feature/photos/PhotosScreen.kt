@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -86,6 +87,7 @@ import com.suyaphot.app.ui.components.ButtonVariant
 import com.suyaphot.app.ui.components.EmptyState
 import com.suyaphot.app.ui.components.MediaFilter
 import com.suyaphot.app.ui.components.MediaTile
+import com.suyaphot.app.ui.components.longPressDragSelect
 import com.suyaphot.app.ui.components.SegmentedFilterChips
 import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaDialog
@@ -130,12 +132,74 @@ fun PhotosScreen(
 
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
+    val photoGridState = rememberLazyGridState()
 
     // Dialog states
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveConsent by remember { mutableStateOf<List<ImportResult.Success>>(emptyList()) }
+    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
+
+    suspend fun markMoveResults(results: List<ImportResult.Success>, disposition: SourceDisposition, errorCode: String? = null) =
+        withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            for (res in results) container.database.vaultJobDao().updateTerminalImportState(
+                res.jobId, vaultId, JobState.COMPLETED.code, disposition.code, errorCode, now
+            )
+        }
+
+    val moveConsentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        container.sessionManager.endSystemActivity()
+        val current = pendingMoveConsent
+        val mode = pendingMoveConsentMode
+        pendingMoveConsent = emptyList()
+        pendingMoveConsentMode = null
+        scope.launch {
+            if (result.resultCode == android.app.Activity.RESULT_OK && mode != null) {
+                val verified = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.completeConsent(current.map { it.uri }, mode) }
+                val deleted = current.filter { it.uri in verified.deletedUris }
+                val retained = current.filter { it.uri in verified.retainedUris }
+                markMoveResults(deleted, SourceDisposition.DELETED)
+                markMoveResults(retained, SourceDisposition.DELETE_FAILED, "SOURCE_DELETE_FAILED_VAULT_SAFE")
+                statusMessage = if (retained.isEmpty()) "Moved into Suya Phot. Originals removed from Gallery."
+                    else "Vault copies are safe, but Android kept " + retained.size + " original(s)."
+            } else {
+                markMoveResults(current, SourceDisposition.RETAINED_BY_USER)
+                statusMessage = "Vault copies are safe. Originals were kept in Gallery."
+            }
+        }
+    }
+
+    fun finishMovedSources(successes: List<ImportResult.Success>) {
+        if (successes.isEmpty()) return
+        scope.launch {
+            when (val outcome = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.deleteSources(successes.map { it.uri }) }) {
+                is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
+                    val deleted = successes.filter { it.uri in outcome.deletedUris }
+                    markMoveResults(deleted, SourceDisposition.DELETED)
+                    statusMessage = "Moved " + deleted.size + " item(s) into Suya Phot."
+                }
+                is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
+                    val directlyDeleted = successes.filter { it.uri in outcome.deletedUris }
+                    markMoveResults(directlyDeleted, SourceDisposition.DELETED)
+                    pendingMoveConsent = successes.filter { it.uri in outcome.uris }
+                    pendingMoveConsentMode = outcome.mode
+                    container.sessionManager.beginSystemActivity()
+                    moveConsentLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
+                }
+                is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
+                    val directlyDeleted = successes.filter { it.uri in outcome.deletedUris }
+                    val retained = successes.filter { it.uri in outcome.uris }
+                    markMoveResults(directlyDeleted, SourceDisposition.DELETED)
+                    markMoveResults(retained, SourceDisposition.DELETE_FAILED, "SOURCE_DELETE_FAILED_VAULT_SAFE")
+                    statusMessage = "Vault copies are safe, but Android kept " + retained.size + " original(s)."
+                }
+            }
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -143,17 +207,17 @@ fun PhotosScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = null,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Moving $current of $total items into vault..." }
                     }
                 )
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicate = results.count { it is ImportResult.Success && it.alreadyExisted }
+                val successes = results.filterIsInstance<ImportResult.Success>()
                 val failed = results.count { it is ImportResult.Failure }
-                statusMessage = "$imported imported, $duplicate duplicates, $failed failed"
+                if (successes.isNotEmpty()) finishMovedSources(successes)
+                if (successes.isEmpty()) statusMessage = "No items moved; $failed failed"
             }
         }
     }
@@ -566,7 +630,7 @@ fun PhotosScreen(
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
-                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to import private photos or videos from your gallery.",
+                    subtitle = if (searchQuery.isNotBlank()) "Try a different search term." else "Tap '+' to move photos or videos into your private vault.",
                     actionText = if (searchQuery.isBlank()) "Import Photos & Videos" else null,
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
@@ -578,11 +642,24 @@ fun PhotosScreen(
                 )
             } else {
                 LazyVerticalGrid(
+                    state = photoGridState,
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .longPressDragSelect(photoGridState) { anchor, current ->
+                            if (allMatchingIds != null) return@longPressDragSelect
+                            val from = minOf(anchor, current)
+                            val to = maxOf(anchor, current)
+                            for (index in from..to) {
+                                val id = if (isSearching) searchEntities.getOrNull(index)?.id
+                                else pagedEntities.peek(index)?.id ?: pagedEntities[index]?.id
+                                if (id != null) selectedMediaIds[id] = Unit
+                            }
+                        }
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->

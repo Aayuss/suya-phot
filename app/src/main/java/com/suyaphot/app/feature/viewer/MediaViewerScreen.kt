@@ -726,19 +726,21 @@ private fun MediaViewerPage(
                             onClick = {
                                 val current = mediaEntity ?: return@SuyaIconButton
                                 val newFav = !current.favorite
+                                mediaEntity = current.copy(favorite = newFav)
                                 scope.launch {
-                                    val activeVaultId = session?.vaultId ?: return@launch
-                                    val updated = withContext(Dispatchers.IO) {
-                                        container.database.mediaItemDao().updateFavoriteForVault(
-                                            activeVaultId,
-                                            current.id,
-                                            newFav,
-                                            System.currentTimeMillis()
-                                        )
+                                    val activeVaultId = session?.vaultId
+                                    if (activeVaultId == null) {
+                                        mediaEntity = current
+                                        return@launch
                                     }
-                                    if (updated == 1) {
-                                        mediaEntity = current.copy(favorite = newFav)
-                                    }
+                                    val updated = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            container.database.mediaItemDao().updateFavoriteForVault(
+                                                activeVaultId, current.id, newFav, System.currentTimeMillis()
+                                            )
+                                        }
+                                    }.getOrDefault(0)
+                                    if (updated != 1 && mediaEntity?.id == current.id) mediaEntity = current
                                 }
                             }
                         )
