@@ -32,8 +32,11 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -61,6 +64,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -120,6 +124,8 @@ fun PhotosScreen(
 
     val selectedMediaIds = remember { mutableStateMapOf<String, Unit>() }
     var allMatchingIds by remember { mutableStateOf<Set<String>?>(null) }
+    val gridState = rememberLazyGridState()
+    var dragSelectionAnchor by remember { mutableStateOf<Int?>(null) }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() || allMatchingIds != null } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
@@ -592,11 +598,64 @@ fun PhotosScreen(
                 )
             } else {
                 LazyVerticalGrid(
+                    state = gridState,
                     columns = GridCells.Fixed(gridCols.coerceIn(2, 5)),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    modifier = Modifier.weight(1f).testTag("photos_grid")
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("photos_grid")
+                        .pointerInput(isSearching, searchEntities.size, pagedEntities.itemCount) {
+                            fun idAt(index: Int): String? =
+                                if (isSearching) searchEntities.getOrNull(index)?.id
+                                else pagedEntities.peek(index)?.id
+
+                            fun selectInclusive(from: Int, to: Int) {
+                                allMatchingIds = null
+                                val start = minOf(from, to)
+                                val end = maxOf(from, to)
+                                for (index in start..end) {
+                                    idAt(index)?.let { selectedMediaIds[it] = Unit }
+                                }
+                            }
+
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { position ->
+                                    val hit = gridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                        position.x >= info.offset.x &&
+                                            position.x < info.offset.x + info.size.width &&
+                                            position.y >= info.offset.y &&
+                                            position.y < info.offset.y + info.size.height
+                                    }
+                                    if (hit != null) {
+                                        dragSelectionAnchor = hit.index
+                                        selectInclusive(hit.index, hit.index)
+                                    }
+                                },
+                                onDrag = { change, _ ->
+                                    change.consume()
+                                    val hit = gridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                        change.position.x >= info.offset.x &&
+                                            change.position.x < info.offset.x + info.size.width &&
+                                            change.position.y >= info.offset.y &&
+                                            change.position.y < info.offset.y + info.size.height
+                                    }
+                                    val anchorIndex = dragSelectionAnchor
+                                    if (hit != null && anchorIndex != null) {
+                                        selectInclusive(anchorIndex, hit.index)
+                                    }
+
+                                    val edge = 72.dp.toPx()
+                                    when {
+                                        change.position.y < edge -> scope.launch { gridState.scrollBy(-30.dp.toPx()) }
+                                        change.position.y > size.height - edge -> scope.launch { gridState.scrollBy(30.dp.toPx()) }
+                                    }
+                                },
+                                onDragEnd = { dragSelectionAnchor = null },
+                                onDragCancel = { dragSelectionAnchor = null }
+                            )
+                        }
                 ) {
                     if (isSearching) {
                         items(searchEntities, key = { it.id }) { entity ->
