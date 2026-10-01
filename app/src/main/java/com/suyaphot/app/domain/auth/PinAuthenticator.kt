@@ -8,6 +8,9 @@ import com.suyaphot.app.core.database.dao.VaultDao
 import com.suyaphot.app.core.datastore.SecurityPreferences
 import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.core.util.SafeLog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import java.security.MessageDigest
 import javax.crypto.Cipher
@@ -196,20 +199,27 @@ class PinAuthenticator(
         val realEnvelope = realVault?.let { runCatching { KeyManager.PinEnvelope.deserialize(it.pinEnvelope) }.getOrNull() }
         val secondaryEnvelope = secondaryVault?.let { runCatching { KeyManager.PinEnvelope.deserialize(it.pinEnvelope) }.getOrNull() }
 
-        // Both unwrap attempts run to mitigate timing discrepancy
-        val realPinCopy = pinChars.copyOf()
-        val secondaryPinCopy = pinChars.copyOf()
-        val realResult = try {
-            realEnvelope?.let { keyManager.unwrapPinEnvelope(it, realPinCopy) }
-        } finally {
-            realPinCopy.fill('\u0000')
+        // Both unwrap attempts run concurrently on Dispatchers.Default to cut unlock time in half while preserving constant-time timing security
+        val (realResult, secondaryResult) = coroutineScope {
+            val realDeferred = async(Dispatchers.Default) {
+                val realPinCopy = pinChars.copyOf()
+                try {
+                    realEnvelope?.let { keyManager.unwrapPinEnvelope(it, realPinCopy) }
+                } finally {
+                    realPinCopy.fill('\u0000')
+                }
+            }
+            val secondaryDeferred = async(Dispatchers.Default) {
+                val secondaryPinCopy = pinChars.copyOf()
+                try {
+                    secondaryEnvelope?.let { keyManager.unwrapPinEnvelope(it, secondaryPinCopy) }
+                } finally {
+                    secondaryPinCopy.fill('\u0000')
+                }
+            }
+            realDeferred.await() to secondaryDeferred.await()
         }
-        val secondaryResult = try {
-            secondaryEnvelope?.let { keyManager.unwrapPinEnvelope(it, secondaryPinCopy) }
-        } finally {
-            secondaryPinCopy.fill('\u0000')
-            pinChars.fill('\u0000')
-        }
+        pinChars.fill('\u0000')
 
         return when {
             realResult != null && realVault?.credentialTypeCode == typeCode -> {

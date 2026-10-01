@@ -114,6 +114,63 @@ fun SetupScreen(
         }
     }
 
+    val mainActivity = context as? com.suyaphot.app.app.MainActivity
+    DisposableEffect(mainActivity, currentStep, initialPin, confirmPin) {
+        if (currentStep == SetupStep.ENTER_PIN || currentStep == SetupStep.CONFIRM_PIN) {
+            mainActivity?.onHardwareKeyEventListener = { keyEvent ->
+                if (keyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
+                    val unicode = keyEvent.unicodeChar
+                    if (unicode in '0'.code..'9'.code) {
+                        val digit = unicode.toChar().toString()
+                        if (currentStep == SetupStep.ENTER_PIN) {
+                            if (initialPin.length < 6) {
+                                initialPin += digit
+                                if (initialPin.length == 6) {
+                                    currentStep = SetupStep.CONFIRM_PIN
+                                }
+                            }
+                        } else if (currentStep == SetupStep.CONFIRM_PIN) {
+                            if (confirmPin.length < 6) {
+                                confirmPin += digit
+                                if (confirmPin.length == 6) {
+                                    if (confirmPin == initialPin) {
+                                        generatedRecoveryCode = container.keyManager.generateRecoverySecret()
+                                        currentStep = SetupStep.RECOVERY_KIT
+                                    } else {
+                                        pinErrorMessage = "PINs do not match. Try again."
+                                        shakeTrigger++
+                                        confirmPin = ""
+                                    }
+                                }
+                            }
+                        }
+                        true
+                    } else if (keyEvent.keyCode == android.view.KeyEvent.KEYCODE_DEL) {
+                        if (currentStep == SetupStep.ENTER_PIN) {
+                            if (initialPin.isNotEmpty()) {
+                                initialPin = initialPin.dropLast(1)
+                            }
+                        } else if (currentStep == SetupStep.CONFIRM_PIN) {
+                            if (confirmPin.isNotEmpty()) {
+                                confirmPin = confirmPin.dropLast(1)
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+        } else {
+            mainActivity?.onHardwareKeyEventListener = null
+        }
+        onDispose {
+            mainActivity?.onHardwareKeyEventListener = null
+        }
+    }
+
     if (showRestoreScreen) {
         BackupRestoreScreen(
             container = container,

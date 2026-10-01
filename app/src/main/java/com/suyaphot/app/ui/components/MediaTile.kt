@@ -72,7 +72,14 @@ fun MediaTile(
     var thumbnailBitmap by remember(item.id, item.updatedAt) { mutableStateOf<Bitmap?>(null) }
 
     LaunchedEffect(item.id, item.updatedAt) {
-        thumbnailBitmap = withContext(Dispatchers.IO) { thumbLoader(item.id) }
+        var bmp = withContext(Dispatchers.IO) { thumbLoader(item.id) }
+        var attempts = 0
+        while (bmp == null && attempts < 2) {
+            kotlinx.coroutines.delay(300L * (attempts + 1))
+            attempts++
+            bmp = withContext(Dispatchers.IO) { thumbLoader(item.id) }
+        }
+        thumbnailBitmap = bmp
     }
 
     Box(

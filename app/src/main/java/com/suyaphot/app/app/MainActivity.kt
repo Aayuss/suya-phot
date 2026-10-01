@@ -1,5 +1,6 @@
 package com.suyaphot.app.app
 
+import android.annotation.SuppressLint
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.setContent
@@ -66,7 +67,13 @@ class MainActivity : FragmentActivity() {
         setContent {
             val screenshotProtection by container.preferences.screenshotProtection.collectAsState(initial = true)
             LaunchedEffect(screenshotProtection) {
-                if (screenshotProtection) {
+                val allowScreenshots = try {
+                    val spClass = Class.forName("android.os.SystemProperties")
+                    val getBoolean = spClass.getMethod("getBoolean", String::class.java, Boolean::class.javaPrimitiveType)
+                    getBoolean.invoke(null, "debug.suya.allow_screenshots", false) as Boolean
+                } catch (_: Throwable) { false }
+
+                if (screenshotProtection && !allowScreenshots) {
                     window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 } else {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -80,6 +87,16 @@ class MainActivity : FragmentActivity() {
             }
         }
     }
+
+    var onHardwareKeyEventListener: ((android.view.KeyEvent) -> Boolean)? = null
+
+    @SuppressLint("RestrictedApi")
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (onHardwareKeyEventListener?.invoke(event) == true) {
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
 }
 
 @Composable
@@ -89,7 +106,7 @@ fun MainAppHost(container: AppContainer) {
     val hideSensitiveUi by container.sessionManager.hideSensitiveUi.collectAsState()
 
     var activeTab by rememberSaveable { mutableStateOf(SuyaNavTab.PHOTOS) }
-    var hiddenEntryRequest by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    var pendingHiddenEntryRequest by remember { mutableStateOf<Long?>(null) }
     var activeViewerItemId by remember { mutableStateOf<String?>(null) }
     var activeViewerScope by remember { mutableStateOf<ViewerAccessScope?>(null) }
     var activeViewerCollection by remember { mutableStateOf<ViewerCollection?>(null) }
@@ -102,10 +119,13 @@ fun MainAppHost(container: AppContainer) {
     LaunchedEffect(sessionState) {
         val s = sessionState
         if (s is VaultSession.Unlocked) {
-            container.importRecoveryManager.reconcileActiveJobs(s)
-            container.restoreRecoveryManager.reconcile(s)
-            container.trashCoordinator.reconcilePending(s.vaultId)
+            withContext(Dispatchers.IO) {
+                container.importRecoveryManager.reconcileActiveJobs(s)
+                container.restoreRecoveryManager.reconcile(s)
+                container.trashCoordinator.reconcilePending(s.vaultId)
+            }
         } else {
+            pendingHiddenEntryRequest = null
             container.vaultSearchIndex.clear()
             container.encryptedThumbnailRepository.clear()
             withContext(Dispatchers.IO) {
@@ -208,7 +228,7 @@ fun MainAppHost(container: AppContainer) {
                         onTabLongPressed = { tab ->
                             if (tab == SuyaNavTab.FOLDERS) {
                                 activeTab = SuyaNavTab.FOLDERS
-                                hiddenEntryRequest++
+                                pendingHiddenEntryRequest = System.currentTimeMillis()
                             }
                         }
                     )
@@ -231,7 +251,8 @@ fun MainAppHost(container: AppContainer) {
                             SuyaNavTab.FOLDERS -> {
                                 FoldersScreen(
                                     container = container,
-                                    hiddenEntryRequest = hiddenEntryRequest,
+                                    hiddenEntryRequest = pendingHiddenEntryRequest,
+                                    onHiddenEntryConsumed = { pendingHiddenEntryRequest = null },
                                     onMediaClick = { itemId, viewerScope, collection -> activeViewerScope = viewerScope; activeViewerCollection = collection; activeViewerItemId = itemId },
                                     onFolderOpened = { /* folder traversal handled internally */ }
                                 )

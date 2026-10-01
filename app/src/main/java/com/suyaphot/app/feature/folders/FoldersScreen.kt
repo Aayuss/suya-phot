@@ -123,7 +123,8 @@ import kotlinx.coroutines.withContext
 fun FoldersScreen(
     container: AppContainer,
     modifier: Modifier = Modifier,
-    hiddenEntryRequest: Int = 0,
+    hiddenEntryRequest: Long? = null,
+    onHiddenEntryConsumed: () -> Unit = {},
     onMediaClick: (itemId: String, scope: ViewerAccessScope?, collection: ViewerCollection) -> Unit = { _, _, _ -> },
     onFolderOpened: (folderId: String) -> Unit = {}
 ) {
@@ -510,7 +511,9 @@ fun FoldersScreen(
     }
 
     LaunchedEffect(hiddenEntryRequest) {
-        if (hiddenEntryRequest > 0 && currentParentId == null && !hiddenMode) {
+        val req = hiddenEntryRequest
+        if (req != null && currentParentId == null && !hiddenMode) {
+            onHiddenEntryConsumed()
             val vault = container.database.vaultDao().getVault(vaultId)
             gateTypeCode = vault?.credentialTypeCode ?: 0
             hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }

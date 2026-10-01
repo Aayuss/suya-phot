@@ -125,9 +125,20 @@ fun SecurityScreen(
         .collectAsState(initial = null)
 
     val isBiometricEnrolled = realVault?.biometricEnvelope != null && realVault?.biometricIv != null
-    val canEnrollBiometrics = remember {
+    val biometricAuthStatus = remember {
         val bm = BiometricManager.from(context)
-        bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
+        bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+    }
+    val canEnrollBiometrics = biometricAuthStatus == BiometricManager.BIOMETRIC_SUCCESS
+    val biometricSubtitle = when (biometricAuthStatus) {
+        BiometricManager.BIOMETRIC_SUCCESS ->
+            "Use Android strong biometrics. Fingerprint works on supported devices; face works only when Android classifies it as strong."
+        BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ->
+            "Set up a strong biometric (fingerprint or strong face) in Android Settings first."
+        BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE ->
+            "Biometric hardware not available on this device."
+        else ->
+            "Biometric unlock is currently unavailable on this device."
     }
 
     fun submitChangedCredential(newChars: CharArray) {
@@ -263,54 +274,54 @@ fun SecurityScreen(
                 )
 
                 // Biometric Unlock
-                if (canEnrollBiometrics) {
-                    SecurityToggleRow(
-                        title = "Biometric Unlock",
-                        subtitle = "Use Android strong biometrics. Fingerprint works on supported devices; face works only when Android classifies it as strong.",
-                        icon = Icons.Default.Fingerprint,
-                        checked = isBiometricEnrolled,
-                        onCheckedChange = { enable ->
-                            val activity = context as? FragmentActivity ?: return@SecurityToggleRow
-                            val real = realVault ?: return@SecurityToggleRow
-                            if (enable) {
-                                try {
-                                    val encryptCipher = container.keyManager.createBiometricEncryptCipher(real.id)
-                                    val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                                        .setTitle("Enable Biometric Unlock")
-                                        .setSubtitle("Confirm a strong biometric to link the biometric key to your vault")
-                                        .setNegativeButtonText("Cancel")
-                                        .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                                        .build()
+                SecurityToggleRow(
+                    title = "Biometric Unlock",
+                    subtitle = biometricSubtitle,
+                    icon = Icons.Default.Fingerprint,
+                    checked = isBiometricEnrolled,
+                    enabled = canEnrollBiometrics,
+                    onCheckedChange = { enable ->
+                        val activity = context as? FragmentActivity ?: return@SecurityToggleRow
+                        val real = realVault ?: return@SecurityToggleRow
+                        if (enable) {
+                            try {
+                                val encryptCipher = container.keyManager.createBiometricEncryptCipher(real.id)
+                                val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                                    .setTitle("Enable Biometric Unlock")
+                                    .setSubtitle("Confirm a strong biometric to link the biometric key to your vault")
+                                    .setNegativeButtonText("Cancel")
+                                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                                    .build()
 
-                                    val biometricPrompt = BiometricPrompt(
-                                        activity,
-                                        ContextCompat.getMainExecutor(activity),
-                                        object : BiometricPrompt.AuthenticationCallback() {
-                                            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                                                val authCipher = result.cryptoObject?.cipher ?: return
-                                                val currentSession = container.sessionManager.sessionState.value
-                                                if (currentSession is VaultSession.Unlocked) {
-                                                    currentSession.masterKeyHandle.useBytes { masterKey ->
-                                                        val envelope = authCipher.doFinal(masterKey)
-                                                        val iv = authCipher.iv
-                                                        scope.launch(Dispatchers.IO) {
-                                                            container.database.vaultDao().updateBiometricEnvelope(real.id, envelope, iv)
-                                                        }
+                                val biometricPrompt = BiometricPrompt(
+                                    activity,
+                                    ContextCompat.getMainExecutor(activity),
+                                    object : BiometricPrompt.AuthenticationCallback() {
+                                        override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                                            val authCipher = result.cryptoObject?.cipher ?: return
+                                            val currentSession = container.sessionManager.sessionState.value
+                                            if (currentSession is VaultSession.Unlocked) {
+                                                currentSession.masterKeyHandle.useBytes { masterKey ->
+                                                    val envelope = authCipher.doFinal(masterKey)
+                                                    val iv = authCipher.iv
+                                                    scope.launch(Dispatchers.IO) {
+                                                        container.database.vaultDao().updateBiometricEnvelope(real.id, envelope, iv)
                                                     }
                                                 }
                                             }
                                         }
-                                    )
-                                    biometricPrompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(encryptCipher))
-                                } catch (ignored: Exception) {}
-                            } else {
-                                scope.launch(Dispatchers.IO) {
-                                    container.keyManager.deleteBiometricKey(real.id)
-                                    container.database.vaultDao().updateBiometricEnvelope(real.id, null, null)
-                                }
+                                    }
+                                )
+                                biometricPrompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(encryptCipher))
+                            } catch (ignored: Exception) {}
+                        } else {
+                            scope.launch(Dispatchers.IO) {
+                                container.keyManager.deleteBiometricKey(real.id)
+                                container.database.vaultDao().updateBiometricEnvelope(real.id, null, null)
                             }
                         }
-                    )
+                    }
+                )
 
                     if (isBiometricEnrolled) {
                         SecurityToggleRow(
@@ -323,7 +334,6 @@ fun SecurityScreen(
                             }
                         )
                     }
-                }
 
                 // Screenshot & Recents Protection Toggle
                 SecurityToggleRow(
@@ -764,6 +774,7 @@ private fun SecurityToggleRow(
     subtitle: String,
     icon: ImageVector,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Surface(
@@ -782,7 +793,7 @@ private fun SecurityToggleRow(
                 modifier = Modifier.size(44.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(icon, contentDescription = null, tint = SuyaColors.White, modifier = Modifier.size(22.dp))
+                    Icon(icon, contentDescription = null, tint = if (enabled) SuyaColors.White else SuyaColors.TextMuted, modifier = Modifier.size(22.dp))
                 }
             }
             Spacer(modifier = Modifier.width(14.dp))
@@ -792,7 +803,7 @@ private fun SecurityToggleRow(
                     fontFamily = SoraFontFamily,
                     fontWeight = FontWeight.Medium,
                     fontSize = 15.sp,
-                    color = SuyaColors.White
+                    color = if (enabled) SuyaColors.White else SuyaColors.White.copy(alpha = 0.5f)
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
@@ -805,13 +816,17 @@ private fun SecurityToggleRow(
             Spacer(modifier = Modifier.width(10.dp))
             Switch(
                 checked = checked,
+                enabled = enabled,
                 onCheckedChange = onCheckedChange,
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = SuyaColors.White,
                     checkedTrackColor = SuyaColors.Accent,
                     uncheckedThumbColor = SuyaColors.TextMuted,
                     uncheckedTrackColor = SuyaColors.Fill07,
-                    uncheckedBorderColor = Color.Transparent
+                    uncheckedBorderColor = Color.Transparent,
+                    disabledCheckedThumbColor = SuyaColors.TextMuted,
+                    disabledUncheckedThumbColor = SuyaColors.TextMuted.copy(alpha = 0.4f),
+                    disabledUncheckedTrackColor = SuyaColors.Fill07.copy(alpha = 0.4f)
                 )
             )
         }

@@ -13,6 +13,10 @@ import com.suyaphot.app.core.util.VaultFileStore
 import com.suyaphot.app.domain.auth.SessionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.ConcurrentHashMap
+import java.io.File
 
 class EncryptedThumbnailRepository(
     private val sessionManager: SessionManager,
@@ -26,11 +30,13 @@ class EncryptedThumbnailRepository(
             (value.byteCount / 1024).coerceAtLeast(1)
     }
     private var generation = 0L
+    private val itemLocks = ConcurrentHashMap<String, Mutex>()
 
     @Synchronized
     fun clear() {
         generation++
         cache.evictAll()
+        itemLocks.clear()
     }
 
     suspend fun load(vaultId: String, mediaId: String, revision: Long): Bitmap? =
@@ -48,50 +54,60 @@ class EncryptedThumbnailRepository(
                 var bitmap = generator.decryptThumbnail(thumbFile, lease.thumbSubkey, mediaId)
 
                 if (bitmap == null) {
-                    val entity = database.mediaItemDao().getItemForVault(mediaId, vaultId)
-                        ?: return@withContext null
-                    val mediaFile = fileStore.getMediaFile(vaultId, mediaId)
-                    if (!mediaFile.exists()) return@withContext null
+                    val mutex = itemLocks.computeIfAbsent(mediaId) { Mutex() }
+                    mutex.withLock {
+                        // Re-check in case another coroutine completed generation
+                        bitmap = generator.decryptThumbnail(thumbFile, lease.thumbSubkey, mediaId)
+                        if (bitmap == null) {
+                            val entity = database.mediaItemDao().getItemForVault(mediaId, vaultId)
+                                ?: return@withContext null
+                            val mediaFile = fileStore.getMediaFile(vaultId, mediaId)
+                            if (!mediaFile.exists()) return@withContext null
 
-                    var metadata: PrivateMediaMetadata? = null
-                    val metadataBytes = runCatching {
-                        Aead.decryptWithPrependedNonce(
-                            lease.metaSubkey,
-                            entity.encryptedMetadata,
-                            mediaId.toByteArray(Charsets.UTF_8)
-                        )
-                    }.getOrNull()
-                    if (metadataBytes != null) {
-                        try {
-                            metadata = runCatching { PrivateMediaMetadata.deserialize(metadataBytes) }.getOrNull()
-                        } finally {
-                            metadataBytes.fill(0)
-                        }
-                    }
+                            var metadata: PrivateMediaMetadata? = null
+                            val metadataBytes = runCatching {
+                                Aead.decryptWithPrependedNonce(
+                                    lease.metaSubkey,
+                                    entity.encryptedMetadata,
+                                    mediaId.toByteArray(Charsets.UTF_8)
+                                )
+                            }.getOrNull()
+                            if (metadataBytes != null) {
+                                try {
+                                    metadata = runCatching { PrivateMediaMetadata.deserialize(metadataBytes) }.getOrNull()
+                                } finally {
+                                    metadataBytes.fill(0)
+                                }
+                            }
 
-                    val temp = fileStore.createViewerTempFile(
-                        mediaId,
-                        metadata?.originalFileExtension
-                            ?: if (entity.mediaTypeCode == MediaType.VIDEO.code) "mp4" else "img"
-                    )
-                    try {
-                        val verified = vaultCrypto.decryptVerifiedToFile(mediaFile, lease.mediaSubkey, mediaId, temp)
-                        val shaHex = verified.sha256.joinToString("") { "%02x".format(it) }
-                        if (verified.plaintextSize != entity.plaintextSize ||
-                            !shaHex.equals(entity.sha256Hex, ignoreCase = true)) return@withContext null
-
-                        if (thumbFile.exists()) thumbFile.delete()
-                        val generated = if (entity.mediaTypeCode == MediaType.VIDEO.code) {
-                            generator.generateAndEncryptVideoThumbnail(Uri.fromFile(temp), mediaId, lease.thumbSubkey, thumbFile)
-                        } else {
-                            generator.generateAndEncryptImageThumbnail(
-                                Uri.fromFile(temp), mediaId, lease.thumbSubkey, thumbFile,
-                                metadata?.orientation ?: 1
+                            val temp = fileStore.createViewerTempFile(
+                                mediaId,
+                                metadata?.originalFileExtension
+                                    ?: if (entity.mediaTypeCode == MediaType.VIDEO.code) "mp4" else "img"
                             )
+                            try {
+                                val verified = vaultCrypto.decryptVerifiedToFile(mediaFile, lease.mediaSubkey, mediaId, temp)
+                                val shaHex = verified.sha256.joinToString("") { "%02x".format(it) }
+                                if (verified.plaintextSize != entity.plaintextSize ||
+                                    !shaHex.equals(entity.sha256Hex, ignoreCase = true)) return@withContext null
+
+                                if (thumbFile.exists()) thumbFile.delete()
+                                val generated = if (entity.mediaTypeCode == MediaType.VIDEO.code) {
+                                    generator.generateAndEncryptVideoThumbnail(temp, mediaId, lease.thumbSubkey, thumbFile)
+                                } else {
+                                    generator.generateAndEncryptImageThumbnail(
+                                        temp, mediaId, lease.thumbSubkey, thumbFile,
+                                        metadata?.orientation ?: 1
+                                    )
+                                }
+                                if (generated) {
+                                    database.mediaItemDao().setThumbPathForVault(vaultId, mediaId, thumbFile.name)
+                                    bitmap = generator.decryptThumbnail(thumbFile, lease.thumbSubkey, mediaId)
+                                }
+                            } finally {
+                                temp.delete()
+                            }
                         }
-                        if (generated) bitmap = generator.decryptThumbnail(thumbFile, lease.thumbSubkey, mediaId)
-                    } finally {
-                        temp.delete()
                     }
                 }
 

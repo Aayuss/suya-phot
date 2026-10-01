@@ -18,10 +18,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -177,6 +186,82 @@ fun LockScreen(
         }
     }
 
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
+
+    fun handleDigitInput(digit: Char) {
+        if (lockoutSecondsLeft <= 0 && enteredPin.length < 6) {
+            enteredPin += digit
+            errorMessage = null
+            if (enteredPin.length == 6) {
+                scope.launch {
+                    val pinChars = enteredPin.toCharArray()
+                    val result = container.pinAuthenticator.authenticateWithPin(pinChars)
+                    when (result) {
+                        is AuthResult.Success -> {
+                            onUnlocked()
+                        }
+                        is AuthResult.IncorrectPin -> {
+                            enteredPin = ""
+                            shakeTrigger++
+                            errorMessage = "Incorrect PIN"
+
+                            // Trigger intruder selfie check
+                            val triggerThreshold = container.preferences.intruderTriggerCount.first()
+                            if (container.preferences.intruderSelfieEnabled.first() && result.attempts == triggerThreshold) {
+                                container.intruderCaptureManager.captureIntruderPhoto(
+                                    lifecycleOwner = lifecycleOwner,
+                                    failureReason = "Failed PIN attempt #${result.attempts}"
+                                )
+                            }
+                        }
+                        is AuthResult.LockedOut -> {
+                            enteredPin = ""
+                            shakeTrigger++
+                            errorMessage = "Too many failed attempts"
+                        }
+                        is AuthResult.Error -> {
+                            enteredPin = ""
+                            errorMessage = result.message
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun handleBackspace() {
+        if (enteredPin.isNotEmpty()) {
+            enteredPin = enteredPin.dropLast(1)
+            errorMessage = null
+        }
+    }
+
+    val mainActivity = context as? com.suyaphot.app.app.MainActivity
+    androidx.compose.runtime.DisposableEffect(mainActivity, enteredPin, lockoutSecondsLeft) {
+        mainActivity?.onHardwareKeyEventListener = { keyEvent ->
+            if (keyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
+                val unicode = keyEvent.unicodeChar
+                if (unicode in '0'.code..'9'.code) {
+                    handleDigitInput(unicode.toChar())
+                    true
+                } else if (keyEvent.keyCode == android.view.KeyEvent.KEYCODE_DEL) {
+                    handleBackspace()
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        onDispose {
+            mainActivity?.onHardwareKeyEventListener = null
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -184,6 +269,20 @@ fun LockScreen(
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .imePadding()
             .padding(18.dp)
+            .focusRequester(focusRequester)
+            .focusable()
+            .onKeyEvent { keyEvent ->
+                if (keyEvent.type == KeyEventType.KeyDown) {
+                    val char = keyEvent.utf16CodePoint.toChar()
+                    if (char in '0'..'9') {
+                        handleDigitInput(char)
+                        true
+                    } else if (keyEvent.key == Key.Backspace) {
+                        handleBackspace()
+                        true
+                    } else false
+                } else false
+            }
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -270,52 +369,8 @@ fun LockScreen(
                     modifier = Modifier.fillMaxWidth(0.85f)
                 )
             } else SecurePinPad(
-                onDigitClick = { digit ->
-                    if (lockoutSecondsLeft <= 0 && enteredPin.length < 6) {
-                        enteredPin += digit
-                        errorMessage = null
-                        if (enteredPin.length == 6) {
-                            scope.launch {
-                                val pinChars = enteredPin.toCharArray()
-                                val result = container.pinAuthenticator.authenticateWithPin(pinChars)
-                                when (result) {
-                                    is AuthResult.Success -> {
-                                        onUnlocked()
-                                    }
-                                    is AuthResult.IncorrectPin -> {
-                                        enteredPin = ""
-                                        shakeTrigger++
-                                        errorMessage = "Incorrect PIN"
-
-                                        // Trigger intruder selfie check
-                                        val triggerThreshold = container.preferences.intruderTriggerCount.first()
-                                        if (container.preferences.intruderSelfieEnabled.first() && result.attempts == triggerThreshold) {
-                                            container.intruderCaptureManager.captureIntruderPhoto(
-                                                lifecycleOwner = lifecycleOwner,
-                                                failureReason = "Failed PIN attempt #${result.attempts}"
-                                            )
-                                        }
-                                    }
-                                    is AuthResult.LockedOut -> {
-                                        enteredPin = ""
-                                        shakeTrigger++
-                                        errorMessage = "Too many failed attempts"
-                                    }
-                                    is AuthResult.Error -> {
-                                        enteredPin = ""
-                                        errorMessage = result.message
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
-                onBackspaceClick = {
-                    if (enteredPin.isNotEmpty()) {
-                        enteredPin = enteredPin.dropLast(1)
-                        errorMessage = null
-                    }
-                },
+                onDigitClick = ::handleDigitInput,
+                onBackspaceClick = ::handleBackspace,
                 showBiometric = isBiometricEnrolled,
                 onBiometricClick = {
                     if (lockoutSecondsLeft <= 0) {

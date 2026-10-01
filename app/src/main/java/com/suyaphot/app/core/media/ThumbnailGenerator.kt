@@ -29,19 +29,50 @@ class ThumbnailGenerator(private val context: Context) {
     )
 
     fun generateAndEncryptImagePreview(
+        file: File, itemId: String, thumbSubkey: ByteArray, outputPreviewFile: File,
+        orientation: Int = ExifInterface.ORIENTATION_NORMAL
+    ): Boolean = generateAndEncryptImagePreviewInternal(
+        streamOpener = { file.inputStream() },
+        itemId = itemId,
+        thumbSubkey = thumbSubkey,
+        outputPreviewFile = outputPreviewFile,
+        orientation = orientation
+    )
+
+    fun generateAndEncryptImagePreview(
         imageUri: Uri, itemId: String, thumbSubkey: ByteArray, outputPreviewFile: File,
+        orientation: Int = ExifInterface.ORIENTATION_NORMAL
+    ): Boolean = generateAndEncryptImagePreviewInternal(
+        streamOpener = {
+            if (imageUri.scheme == "file" && imageUri.path != null) {
+                File(imageUri.path!!).inputStream()
+            } else {
+                context.contentResolver.openInputStream(imageUri)
+            }
+        },
+        itemId = itemId,
+        thumbSubkey = thumbSubkey,
+        outputPreviewFile = outputPreviewFile,
+        orientation = orientation
+    )
+
+    private fun generateAndEncryptImagePreviewInternal(
+        streamOpener: () -> java.io.InputStream?,
+        itemId: String,
+        thumbSubkey: ByteArray,
+        outputPreviewFile: File,
         orientation: Int = ExifInterface.ORIENTATION_NORMAL
     ): Boolean {
         outputPreviewFile.parentFile?.mkdirs()
         val partial = File(outputPreviewFile.parentFile, "${outputPreviewFile.name}.partial")
         return try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            val boundsStream = context.contentResolver.openInputStream(imageUri) ?: return false
+            val boundsStream = streamOpener() ?: return false
             boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return false
             var sample = 1
             while (maxOf(bounds.outWidth, bounds.outHeight) / sample > TARGET_PREVIEW_SIZE) sample *= 2
-            var bitmap = context.contentResolver.openInputStream(imageUri)?.use {
+            var bitmap = streamOpener()?.use {
                 BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply {
                     inSampleSize = sample
                     inPreferredConfig = Bitmap.Config.RGB_565
@@ -93,7 +124,41 @@ class ThumbnailGenerator(private val context: Context) {
      * compresses to JPEG, encrypts with [thumbSubkey] bound to [itemId] AAD, and atomically writes to [outputThumbFile].
      */
     fun generateAndEncryptImageThumbnail(
+        file: File,
+        itemId: String,
+        thumbSubkey: ByteArray,
+        outputThumbFile: File,
+        orientation: Int = ExifInterface.ORIENTATION_NORMAL
+    ): Boolean = generateAndEncryptImageThumbnailInternal(
+        streamOpener = { file.inputStream() },
+        itemId = itemId,
+        thumbSubkey = thumbSubkey,
+        outputThumbFile = outputThumbFile,
+        orientation = orientation
+    )
+
+    fun generateAndEncryptImageThumbnail(
         imageUri: Uri,
+        itemId: String,
+        thumbSubkey: ByteArray,
+        outputThumbFile: File,
+        orientation: Int = ExifInterface.ORIENTATION_NORMAL
+    ): Boolean = generateAndEncryptImageThumbnailInternal(
+        streamOpener = {
+            if (imageUri.scheme == "file" && imageUri.path != null) {
+                File(imageUri.path!!).inputStream()
+            } else {
+                context.contentResolver.openInputStream(imageUri)
+            }
+        },
+        itemId = itemId,
+        thumbSubkey = thumbSubkey,
+        outputThumbFile = outputThumbFile,
+        orientation = orientation
+    )
+
+    private fun generateAndEncryptImageThumbnailInternal(
+        streamOpener: () -> java.io.InputStream?,
         itemId: String,
         thumbSubkey: ByteArray,
         outputThumbFile: File,
@@ -105,9 +170,9 @@ class ThumbnailGenerator(private val context: Context) {
         return try {
             // Pass 1: Decode bounds only
             val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            context.contentResolver.openInputStream(imageUri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, boundsOptions)
-            } ?: return false
+            val boundsStream = streamOpener() ?: return false
+            boundsStream.use { BitmapFactory.decodeStream(it, null, boundsOptions) }
+            if (boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return false
 
             val sampleSize = calculateInSampleSize(boundsOptions, TARGET_THUMB_SIZE, TARGET_THUMB_SIZE)
 
@@ -117,7 +182,7 @@ class ThumbnailGenerator(private val context: Context) {
                 inPreferredConfig = Bitmap.Config.RGB_565 // Memory efficient
             }
 
-            var bitmap = context.contentResolver.openInputStream(imageUri)?.use { stream ->
+            var bitmap = streamOpener()?.use { stream ->
                 BitmapFactory.decodeStream(stream, null, decodeOptions)
             } ?: return false
 
@@ -125,9 +190,21 @@ class ThumbnailGenerator(private val context: Context) {
                 bitmap = applyExifOrientation(bitmap, orientation)
             }
 
+            val maxDim = maxOf(bitmap.width, bitmap.height)
+            val scaledBitmap = if (maxDim > TARGET_THUMB_SIZE) {
+                val scale = TARGET_THUMB_SIZE.toFloat() / maxDim
+                val targetW = (bitmap.width * scale).toInt().coerceAtLeast(1)
+                val targetH = (bitmap.height * scale).toInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(bitmap, targetW, targetH, true).also {
+                    if (it != bitmap) bitmap.recycle()
+                }
+            } else {
+                bitmap
+            }
+
             val baos = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)
-            bitmap.recycle()
+            scaledBitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)
+            scaledBitmap.recycle()
 
             val plaintextBytes = baos.toByteArray()
             val encryptedBytes = try {
@@ -162,11 +239,79 @@ class ThumbnailGenerator(private val context: Context) {
      * downsamples, encrypts with [thumbSubkey] bound to [itemId] AAD, and writes to [outputThumbFile].
      */
     fun generateAndEncryptVideoThumbnail(
+        file: File,
+        itemId: String,
+        thumbSubkey: ByteArray,
+        outputThumbFile: File
+    ): Boolean {
+        val retriever = MediaMetadataRetriever()
+        outputThumbFile.parentFile?.mkdirs()
+        val partialThumbFile = File(outputThumbFile.parentFile, "${outputThumbFile.name}.partial")
+
+        return try {
+            retriever.setDataSource(file.absolutePath)
+
+            // Extract frame at 1 second
+            val frame = retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: retriever.frameAtTime
+
+            if (frame != null) {
+                val scaled = Bitmap.createScaledBitmap(
+                    frame,
+                    TARGET_THUMB_SIZE,
+                    (TARGET_THUMB_SIZE * frame.height) / frame.width.coerceAtLeast(1),
+                    true
+                )
+                if (scaled != frame) frame.recycle()
+
+                val baos = ByteArrayOutputStream()
+                scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)
+                scaled.recycle()
+
+                val plaintext = baos.toByteArray()
+                val encrypted = try {
+                    Aead.encryptWithPrependedNonce(
+                        keyBytes = thumbSubkey,
+                        plaintext = plaintext,
+                        aad = "suya-phot:thumbnail:v1:$itemId".toByteArray(Charsets.UTF_8)
+                    )
+                } finally {
+                    plaintext.fill(0)
+                }
+                try {
+                    FileOutputStream(partialThumbFile).use { fos ->
+                        fos.write(encrypted)
+                        fos.flush()
+                        runCatching { fos.fd.sync() }
+                    }
+                    commitDerivative(partialThumbFile, outputThumbFile)
+                } finally {
+                    encrypted.fill(0)
+                }
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            SafeLog.e("ThumbnailGenerator", "Error generating video thumbnail", e)
+            if (partialThumbFile.exists()) partialThumbFile.delete()
+            false
+        } finally {
+            try {
+                retriever.release()
+            } catch (ignored: Exception) {}
+        }
+    }
+
+    fun generateAndEncryptVideoThumbnail(
         videoUri: Uri,
         itemId: String,
         thumbSubkey: ByteArray,
         outputThumbFile: File
     ): Boolean {
+        if (videoUri.scheme == "file" && videoUri.path != null) {
+            return generateAndEncryptVideoThumbnail(File(videoUri.path!!), itemId, thumbSubkey, outputThumbFile)
+        }
         val retriever = MediaMetadataRetriever()
         outputThumbFile.parentFile?.mkdirs()
         val partialThumbFile = File(outputThumbFile.parentFile, "${outputThumbFile.name}.partial")
@@ -278,16 +423,17 @@ class ThumbnailGenerator(private val context: Context) {
     }
 
     private fun commitDerivative(partial: File, final: File) {
-        check(!final.exists()) { "Refusing to overwrite encrypted derivative" }
+        if (final.exists()) final.delete()
         if (partial.renameTo(final)) return
         val copying = File(final.parentFile, "${final.name}.copying")
         try {
             FileOutputStream(copying).use { output ->
                 partial.inputStream().use { it.copyTo(output) }
                 output.flush()
-                output.fd.sync()
+                runCatching { output.fd.sync() }
             }
             check(copying.length() == partial.length()) { "Derivative staging size mismatch" }
+            if (final.exists()) final.delete()
             check(copying.renameTo(final)) { "Could not commit encrypted derivative" }
             partial.delete()
         } finally {

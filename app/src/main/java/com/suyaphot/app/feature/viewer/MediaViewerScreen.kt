@@ -41,10 +41,15 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.view.LayoutInflater
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Share
@@ -55,6 +60,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -64,10 +71,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import com.suyaphot.app.R
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -135,6 +144,7 @@ fun MediaViewerScreen(
     var ids by remember(itemId, collection) { mutableStateOf(listOf(itemId)) }
     val pager = rememberPagerState { ids.size }
     var zoomed by remember { mutableStateOf(false) }
+    var isSeeking by remember { mutableStateOf(false) }
     var isFetchingNext by remember { mutableStateOf(false) }
     var isFetchingPrev by remember { mutableStateOf(false) }
     var reachedStart by remember { mutableStateOf(false) }
@@ -204,12 +214,18 @@ fun MediaViewerScreen(
     HorizontalPager(
         state = pager,
         key = { ids[it] },
-        userScrollEnabled = !zoomed,
+        userScrollEnabled = !zoomed && !isSeeking,
         modifier = Modifier.fillMaxSize()
     ) { index ->
         val pageId = ids[index]
         if (index == pager.settledPage) {
-            MediaViewerPage(pageId, container, onBack, onZoomChanged = { zoomed = it })
+            MediaViewerPage(
+                pageId,
+                container,
+                onBack,
+                onZoomChanged = { zoomed = it },
+                onSeekingChanged = { isSeeking = it }
+            )
         } else {
             ViewerPreviewPage(pageId, container)
         }
@@ -309,7 +325,8 @@ private fun MediaViewerPage(
     itemId: String,
     container: AppContainer,
     onBack: () -> Unit,
-    onZoomChanged: (Boolean) -> Unit
+    onZoomChanged: (Boolean) -> Unit,
+    onSeekingChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -322,13 +339,15 @@ private fun MediaViewerPage(
         container.sessionManager.endSystemActivity()
     }
 
-    var mediaEntity by remember { mutableStateOf<MediaItemEntity?>(null) }
-    var metadata by remember { mutableStateOf<PrivateMediaMetadata?>(null) }
-    var fullBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
-    var loadProgress by remember { mutableStateOf<Pair<Long, Long>?>(null) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    var loadingVideo by remember { mutableStateOf(false) }
+    var mediaEntity by remember(itemId) { mutableStateOf<MediaItemEntity?>(null) }
+    var favoriteOverride by remember(itemId) { mutableStateOf<Boolean?>(null) }
+    val isFavorite = favoriteOverride ?: (mediaEntity?.favorite == true)
+    var metadata by remember(itemId) { mutableStateOf<PrivateMediaMetadata?>(null) }
+    var fullBitmap by remember(itemId) { mutableStateOf<Bitmap?>(null) }
+    var isLoading by remember(itemId) { mutableStateOf(true) }
+    var loadProgress by remember(itemId) { mutableStateOf<Pair<Long, Long>?>(null) }
+    var loadError by remember(itemId) { mutableStateOf<String?>(null) }
+    var loadingVideo by remember(itemId) { mutableStateOf(false) }
 
     var isChromeVisible by remember { mutableStateOf(true) }
     var showDetailsSheet by remember { mutableStateOf(false) }
@@ -340,9 +359,38 @@ private fun MediaViewerPage(
     var shareProgress by remember { mutableStateOf<Pair<Long, Long>?>(null) }
     var shareError by remember { mutableStateOf<String?>(null) }
 
-    // Video temporary playback file
-    var tempPlaybackFile by remember { mutableStateOf<File?>(null) }
+    // Video temporary playback file and controls
+    var tempPlaybackFile by remember(itemId) { mutableStateOf<File?>(null) }
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
+    var isPlaying by remember { mutableStateOf(true) }
+    var currentPositionMs by remember { mutableLongStateOf(0L) }
+    var durationMs by remember { mutableLongStateOf(0L) }
+    var isUserSeeking by remember { mutableStateOf(false) }
+    var seekFraction by remember { mutableFloatStateOf(0f) }
+    var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
+    var showSpeedDialog by remember { mutableStateOf(false) }
+
+    // Auto-hide chrome after 3 seconds of inactivity for video
+    LaunchedEffect(isChromeVisible, isUserSeeking, showSpeedDialog, isPlaying, mediaEntity?.mediaTypeCode) {
+        if (mediaEntity?.mediaTypeCode == MediaType.VIDEO.code && isChromeVisible && !isUserSeeking && !showSpeedDialog && isPlaying) {
+            delay(3000L)
+            isChromeVisible = false
+        }
+    }
+
+    // Video playback position tracker
+    LaunchedEffect(exoPlayer, isUserSeeking) {
+        val player = exoPlayer ?: return@LaunchedEffect
+        while (true) {
+            if (!isUserSeeking) {
+                currentPositionMs = player.currentPosition.coerceAtLeast(0L)
+                val d = player.duration
+                if (d > 0L) durationMs = d
+                isPlaying = player.isPlaying
+            }
+            delay(200L)
+        }
+    }
 
     // Zoom & pan state
     var scale by remember { mutableFloatStateOf(1f) }
@@ -663,19 +711,145 @@ private fun MediaViewerPage(
                     ) {
                         AndroidView(
                             factory = { ctx ->
-                                PlayerView(ctx).apply {
-                                    val player = ExoPlayer.Builder(ctx).build().also {
-                                        exoPlayer = it
-                                        val mediaItem = ExoMediaItem.fromUri(android.net.Uri.fromFile(tempPlaybackFile))
-                                        it.setMediaItem(mediaItem)
-                                        it.prepare()
-                                        it.playWhenReady = true
-                                    }
-                                    this.player = player
+                                val view = LayoutInflater.from(ctx).inflate(R.layout.view_suya_player, null) as PlayerView
+                                val player = ExoPlayer.Builder(ctx).build().also {
+                                    exoPlayer = it
+                                    it.setPlaybackSpeed(playbackSpeed)
+                                    val mediaItem = ExoMediaItem.fromUri(android.net.Uri.fromFile(tempPlaybackFile))
+                                    it.setMediaItem(mediaItem)
+                                    it.addListener(object : androidx.media3.common.Player.Listener {
+                                        override fun onIsPlayingChanged(playing: Boolean) {
+                                            isPlaying = playing
+                                        }
+                                        override fun onPlaybackStateChanged(state: Int) {
+                                            val d = it.duration
+                                            if (d > 0L) durationMs = d
+                                            currentPositionMs = it.currentPosition.coerceAtLeast(0L)
+                                            if (state == androidx.media3.common.Player.STATE_ENDED) {
+                                                isPlaying = false
+                                                isChromeVisible = true
+                                            }
+                                        }
+                                    })
+                                    it.prepare()
+                                    it.playWhenReady = true
+                                }
+                                view.player = player
+                                view.setOnClickListener {
+                                    isChromeVisible = !isChromeVisible
+                                }
+                                view
+                            },
+                            update = { view ->
+                                view.setOnClickListener {
+                                    isChromeVisible = !isChromeVisible
                                 }
                             },
                             modifier = Modifier.fillMaxSize()
                         )
+                    }
+                }
+            }
+        }
+
+        // Center Video Controls Overlay
+        if (mediaEntity?.mediaTypeCode == MediaType.VIDEO.code && isChromeVisible) {
+            Row(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Rewind 5s
+                Surface(
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.55f),
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clickable {
+                            val p = exoPlayer ?: return@clickable
+                            val target = (p.currentPosition - 5000L).coerceAtLeast(0L)
+                            p.seekTo(target)
+                            currentPositionMs = target
+                        }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.FastRewind,
+                                contentDescription = "Rewind 5s",
+                                tint = SuyaColors.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Text(
+                                text = "5s",
+                                fontSize = 9.sp,
+                                fontFamily = SoraFontFamily,
+                                color = SuyaColors.White
+                            )
+                        }
+                    }
+                }
+
+                // Play / Pause
+                Surface(
+                    shape = CircleShape,
+                    color = SuyaColors.Accent.copy(alpha = 0.9f),
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clickable {
+                            val p = exoPlayer ?: return@clickable
+                            if (p.isPlaying) {
+                                p.pause()
+                                isPlaying = false
+                            } else {
+                                if (p.playbackState == androidx.media3.common.Player.STATE_ENDED) {
+                                    p.seekTo(0L)
+                                    currentPositionMs = 0L
+                                }
+                                p.play()
+                                isPlaying = true
+                            }
+                        }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (isPlaying) "Pause" else "Play",
+                            tint = SuyaColors.White,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                }
+
+                // Fast Forward 15s
+                Surface(
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.55f),
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clickable {
+                            val p = exoPlayer ?: return@clickable
+                            val maxDur = p.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
+                            val target = (p.currentPosition + 15000L).coerceAtMost(maxDur)
+                            p.seekTo(target)
+                            currentPositionMs = target
+                        }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.FastForward,
+                                contentDescription = "Forward 15s",
+                                tint = SuyaColors.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Text(
+                                text = "15s",
+                                fontSize = 9.sp,
+                                fontFamily = SoraFontFamily,
+                                color = SuyaColors.White
+                            )
+                        }
                     }
                 }
             }
@@ -720,17 +894,17 @@ private fun MediaViewerPage(
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         SuyaIconButton(
-                            icon = if (mediaEntity?.favorite == true) Icons.Default.Star else Icons.Default.StarBorder,
+                            icon = if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
                             contentDescription = "Favorite",
-                            active = mediaEntity?.favorite == true,
+                            active = isFavorite,
                             onClick = {
                                 val current = mediaEntity ?: return@SuyaIconButton
-                                val newFav = !current.favorite
-                                mediaEntity = current.copy(favorite = newFav)
+                                val newFav = !isFavorite
+                                favoriteOverride = newFav
                                 scope.launch {
                                     val activeVaultId = session?.vaultId
                                     if (activeVaultId == null) {
-                                        mediaEntity = current
+                                        favoriteOverride = null
                                         return@launch
                                     }
                                     val updated = runCatching {
@@ -740,7 +914,11 @@ private fun MediaViewerPage(
                                             )
                                         }
                                     }.getOrDefault(0)
-                                    if (updated != 1 && mediaEntity?.id == current.id) mediaEntity = current
+                                    if (updated == 1) {
+                                        mediaEntity = mediaEntity?.copy(favorite = newFav)
+                                    } else {
+                                        favoriteOverride = null
+                                    }
                                 }
                             }
                         )
@@ -767,58 +945,166 @@ private fun MediaViewerPage(
                     .fillMaxWidth()
                     .navigationBarsPadding()
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 14.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    SuyaIconButton(
-                        icon = Icons.Default.Restore,
-                        contentDescription = "Move to Gallery",
-                        onClick = { showRestoreDialog = true }
-                    )
-                    SuyaIconButton(
-                        icon = Icons.Default.Share,
-                        contentDescription = "Share securely",
-                        onClick = {
-                            if (shareJob != null) return@SuyaIconButton
-                            shareError = null
-                            shareProgress = 0L to (mediaEntity?.plaintextSize ?: 0L)
-                            shareJob = scope.launch {
-                                try {
-                                    val prepared = container.shareCoordinator.prepare(itemId) { current, total ->
-                                        scope.launch { shareProgress = current to total }
-                                    }
-                                    if (prepared == null) {
-                                        shareError = "Could not prepare a verified share copy"
-                                    } else {
-                                        val send = Intent(Intent.ACTION_SEND).apply {
-                                            type = prepared.mimeType
-                                            putExtra(Intent.EXTRA_STREAM, prepared.uri)
-                                            clipData = ClipData.newUri(context.contentResolver, "Suya Phot media", prepared.uri)
-                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    if (mediaEntity?.mediaTypeCode == MediaType.VIDEO.code) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = formatPlaybackTime(if (isUserSeeking) (seekFraction * durationMs).toLong() else currentPositionMs),
+                                fontFamily = SoraFontFamily,
+                                fontSize = 12.sp,
+                                color = SuyaColors.White
+                            )
+
+                            val sliderPos = if (durationMs > 0) {
+                                val pos = if (isUserSeeking) (seekFraction * durationMs).toLong() else currentPositionMs
+                                (pos.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                            } else 0f
+
+                            Slider(
+                                value = sliderPos,
+                                onValueChange = { frac ->
+                                    isUserSeeking = true
+                                    seekFraction = frac
+                                    onSeekingChanged(true)
+                                },
+                                onValueChangeFinished = {
+                                    val targetMs = (seekFraction * durationMs).toLong()
+                                    exoPlayer?.seekTo(targetMs)
+                                    currentPositionMs = targetMs
+                                    isUserSeeking = false
+                                    onSeekingChanged(false)
+                                },
+                                colors = SliderDefaults.colors(
+                                    thumbColor = SuyaColors.Accent,
+                                    activeTrackColor = SuyaColors.Accent,
+                                    inactiveTrackColor = SuyaColors.White.copy(alpha = 0.3f)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(horizontal = 8.dp)
+                            )
+
+                            Text(
+                                text = formatPlaybackTime(durationMs),
+                                fontFamily = SoraFontFamily,
+                                fontSize = 12.sp,
+                                color = SuyaColors.TextMuted
+                            )
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = SuyaColors.Fill07,
+                                modifier = Modifier.clickable { showSpeedDialog = true }
+                            ) {
+                                Text(
+                                    text = "${if (playbackSpeed % 1.0f == 0f) playbackSpeed.toInt() else playbackSpeed}x",
+                                    fontFamily = SoraFontFamily,
+                                    fontSize = 11.sp,
+                                    color = SuyaColors.White,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        SuyaIconButton(
+                            icon = Icons.Default.Restore,
+                            contentDescription = "Move to Gallery",
+                            onClick = { showRestoreDialog = true }
+                        )
+                        SuyaIconButton(
+                            icon = Icons.Default.Share,
+                            contentDescription = "Share securely",
+                            onClick = {
+                                if (shareJob != null) return@SuyaIconButton
+                                shareError = null
+                                shareProgress = 0L to (mediaEntity?.plaintextSize ?: 0L)
+                                shareJob = scope.launch {
+                                    try {
+                                        val prepared = container.shareCoordinator.prepare(itemId) { current, total ->
+                                            scope.launch { shareProgress = current to total }
                                         }
-                                        container.sessionManager.beginSystemActivity()
-                                        shareLauncher.launch(Intent.createChooser(send, "Share media"))
+                                        if (prepared == null) {
+                                            shareError = "Could not prepare a verified share copy"
+                                        } else {
+                                            val send = Intent(Intent.ACTION_SEND).apply {
+                                                type = prepared.mimeType
+                                                putExtra(Intent.EXTRA_STREAM, prepared.uri)
+                                                clipData = ClipData.newUri(context.contentResolver, "Suya Phot media", prepared.uri)
+                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            }
+                                            container.sessionManager.beginSystemActivity()
+                                            shareLauncher.launch(Intent.createChooser(send, "Share media"))
+                                        }
+                                    } catch (_: Exception) {
+                                        shareError = "Sharing was cancelled or unavailable"
+                                    } finally {
+                                        shareJob = null
+                                        shareProgress = null
                                     }
-                                } catch (_: Exception) {
-                                    shareError = "Sharing was cancelled or unavailable"
-                                } finally {
-                                    shareJob = null
-                                    shareProgress = null
+                                }
+                            }
+                        )
+                        SuyaIconButton(
+                            icon = Icons.Outlined.Delete,
+                            contentDescription = "Trash",
+                            onClick = { showTrashDialog = true }
+                        )
+                    }
+                }
+            }
+        }
+
+        if (showSpeedDialog) {
+            SuyaDialog(
+                onDismissRequest = { showSpeedDialog = false },
+                title = "Playback Speed",
+                content = {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { speed ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        playbackSpeed = speed
+                                        exoPlayer?.setPlaybackSpeed(speed)
+                                        showSpeedDialog = false
+                                    }
+                                    .padding(vertical = 12.dp, horizontal = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${speed}x",
+                                    fontFamily = SoraFontFamily,
+                                    color = if (playbackSpeed == speed) SuyaColors.Accent else SuyaColors.White,
+                                    fontWeight = if (playbackSpeed == speed) FontWeight.Bold else FontWeight.Normal
+                                )
+                                if (playbackSpeed == speed) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = SuyaColors.Accent)
                                 }
                             }
                         }
-                    )
-                    SuyaIconButton(
-                        icon = Icons.Outlined.Delete,
-                        contentDescription = "Trash",
-                        onClick = { showTrashDialog = true }
-                    )
-                }
-            }
+                    }
+                },
+                confirmText = "Close",
+                onConfirm = { showSpeedDialog = false }
+            )
         }
         if (shareJob != null) {
             Surface(
@@ -1062,4 +1348,11 @@ private fun formatFileSize(bytes: Long): String {
     if (mb < 1024) return "%.1f MB".format(mb)
     val gb = mb / 1024.0
     return "%.2f GB".format(gb)
+}
+
+private fun formatPlaybackTime(ms: Long): String {
+    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%02d:%02d".format(minutes, seconds)
 }

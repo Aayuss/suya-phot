@@ -17,8 +17,31 @@ class SourceDeletionCoordinator(
     private val deleteUri: (Uri) -> Int = { context.contentResolver.delete(it, null, null) },
     private val probeAbsent: (Uri) -> Boolean = { uri ->
         try {
-            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { false } ?: true
+            val cursor = context.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns._ID),
+                null,
+                null,
+                null
+            )
+            val exists = cursor?.use { it.moveToFirst() } ?: false
+            if (!exists) {
+                true
+            } else {
+                try {
+                    context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { false } ?: true
+                } catch (_: FileNotFoundException) {
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+            }
         } catch (_: FileNotFoundException) {
+            true
+        } catch (_: IllegalArgumentException) {
+            true
+        } catch (_: SecurityException) {
+            // When an item is deleted from MediaStore, querying or opening it throws SecurityException because URI permission is revoked
             true
         } catch (_: Exception) {
             false
