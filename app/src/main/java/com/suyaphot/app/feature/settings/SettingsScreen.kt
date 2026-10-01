@@ -198,7 +198,7 @@ fun SettingsScreen(
                 )
                 SettingRowItem(
                     title = "Private Trash",
-                    subtitle = "Re-authenticate to view deleted protected media",
+                    subtitle = "Deleted media from hidden or locked folders; re-authentication required",
                     icon = Icons.Default.Delete,
                     onClick = onOpenPrivateTrash
                 )
