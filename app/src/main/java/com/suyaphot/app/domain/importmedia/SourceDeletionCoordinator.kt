@@ -6,6 +6,7 @@ import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.provider.DocumentsContract
 import com.suyaphot.app.core.util.SafeLog
 import java.io.FileNotFoundException
 
@@ -14,7 +15,25 @@ import java.io.FileNotFoundException
  */
 class SourceDeletionCoordinator(
     private val context: Context,
-    private val deleteUri: (Uri) -> Int = { context.contentResolver.delete(it, null, null) },
+    private val deleteUri: (Uri) -> Int = { uri ->
+        if (DocumentsContract.isDocumentUri(context, uri)) {
+            // Never issue a generic DocumentsContract delete against arbitrary/cloud
+            // document providers: "move into vault" is a local-device operation and
+            // must not unexpectedly delete a cloud original. Restrict direct document
+            // deletion to Android's local media/storage providers.
+            val localDocumentProvider = when (uri.authority) {
+                "com.android.providers.media.documents",
+                "com.android.externalstorage.documents",
+                "com.android.providers.downloads.documents" -> true
+                else -> false
+            }
+            if (localDocumentProvider &&
+                DocumentsContract.deleteDocument(context.contentResolver, uri)
+            ) 1 else 0
+        } else {
+            context.contentResolver.delete(uri, null, null)
+        }
+    },
     private val probeAbsent: (Uri) -> Boolean = { uri ->
         try {
             context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { false } ?: true
@@ -54,19 +73,27 @@ class SourceDeletionCoordinator(
         val deletedUris = mutableListOf<Uri>()
 
         // Try direct deletion first (works for files owned by this app or under legacy storage)
-        for (uri in uris) {
+        for ((index, uri) in uris.withIndex()) {
             try {
                 val rows = deleteUri(uri)
-                if (rows <= 0) {
-                    remainingUris.add(uri)
-                } else {
+                if (rows > 0 || probeAbsent(uri)) {
+                    // Treat an already-absent source as successfully moved. This is
+                    // especially important when reconciling older COPY imports whose
+                    // public original may have been removed outside Suya Phot.
                     deletedUris.add(uri)
+                } else {
+                    remainingUris.add(uri)
                 }
             } catch (rse: RecoverableSecurityException) {
                 // API 29 per-item user consent
+                // API 29 grants consent per item. Keep every still-unprocessed URI
+                // attached to this operation so no MOVE job can be abandoned if the
+                // first protected source interrupts the loop. After consent we retry
+                // all of them; any URI that still needs its own consent is recorded
+                // as retained/failed and can be finished from the attention flow.
                 return DeletionOutcome.RequiresUserConsent(
                     rse.userAction.actionIntent.intentSender,
-                    listOf(uri),
+                    listOf(uri) + uris.drop(index + 1),
                     deletedUris,
                     DeleteConsentMode.API29_RETRY_REQUIRED
                 )
@@ -85,7 +112,19 @@ class SourceDeletionCoordinator(
         // On API 30+, request user permission via MediaStore.createDeleteRequest
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             return try {
-                val pendingIntent = MediaStore.createDeleteRequest(resolver, remainingUris)
+                // ACTION_OPEN_DOCUMENT often returns MediaDocumentsProvider document
+                // URIs. MediaStore's scoped-storage consent API expects MediaStore URIs,
+                // so map local document URIs back to their underlying media row when
+                // Android can do so. Cloud/foreign providers stay untouched and will
+                // safely fall through to the retained-original path if unsupported.
+                val requestUris = remainingUris.map { uri ->
+                    if (DocumentsContract.isDocumentUri(context, uri)) {
+                        runCatching { MediaStore.getMediaUri(context, uri) }.getOrNull() ?: uri
+                    } else {
+                        uri
+                    }
+                }
+                val pendingIntent = MediaStore.createDeleteRequest(resolver, requestUris)
                 DeletionOutcome.RequiresUserConsent(
                     pendingIntent.intentSender, remainingUris, deletedUris,
                     DeleteConsentMode.API30_SYSTEM_DELETE_REQUEST

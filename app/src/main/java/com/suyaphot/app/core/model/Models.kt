@@ -219,6 +219,7 @@ data class Folder(
     val coverMediaId: String?,
     val sortOrder: Long,
     val itemCount: Int = 0,
+    val childFolderCount: Int = 0,
     val directHidden: Boolean = false,
     val effectiveHidden: Boolean = false,
     val lockId: String? = null,

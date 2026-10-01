@@ -8,7 +8,7 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
-import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -47,9 +47,9 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -86,6 +86,8 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.domain.importmedia.MoveImportFinalizer
+import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
@@ -196,31 +198,112 @@ fun FoldersScreen(
     var showTrashConfirmDialog by remember { mutableStateOf(false) }
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
-    // Import states
+    // Import states: adding media to the vault is MOVE semantics.
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveConsent by remember { mutableStateOf<List<ImportResult.Success>>(emptyList()) }
+    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
+    var pendingMoveAlreadyDeleted by remember { mutableIntStateOf(0) }
+
+    fun folderMoveStatus(deleted: Int, retained: Int, failedImports: Int = 0): String = when {
+        retained > 0 ->
+            "$deleted moved here. $retained original${if (retained == 1) "" else "s"} remain in Gallery because Android did not delete them." +
+                if (failedImports > 0) " $failedImports import${if (failedImports == 1) "" else "s"} failed." else ""
+        failedImports > 0 ->
+            "$deleted moved here; $failedImports import${if (failedImports == 1) "" else "s"} failed."
+        else ->
+            "$deleted moved here. Public original${if (deleted == 1) "" else "s"} removed from Gallery."
+    }
+
+    val moveConsentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        container.sessionManager.endSystemActivity()
+        val pending = pendingMoveConsent
+        val mode = pendingMoveConsentMode
+        val alreadyDeleted = pendingMoveAlreadyDeleted
+        pendingMoveConsent = emptyList()
+        pendingMoveConsentMode = null
+        pendingMoveAlreadyDeleted = 0
+
+        if (mode == null || pending.isEmpty() || vaultId.isBlank()) return@rememberLauncherForActivityResult
+
+        scope.launch {
+            val summary = container.moveImportFinalizer.completeConsent(
+                vaultId = vaultId,
+                pending = pending,
+                mode = mode,
+                approved = result.resultCode == android.app.Activity.RESULT_OK
+            )
+            folderActionStatus = folderMoveStatus(
+                deleted = alreadyDeleted + summary.deleted,
+                retained = summary.retained
+            )
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
-        if (uris.isNotEmpty()) {
-            isImporting = true
-            scope.launch {
-                val results = container.importCoordinator.importBatch(
-                    uris = uris,
-                    folderId = currentParentId,
-                    mode = ImportMode.COPY,
-                    onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+        if (uris.isEmpty() || vaultId.isBlank()) return
+        val targetFolderId = currentParentId
+        isImporting = true
+        scope.launch {
+            val results = container.importCoordinator.importBatch(
+                uris = uris,
+                folderId = targetFolderId,
+                mode = ImportMode.MOVE,
+                onItemComplete = { current, total, _ ->
+                    scope.launch { importProgressText = "Securing $current of $total items..." }
+                }
+            )
+            isImporting = false
+            importProgressText = ""
+
+            val successes = results.filterIsInstance<ImportResult.Success>()
+            val failed = results.count { it is ImportResult.Failure }
+
+            when (val finalized = container.moveImportFinalizer.begin(vaultId, successes)) {
+                is MoveImportFinalizer.BeginResult.Complete -> {
+                    folderActionStatus = folderMoveStatus(
+                        deleted = finalized.summary.deleted,
+                        retained = finalized.summary.retained,
+                        failedImports = failed
+                    )
+                }
+                is MoveImportFinalizer.BeginResult.RequiresConsent -> {
+                    pendingMoveConsent = finalized.pending
+                    pendingMoveConsentMode = finalized.mode
+                    pendingMoveAlreadyDeleted = finalized.alreadyDeleted
+                    folderActionStatus = "Encrypted copies are safe. Confirm Android's delete request to finish moving the originals."
+                    container.sessionManager.beginSystemActivity()
+                    runCatching {
+                        moveConsentLauncher.launch(
+                            IntentSenderRequest.Builder(finalized.intentSender).build()
+                        )
+                    }.onFailure {
+                        container.sessionManager.endSystemActivity()
+                        scope.launch {
+                            val summary = container.moveImportFinalizer.completeConsent(
+                                vaultId = vaultId,
+                                pending = finalized.pending,
+                                mode = finalized.mode,
+                                approved = false
+                            )
+                            pendingMoveConsent = emptyList()
+                            pendingMoveConsentMode = null
+                            pendingMoveAlreadyDeleted = 0
+                            folderActionStatus = folderMoveStatus(
+                                deleted = finalized.alreadyDeleted + summary.deleted,
+                                retained = summary.retained,
+                                failedImports = failed
+                            )
+                        }
                     }
-                )
-                isImporting = false
-                importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
-                val failed = results.count { it is ImportResult.Failure }
-                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
+                }
             }
         }
     }
+
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -231,7 +314,7 @@ fun FoldersScreen(
         startImport(uris)
     }
     val pickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia()
+        contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         container.sessionManager.endSystemActivity()
         if (uris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
@@ -551,6 +634,18 @@ fun FoldersScreen(
         }
     }
 
+    fun requestHiddenFolders() {
+        if (currentParentId != null || hiddenMode) return
+        scope.launch {
+            val vault = container.database.vaultDao().getVault(vaultId)
+            gateTypeCode = vault?.credentialTypeCode ?: 0
+            hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+            gateInput = ""
+            gateError = null
+            showHiddenAuth = true
+        }
+    }
+
     val currentTitle = if (currentParentId == null) {
         if (hiddenMode) "Hidden folders" else "Folders"
     } else {
@@ -609,31 +704,18 @@ fun FoldersScreen(
                     onNavigationClick = if (currentParentId != null || hiddenMode) {
                         { navigateUp() }
                     } else null,
+                    // Hidden folders should not advertise their existence in the normal folder toolbar.
+                    // Long-pressing the root "Folders" title intentionally enters the re-auth flow.
+                    onTitleLongClick = if (currentParentId == null && !hiddenMode) {
+                        { requestHiddenFolders() }
+                    } else null,
                     actions = {
-                        if (currentParentId == null && !hiddenMode) {
-                            SuyaIconButton(
-                                icon = Icons.Default.VisibilityOff,
-                                contentDescription = "Hidden folders",
-                                onClick = {
-                                    scope.launch {
-                                        val vault = container.database.vaultDao().getVault(vaultId)
-                                        gateTypeCode = vault?.credentialTypeCode ?: 0
-                                        hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
-                                        gateInput = ""
-                                        gateError = null
-                                        showHiddenAuth = true
-                                    }
-                                }
-                            )
-                        }
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
                             contentDescription = "Import media here",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
-                                pickerLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                                )
+                                pickerLauncher.launch(arrayOf("image/*", "video/*"))
                             }
                         )
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
@@ -697,12 +779,10 @@ fun FoldersScreen(
                     icon = Icons.Default.Folder,
                     title = if (currentParentId == null) "No folders created" else "This folder is empty",
                     subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Import media or create subfolders inside.",
-                    actionText = if (hiddenMode && currentParentId == null) null else "Import Photos & Videos",
+                    actionText = if (hiddenMode && currentParentId == null) null else "Move Photos & Videos",
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
-                        pickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                        )
+                        pickerLauncher.launch(arrayOf("image/*", "video/*"))
                     },
                     modifier = Modifier.weight(1f)
                 )

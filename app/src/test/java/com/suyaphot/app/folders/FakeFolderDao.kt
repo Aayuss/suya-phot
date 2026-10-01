@@ -53,10 +53,49 @@ class FakeFolderDao : FolderDao {
         flowOf(folders.values.filter { it.vaultId == vaultId && it.parentId == parentId })
 
     override fun getSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>> =
-        flowOf(folders.values.filter { it.vaultId == vaultId && it.parentId == parentId }.map { FolderWithCount(it, 0) })
+        flowOf(
+            folders.values
+                .filter { it.vaultId == vaultId && it.parentId == parentId }
+                .map { folder ->
+                    FolderWithCount(
+                        folder = folder,
+                        itemCount = 0,
+                        childFolderCount = folders.values.count { child ->
+                            child.vaultId == vaultId && child.parentId == folder.id
+                        }
+                    )
+                }
+        )
 
     override fun getHiddenRoots(vaultId: String): Flow<List<FolderWithCount>> =
-        flowOf(folders.values.filter { it.vaultId == vaultId && it.directHidden }.map { FolderWithCount(it, 0) })
+        flowOf(
+            folders.values
+                .filter { it.vaultId == vaultId && it.directHidden }
+                .map { folder ->
+                    FolderWithCount(
+                        folder = folder,
+                        itemCount = 0,
+                        childFolderCount = folders.values.count { child ->
+                            child.vaultId == vaultId && child.parentId == folder.id
+                        }
+                    )
+                }
+        )
+
+    override fun getAllSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>> =
+        flowOf(
+            folders.values
+                .filter { it.vaultId == vaultId && it.parentId == parentId }
+                .map { folder ->
+                    FolderWithCount(
+                        folder = folder,
+                        itemCount = 0,
+                        childFolderCount = folders.values.count { child ->
+                            child.vaultId == vaultId && child.parentId == folder.id
+                        }
+                    )
+                }
+        )
 
     override fun getAllSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>> =
         getSubFolders(vaultId, parentId)

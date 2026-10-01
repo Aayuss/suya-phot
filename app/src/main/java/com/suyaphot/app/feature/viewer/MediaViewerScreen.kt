@@ -725,19 +725,30 @@ private fun MediaViewerPage(
                             active = mediaEntity?.favorite == true,
                             onClick = {
                                 val current = mediaEntity ?: return@SuyaIconButton
+                                val activeVaultId = session?.vaultId ?: return@SuyaIconButton
                                 val newFav = !current.favorite
+                                val now = System.currentTimeMillis()
+
+                                // Optimistic UI: the star must react on the same frame as the tap.
+                                mediaEntity = current.copy(favorite = newFav, updatedAt = now)
+
                                 scope.launch {
-                                    val activeVaultId = session?.vaultId ?: return@launch
-                                    val updated = withContext(Dispatchers.IO) {
-                                        container.database.mediaItemDao().updateFavoriteForVault(
-                                            activeVaultId,
-                                            current.id,
-                                            newFav,
-                                            System.currentTimeMillis()
-                                        )
-                                    }
-                                    if (updated == 1) {
-                                        mediaEntity = current.copy(favorite = newFav)
+                                    val updated = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            container.database.mediaItemDao().updateFavoriteForVault(
+                                                activeVaultId,
+                                                current.id,
+                                                newFav,
+                                                now
+                                            )
+                                        }
+                                    }.getOrDefault(0)
+
+                                    if (updated != 1) {
+                                        // Roll back only if this exact optimistic value is still visible.
+                                        if (mediaEntity?.id == current.id && mediaEntity?.favorite == newFav) {
+                                            mediaEntity = current
+                                        }
                                     }
                                 }
                             }

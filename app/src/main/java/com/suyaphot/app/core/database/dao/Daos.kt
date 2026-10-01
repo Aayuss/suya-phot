@@ -49,7 +49,8 @@ interface VaultDao {
 
 data class FolderWithCount(
     @androidx.room.Embedded val folder: FolderEntity,
-    val itemCount: Int
+    val itemCount: Int,
+    val childFolderCount: Int
 )
 
 data class VisibleSearchHeader(
@@ -91,7 +92,13 @@ interface FolderDao {
     fun getSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>>
 
     @Query("""
-        SELECT f.*, (SELECT COUNT(*) FROM media_items m WHERE m.vaultId = f.vaultId AND m.folderId = f.id AND m.deletedAt IS NULL AND m.concealed = 0) AS itemCount
+        SELECT f.*,
+          (SELECT COUNT(*) FROM media_items m
+           WHERE m.vaultId = f.vaultId AND m.folderId = f.id
+             AND m.deletedAt IS NULL AND m.concealed = 0) AS itemCount,
+          (SELECT COUNT(*) FROM folders c
+           WHERE c.vaultId = f.vaultId AND c.parentId = f.id
+             AND c.effectiveHidden = 0) AS childFolderCount
         FROM folders f
         WHERE f.vaultId = :vaultId AND f.parentId IS :parentId AND f.effectiveHidden = 0
         ORDER BY f.sortOrder ASC, f.createdAt DESC
@@ -99,7 +106,13 @@ interface FolderDao {
     fun getSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>>
 
     @Query("""
-        SELECT f.*, 0 AS itemCount FROM folders f
+        SELECT f.*,
+          (SELECT COUNT(*) FROM media_items m
+           WHERE m.vaultId = f.vaultId AND m.folderId = f.id
+             AND m.deletedAt IS NULL) AS itemCount,
+          (SELECT COUNT(*) FROM folders c
+           WHERE c.vaultId = f.vaultId AND c.parentId = f.id) AS childFolderCount
+        FROM folders f
         WHERE f.vaultId = :vaultId AND f.directHidden = 1
           AND (f.parentId IS NULL OR NOT EXISTS (
               SELECT 1 FROM folders p WHERE p.id = f.parentId AND p.vaultId = f.vaultId AND p.effectiveHidden = 1
@@ -107,6 +120,19 @@ interface FolderDao {
         ORDER BY f.sortOrder ASC, f.createdAt DESC
     """)
     fun getHiddenRoots(vaultId: String): Flow<List<FolderWithCount>>
+
+    @Query("""
+        SELECT f.*,
+          (SELECT COUNT(*) FROM media_items m
+           WHERE m.vaultId = f.vaultId AND m.folderId = f.id
+             AND m.deletedAt IS NULL) AS itemCount,
+          (SELECT COUNT(*) FROM folders c
+           WHERE c.vaultId = f.vaultId AND c.parentId = f.id) AS childFolderCount
+        FROM folders f
+        WHERE f.vaultId = :vaultId AND f.parentId IS :parentId
+        ORDER BY f.sortOrder ASC, f.createdAt DESC
+    """)
+    fun getAllSubFoldersWithCount(vaultId: String, parentId: String?): Flow<List<FolderWithCount>>
 
     @Query("SELECT * FROM folders WHERE vaultId = :vaultId AND parentId IS :parentId ORDER BY sortOrder ASC, createdAt DESC")
     fun getAllSubFolders(vaultId: String, parentId: String?): Flow<List<FolderEntity>>
@@ -186,6 +212,9 @@ interface MediaItemDao {
 
     @Query("UPDATE media_items SET encryptedPreviewRelativePath = :path WHERE id = :id AND vaultId = :vaultId AND deletedAt IS NULL")
     suspend fun setPreviewPathForVault(vaultId: String, id: String, path: String): Int
+
+    @Query("UPDATE media_items SET encryptedThumbRelativePath = :path WHERE id = :id AND vaultId = :vaultId AND deletedAt IS NULL")
+    suspend fun setThumbnailPathForVault(vaultId: String, id: String, path: String): Int
 
     @Query("SELECT * FROM media_items WHERE vaultId = :vaultId AND id IN (:ids)")
     suspend fun getItemsByIdsForVault(vaultId: String, ids: List<String>): List<MediaItemEntity>
@@ -428,7 +457,7 @@ interface VaultJobDao {
         DELETE FROM jobs
         WHERE vaultId = :vaultId
           AND stateCode IN (7, 8, 9)
-          AND (sourceDispositionCode IS NULL OR sourceDispositionCode IN (0, 2, 3))
+          AND (sourceDispositionCode IS NULL OR sourceDispositionCode IN (2, 3))
           AND updatedAt < :cutoffTimestamp
     """)
     suspend fun purgeResolvedCompletedJobs(vaultId: String, cutoffTimestamp: Long): Int

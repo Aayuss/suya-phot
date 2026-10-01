@@ -1,18 +1,31 @@
 package com.suyaphot.app.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
@@ -21,18 +34,16 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.suyaphot.app.ui.theme.SuyaColors
-
-import androidx.compose.foundation.layout.navigationBarsPadding
+import com.suyaphot.app.ui.theme.SuyaStyles
 
 enum class SuyaNavTab(val title: String, val icon: ImageVector) {
     PHOTOS("Photos", Icons.Default.PhotoLibrary),
@@ -55,52 +66,97 @@ fun SuyaBottomNav(
             .fillMaxWidth()
             .padding(horizontal = 24.dp, vertical = 8.dp)
     ) {
-        Row(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(6.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .height(50.dp)
+                .padding(2.dp)
         ) {
-            SuyaNavTab.entries.forEach { tab ->
-                val isSelected = tab == selectedTab
+            val tabs = SuyaNavTab.entries
+            val selectedIndex = tabs.indexOf(selectedTab).coerceAtLeast(0)
+            // Give the selected destination enough room for "icon + label" while
+            // keeping the other three destinations compact icon-only targets.
+            val selectedWidth = minOf(116.dp, maxWidth * 0.36f)
+            val compactWidth = (maxWidth - selectedWidth) / (tabs.size - 1)
+            val indicatorX by animateDpAsState(
+                targetValue = compactWidth * selectedIndex,
+                animationSpec = spring(
+                    dampingRatio = 0.86f,
+                    stiffness = Spring.StiffnessMediumLow
+                ),
+                label = "nav_indicator_x"
+            )
 
-                val bgCircleColor by animateColorAsState(
-                    targetValue = if (isSelected) SuyaColors.Accent else Color.Transparent,
-                    animationSpec = tween(durationMillis = 200),
-                    label = "tab_bg"
-                )
-
-                val iconTint by animateColorAsState(
-                    targetValue = if (isSelected) SuyaColors.White else SuyaColors.TextMuted,
-                    animationSpec = tween(durationMillis = 200),
-                    label = "tab_icon_tint"
-                )
-
-                val scale by animateFloatAsState(
-                    targetValue = if (isSelected) 1.05f else 1.0f,
-                    animationSpec = tween(durationMillis = 200),
-                    label = "tab_scale"
-                )
-
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(50.dp)
-                        .scale(scale)
-                        .background(color = bgCircleColor, shape = CircleShape)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = { onTabSelected(tab) }
-                        )
-                ) {
-                    Icon(
-                        imageVector = tab.icon,
-                        contentDescription = tab.title,
-                        tint = iconTint,
-                        modifier = Modifier.size(22.dp)
+            // One continuous pill that physically travels between tabs.
+            Box(
+                modifier = Modifier
+                    .offset(x = indicatorX)
+                    .width(selectedWidth)
+                    .fillMaxHeight()
+                    .background(
+                        color = SuyaColors.Accent,
+                        shape = RoundedCornerShape(24.dp)
                     )
+            )
+
+            Row(modifier = Modifier.fillMaxSize()) {
+                tabs.forEach { tab ->
+                    val selected = tab == selectedTab
+                    val tint by animateColorAsState(
+                        targetValue = if (selected) SuyaColors.White else SuyaColors.TextMuted,
+                        animationSpec = tween(160),
+                        label = "nav_icon_tint"
+                    )
+
+                    val tabWidth by animateDpAsState(
+                        targetValue = if (selected) selectedWidth else compactWidth,
+                        animationSpec = spring(
+                            dampingRatio = 0.9f,
+                            stiffness = Spring.StiffnessMedium
+                        ),
+                        label = "nav_tab_width"
+                    )
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .width(tabWidth)
+                            .fillMaxHeight()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { if (!selected) onTabSelected(tab) }
+                            )
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = tab.icon,
+                                contentDescription = tab.title,
+                                tint = tint,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            AnimatedVisibility(
+                                visible = selected,
+                                enter = expandHorizontally(
+                                    animationSpec = tween(180),
+                                    expandFrom = Alignment.Start
+                                ) + fadeIn(tween(130)),
+                                exit = shrinkHorizontally(
+                                    animationSpec = tween(150),
+                                    shrinkTowards = Alignment.Start
+                                ) + fadeOut(tween(90))
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Spacer(Modifier.width(7.dp))
+                                    Text(
+                                        text = tab.title,
+                                        style = SuyaStyles.ButtonText,
+                                        color = SuyaColors.White,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
