@@ -81,4 +81,69 @@ class PrivacyQueriesTest {
             assertEquals(listOf("hidden"), db.folderDao().getHiddenRoots("vault").first().map { it.folder.id })
         } finally { db.close() }
     }
+
+    @Test
+    fun folderCountsIncludeVisibleDirectSubfoldersWithoutLeakingHiddenOnes() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
+        try {
+            db.vaultDao().insert(VaultEntity("vault_counts", 0, 1, 1, byteArrayOf(1)))
+            db.folderDao().insert(
+                FolderEntity(
+                    id = "parent",
+                    vaultId = "vault_counts",
+                    parentId = null,
+                    encryptedName = byteArrayOf(1),
+                    createdAt = 1,
+                    updatedAt = 1,
+                    coverMediaId = null,
+                    sortOrder = 0
+                )
+            )
+            db.folderDao().insert(
+                FolderEntity(
+                    id = "visible_child",
+                    vaultId = "vault_counts",
+                    parentId = "parent",
+                    encryptedName = byteArrayOf(1),
+                    createdAt = 2,
+                    updatedAt = 2,
+                    coverMediaId = null,
+                    sortOrder = 0
+                )
+            )
+            db.folderDao().insert(
+                FolderEntity(
+                    id = "hidden_child",
+                    vaultId = "vault_counts",
+                    parentId = "parent",
+                    encryptedName = byteArrayOf(1),
+                    createdAt = 3,
+                    updatedAt = 3,
+                    coverMediaId = null,
+                    sortOrder = 0,
+                    directHidden = true,
+                    effectiveHidden = true
+                )
+            )
+
+            val normalParent = db.folderDao()
+                .getSubFoldersWithCount("vault_counts", null)
+                .first()
+                .single { it.folder.id == "parent" }
+
+            assertEquals(1, normalParent.childFolderCount)
+            assertEquals(0, normalParent.itemCount)
+
+            val privilegedParent = db.folderDao()
+                .getAllSubFoldersWithCount("vault_counts", null)
+                .first()
+                .single { it.folder.id == "parent" }
+
+            assertEquals(2, privilegedParent.childFolderCount)
+        } finally {
+            db.close()
+        }
+    }
+
 }
