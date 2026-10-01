@@ -344,6 +344,31 @@ class ImportCoordinator(
                             now = nowDuplicate
                         )
                     } else {
+                        // Persist the canonical MediaStore deletion URI before exposing
+                        // AWAITING_SOURCE_DELETE so crash recovery can finish the MOVE.
+                        val deletePayloadRaw = ImportJobPayload(
+                            sourceUri = sourceDeleteUri.toString(),
+                            targetFolderId = folderId,
+                            itemId = existing.id,
+                            mode = mode
+                        ).serialize()
+                        val deletePayloadEncrypted = try {
+                            Aead.encryptWithPrependedNonce(
+                                session.metaSubkey,
+                                deletePayloadRaw,
+                                "job:$jobId:v1".toByteArray(Charsets.UTF_8)
+                            )
+                        } finally {
+                            deletePayloadRaw.fill(0)
+                        }
+                        check(
+                            vaultJobDao.updateEncryptedPayload(
+                                jobId,
+                                vaultId,
+                                deletePayloadEncrypted,
+                                nowDuplicate
+                            ) == 1
+                        )
                         vaultJobDao.updateState(jobId, JobState.AWAITING_SOURCE_DELETE.code, nowDuplicate)
                     }
                     return@withContext ImportResult.Success(
