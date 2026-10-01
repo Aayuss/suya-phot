@@ -273,8 +273,25 @@ fun FolderTile(
                     fontSize = 15.sp,
                     color = SuyaColors.White
                 )
+                val folderSummary = when {
+                    folder.lockId != null || folder.effectiveProtected -> "Locked"
+                    folder.childFolderCount > 0 && folder.itemCount > 0 -> {
+                        val foldersLabel = if (folder.childFolderCount == 1) "folder" else "folders"
+                        val itemsLabel = if (folder.itemCount == 1) "item" else "items"
+                        "${folder.childFolderCount} $foldersLabel · ${folder.itemCount} $itemsLabel"
+                    }
+                    folder.childFolderCount > 0 -> {
+                        val foldersLabel = if (folder.childFolderCount == 1) "folder" else "folders"
+                        "${folder.childFolderCount} $foldersLabel"
+                    }
+                    folder.itemCount > 0 -> {
+                        val itemsLabel = if (folder.itemCount == 1) "item" else "items"
+                        "${folder.itemCount} $itemsLabel"
+                    }
+                    else -> "Empty"
+                }
                 Text(
-                    text = if (folder.lockId != null || folder.effectiveProtected) "Locked" else "${folder.itemCount} items",
+                    text = folderSummary,
                     fontFamily = SoraFontFamily,
                     fontSize = 12.sp,
                     color = SuyaColors.TextMuted
