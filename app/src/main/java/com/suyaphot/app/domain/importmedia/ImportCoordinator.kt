@@ -1,7 +1,9 @@
 package com.suyaphot.app.domain.importmedia
 
+import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
+import android.provider.MediaStore
 import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.VaultCrypto
@@ -16,6 +18,7 @@ import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.JobType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.core.model.MediaType
+import com.suyaphot.app.core.model.PrivateMediaMetadata
 import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.core.util.SafeLog
 import com.suyaphot.app.core.util.VaultFileStore
@@ -151,7 +154,14 @@ sealed interface ImportResult {
     data class Success(
         val jobId: String,
         val itemId: String,
+        /** URI used to read the source during import. */
         val uri: Uri,
+        /**
+         * Canonical MediaStore URI used for MOVE deletion when it can be resolved.
+         * Android Photo Picker URIs are intentionally read-only and cannot reliably
+         * be passed to MediaStore.createDeleteRequest().
+         */
+        val deletionUri: Uri = uri,
         val sha256Hex: String,
         val alreadyExisted: Boolean = false,
         val mode: ImportMode = ImportMode.COPY
@@ -174,6 +184,50 @@ enum class ImportErrorCode {
     DATABASE_FAILED,
     CANCELLED,
     UNKNOWN
+}
+
+/**
+ * Photo Picker URIs are mediated read-only handles. When the provider exposes the
+ * original MediaStore volume + row ID, reconstruct the canonical item URI so MOVE
+ * can request deletion consent against the real public media row.
+ */
+internal fun canonicalDeletionUri(
+    fallback: Uri,
+    mediaType: MediaType,
+    metadata: PrivateMediaMetadata
+): Uri {
+    // Photo Picker grants a read-only wrapper URI. AOSP local picker URIs encode
+    // the underlying local MediaStore row ID in their final path segment:
+    // content://media/picker/<user>/<local-provider>/media/<local-id>.
+    // Use that only for the known local picker provider; never reinterpret cloud
+    // provider IDs as local MediaStore rows.
+    val segments = fallback.pathSegments
+    val isLocalPhotoPickerUri =
+        fallback.authority == MediaStore.AUTHORITY &&
+            segments.size >= 5 &&
+            (segments[0] == "picker" || segments[0] == "picker_get_content") &&
+            segments[2] == "com.android.providers.media.photopicker" &&
+            segments[3] == "media"
+
+    val pickerLocalId = if (isLocalPhotoPickerUri) {
+        segments.lastOrNull()?.toLongOrNull()
+    } else {
+        null
+    }
+
+    val id = metadata.sourceMediaStoreId ?: pickerLocalId ?: return fallback
+    if (id < 0L) return fallback
+
+    val volume = metadata.sourceVolume?.takeIf { it.isNotBlank() }
+        ?: if (pickerLocalId != null) MediaStore.VOLUME_EXTERNAL_PRIMARY else return fallback
+
+    return runCatching {
+        val collection = when (mediaType) {
+            MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume)
+            MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume)
+        }
+        ContentUris.withAppendedId(collection, id)
+    }.getOrDefault(fallback)
 }
 
 /**
@@ -265,6 +319,11 @@ class ImportCoordinator(
             vaultJobDao.updateState(jobId, JobState.READING_SOURCE.code, System.currentTimeMillis())
             val resolvedSource = metadataReader.resolve(uri)
             val sourceMeta = metadataReader.read(resolvedSource)
+            val deletionUri = if (mode == ImportMode.MOVE) {
+                canonicalDeletionUri(uri, sourceMeta.mediaType, sourceMeta.metadata)
+            } else {
+                uri
+            }
 
             // 2. Encrypting stream to .partial file
             vaultJobDao.updateState(jobId, JobState.ENCRYPTING.code, System.currentTimeMillis())
@@ -318,12 +377,41 @@ class ImportCoordinator(
                             now = nowDuplicate
                         )
                     } else {
+                        // Persist the canonical deletion URI before entering the
+                        // crash-recoverable source-delete phase. This is especially
+                        // important for Android Photo Picker URIs, which are read-only
+                        // handles and may not be valid delete-request targets after a
+                        // process restart.
+                        val deletePayloadRaw = ImportJobPayload(
+                            sourceUri = deletionUri.toString(),
+                            targetFolderId = existing.folderId,
+                            itemId = existing.id,
+                            mode = mode
+                        ).serialize()
+                        val deletePayloadEncrypted = try {
+                            Aead.encryptWithPrependedNonce(
+                                session.metaSubkey,
+                                deletePayloadRaw,
+                                "job:$jobId:v1".toByteArray(Charsets.UTF_8)
+                            )
+                        } finally {
+                            deletePayloadRaw.fill(0)
+                        }
+                        check(
+                            vaultJobDao.updateEncryptedPayload(
+                                jobId,
+                                vaultId,
+                                deletePayloadEncrypted,
+                                nowDuplicate
+                            ) == 1
+                        )
                         vaultJobDao.updateState(jobId, JobState.AWAITING_SOURCE_DELETE.code, nowDuplicate)
                     }
                     return@withContext ImportResult.Success(
                         jobId = jobId,
                         itemId = existing.id,
                         uri = uri,
+                        deletionUri = deletionUri,
                         sha256Hex = sha256Hex,
                         alreadyExisted = true,
                         mode = mode
@@ -383,7 +471,7 @@ class ImportCoordinator(
             // 7. Transactional DB commit (Section 15)
             val now = System.currentTimeMillis()
             val stagedRaw = ImportJobPayload(
-                sourceUri = uri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
+                sourceUri = deletionUri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
                 stagedMedia = ImportJobPayload.StagedMedia(
                     mediaTypeCode = sourceMeta.mediaType.code,
                     plaintextSize = verifyResult.plaintextSize,
@@ -449,6 +537,7 @@ class ImportCoordinator(
                 jobId = jobId,
                 itemId = itemId,
                 uri = uri,
+                deletionUri = deletionUri,
                 sha256Hex = sha256Hex,
                 mode = mode
             )

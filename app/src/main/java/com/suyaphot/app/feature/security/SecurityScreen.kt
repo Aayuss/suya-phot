@@ -277,7 +277,7 @@ fun SecurityScreen(
                                     val encryptCipher = container.keyManager.createBiometricEncryptCipher(real.id)
                                     val promptInfo = BiometricPrompt.PromptInfo.Builder()
                                         .setTitle("Enable Biometric Unlock")
-                                        .setSubtitle("Confirm fingerprint to link biometric key to vault")
+                                        .setSubtitle("Confirm a strong biometric to link the biometric key to your vault")
                                         .setNegativeButtonText("Cancel")
                                         .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                                         .build()

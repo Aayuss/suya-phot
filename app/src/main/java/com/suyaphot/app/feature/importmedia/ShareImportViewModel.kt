@@ -144,31 +144,31 @@ class ShareImportViewModel : ViewModel() {
 
         viewModelScope.launch {
             val current = pendingSuccesses.toList()
-            when (val outcome = withContext(Dispatchers.IO) { app.sourceDeletionCoordinator.deleteSources(current.map { it.uri }) }) {
+            when (val outcome = withContext(Dispatchers.IO) { app.sourceDeletionCoordinator.deleteSources(current.map { it.deletionUri }) }) {
                 is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
-                    val completed = current.filter { it.uri in outcome.deletedUris }
+                    val completed = current.filter { it.deletionUri in outcome.deletedUris }
                     markJobsTerminal(completed, "SOURCE_DELETED")
-                    pendingSuccesses.removeAll { it.uri in outcome.deletedUris }
+                    pendingSuccesses.removeAll { it.deletionUri in outcome.deletedUris }
                     processSourceDeletions()
                 }
                 is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
-                    val directlyDeleted = current.filter { it.uri in outcome.deletedUris }
+                    val directlyDeleted = current.filter { it.deletionUri in outcome.deletedUris }
                     markJobsTerminal(directlyDeleted, "SOURCE_DELETED")
-                    pendingSuccesses.removeAll { it.uri in outcome.deletedUris }
+                    pendingSuccesses.removeAll { it.deletionUri in outcome.deletedUris }
 
                     consentSuccesses.clear()
-                    consentSuccesses.addAll(pendingSuccesses.filter { it.uri in outcome.uris })
+                    consentSuccesses.addAll(pendingSuccesses.filter { it.deletionUri in outcome.uris })
                     activeConsentMode = outcome.mode
                     _stage.value = ShareStage.DeleteConsent(outcome.intentSender, outcome.mode)
                 }
                 is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
-                    val directlyDeleted = current.filter { it.uri in outcome.deletedUris }
+                    val directlyDeleted = current.filter { it.deletionUri in outcome.deletedUris }
                     markJobsTerminal(directlyDeleted, "SOURCE_DELETED")
-                    val retained = current.filter { it.uri in outcome.uris }
+                    val retained = current.filter { it.deletionUri in outcome.uris }
                     if (retained.isNotEmpty()) anyOriginalsRetained = true
                     markJobsTerminal(retained, "SOURCE_DELETE_FAILED_VAULT_SAFE")
-                    pendingSuccesses.removeAll { it.uri in outcome.deletedUris }
-                    pendingSuccesses.removeAll { it.uri in outcome.uris }
+                    pendingSuccesses.removeAll { it.deletionUri in outcome.deletedUris }
+                    pendingSuccesses.removeAll { it.deletionUri in outcome.uris }
                     processSourceDeletions()
                 }
             }
@@ -183,10 +183,10 @@ class ShareImportViewModel : ViewModel() {
         viewModelScope.launch {
             if (resultCode == Activity.RESULT_OK && mode != null) {
                 val verified = withContext(Dispatchers.IO) {
-                    app.sourceDeletionCoordinator.completeConsent(currentConsent.map { it.uri }, mode)
+                    app.sourceDeletionCoordinator.completeConsent(currentConsent.map { it.deletionUri }, mode)
                 }
-                markJobsTerminal(currentConsent.filter { it.uri in verified.deletedUris }, "SOURCE_DELETED")
-                val retained = currentConsent.filter { it.uri in verified.retainedUris }
+                markJobsTerminal(currentConsent.filter { it.deletionUri in verified.deletedUris }, "SOURCE_DELETED")
+                val retained = currentConsent.filter { it.deletionUri in verified.retainedUris }
                 if (retained.isNotEmpty()) {
                     anyOriginalsRetained = true
                     markJobsTerminal(retained, "SOURCE_DELETE_FAILED_VAULT_SAFE")

@@ -6,10 +6,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 
+/**
+ * Long-press, then drag across a LazyVerticalGrid to select a contiguous range.
+ *
+ * The caller receives lifecycle callbacks so it can restore the selection snapshot
+ * when the finger moves back toward the anchor instead of only ever adding items.
+ */
 fun Modifier.longPressDragSelect(
     gridState: LazyGridState,
     enabled: Boolean = true,
-    onRange: (anchorIndex: Int, currentIndex: Int) -> Unit
+    onStart: (anchorIndex: Int) -> Unit = {},
+    onRange: (anchorIndex: Int, currentIndex: Int) -> Unit,
+    onEnd: () -> Unit = {}
 ): Modifier = if (!enabled) this else pointerInput(gridState) {
     var anchor = -1
 
@@ -24,10 +32,19 @@ fun Modifier.longPressDragSelect(
     detectDragGesturesAfterLongPress(
         onDragStart = { start ->
             anchor = indexAt(start) ?: -1
-            if (anchor >= 0) onRange(anchor, anchor)
+            if (anchor >= 0) {
+                onStart(anchor)
+                onRange(anchor, anchor)
+            }
         },
-        onDragCancel = { anchor = -1 },
-        onDragEnd = { anchor = -1 },
+        onDragCancel = {
+            anchor = -1
+            onEnd()
+        },
+        onDragEnd = {
+            anchor = -1
+            onEnd()
+        },
         onDrag = { change, _ ->
             if (anchor < 0) return@detectDragGesturesAfterLongPress
             val current = indexAt(change.position) ?: return@detectDragGesturesAfterLongPress

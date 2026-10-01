@@ -224,9 +224,9 @@ fun FoldersScreen(
         pendingMoveConsentMode = null
         scope.launch {
             if (result.resultCode == android.app.Activity.RESULT_OK && mode != null) {
-                val verified = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.completeConsent(current.map { it.uri }, mode) }
-                val deleted = current.filter { it.uri in verified.deletedUris }
-                val retained = current.filter { it.uri in verified.retainedUris }
+                val verified = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.completeConsent(current.map { it.deletionUri }, mode) }
+                val deleted = current.filter { it.deletionUri in verified.deletedUris }
+                val retained = current.filter { it.deletionUri in verified.retainedUris }
                 markFolderMoveResults(deleted, SourceDisposition.DELETED)
                 markFolderMoveResults(retained, SourceDisposition.DELETE_FAILED, "SOURCE_DELETE_FAILED_VAULT_SAFE")
                 folderActionStatus = if (retained.isEmpty()) "Moved into Suya Phot. Originals removed from Gallery."
@@ -241,23 +241,23 @@ fun FoldersScreen(
     fun finishFolderMovedSources(successes: List<ImportResult.Success>) {
         if (successes.isEmpty()) return
         scope.launch {
-            when (val outcome = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.deleteSources(successes.map { it.uri }) }) {
+            when (val outcome = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.deleteSources(successes.map { it.deletionUri }) }) {
                 is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
-                    val deleted = successes.filter { it.uri in outcome.deletedUris }
+                    val deleted = successes.filter { it.deletionUri in outcome.deletedUris }
                     markFolderMoveResults(deleted, SourceDisposition.DELETED)
                     folderActionStatus = "Moved " + deleted.size + " item(s) into Suya Phot."
                 }
                 is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
-                    val directlyDeleted = successes.filter { it.uri in outcome.deletedUris }
+                    val directlyDeleted = successes.filter { it.deletionUri in outcome.deletedUris }
                     markFolderMoveResults(directlyDeleted, SourceDisposition.DELETED)
-                    pendingMoveConsent = successes.filter { it.uri in outcome.uris }
+                    pendingMoveConsent = successes.filter { it.deletionUri in outcome.uris }
                     pendingMoveConsentMode = outcome.mode
                     container.sessionManager.beginSystemActivity()
                     folderMoveConsentLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
                 }
                 is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
-                    val directlyDeleted = successes.filter { it.uri in outcome.deletedUris }
-                    val retained = successes.filter { it.uri in outcome.uris }
+                    val directlyDeleted = successes.filter { it.deletionUri in outcome.deletedUris }
+                    val retained = successes.filter { it.deletionUri in outcome.uris }
                     markFolderMoveResults(directlyDeleted, SourceDisposition.DELETED)
                     markFolderMoveResults(retained, SourceDisposition.DELETE_FAILED, "SOURCE_DELETE_FAILED_VAULT_SAFE")
                     folderActionStatus = "Vault copies are safe, but Android kept " + retained.size + " original(s)."
@@ -535,7 +535,7 @@ fun FoldersScreen(
                                 pendingLockId = null
                                 pendingLockBioIv = null
                                 pendingFolderId?.let { attemptOpenFolder(it) }
-                            } else gateError = "Fingerprint unavailable; use the folder credential"
+                            } else gateError = "Biometric unavailable; use the folder credential"
                         }
                     }
                 }
@@ -548,7 +548,7 @@ fun FoldersScreen(
                     .build(),
                 BiometricPrompt.CryptoObject(cipher)
             )
-        } catch (_: Exception) { gateError = "Fingerprint unavailable; use the folder credential" }
+        } catch (_: Exception) { gateError = "Biometric unavailable; use the folder credential" }
     }
 
     fun launchHiddenBiometric() {
@@ -567,7 +567,7 @@ fun FoldersScreen(
                                 showHiddenAuth = false
                                 hiddenMode = true
                                 pendingFolderId?.let { attemptOpenFolder(it) }
-                            } else gateError = "Fingerprint unavailable; use your vault credential"
+                            } else gateError = "Biometric unavailable; use your vault credential"
                         }
                     }
                 }
@@ -580,7 +580,7 @@ fun FoldersScreen(
                     .build(),
                 BiometricPrompt.CryptoObject(cipher)
             )
-        } catch (_: Exception) { gateError = "Fingerprint unavailable; use your vault credential" }
+        } catch (_: Exception) { gateError = "Biometric unavailable; use your vault credential" }
     }
 
     fun enrollFolderBiometric(credential: CharArray) {
@@ -603,11 +603,11 @@ fun FoldersScreen(
                                         if (container.folderLockManager.saveBiometricEnvelope(lockId, envelope, authCipher.iv)) {
                                             showEnrollBiometricDialog = false
                                             selectedFolderForAction = null
-                                            folderActionStatus = "Fingerprint enabled for folder"
+                                            folderActionStatus = "Biometric enabled for folder"
                                         } else enrollError = "Could not save fingerprint setting"
                                     }
                                 }
-                            } catch (_: Exception) { enrollError = "Fingerprint enrollment failed" }
+                            } catch (_: Exception) { enrollError = "Biometric enrollment failed" }
                             finally { token.fill(0) }
                         }
                         override fun onAuthenticationError(errorCode: Int, errString: CharSequence) { token.fill(0) }
@@ -615,13 +615,13 @@ fun FoldersScreen(
                 )
                 prompt.authenticate(
                     BiometricPrompt.PromptInfo.Builder()
-                        .setTitle("Enable folder fingerprint")
+                        .setTitle("Enable folder biometric")
                         .setNegativeButtonText("Cancel")
                         .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                         .build(),
                     BiometricPrompt.CryptoObject(cipher)
                 )
-            } catch (_: Exception) { token.fill(0); enrollError = "Fingerprint unavailable" }
+            } catch (_: Exception) { token.fill(0); enrollError = "Biometric unavailable" }
         }
     }
 
@@ -1108,7 +1108,7 @@ fun FoldersScreen(
                             modifier = Modifier.fillMaxWidth()
                         )
                         SuyaButton(
-                            text = "Allow fingerprint for folder",
+                            text = "Allow biometric for folder",
                             onClick = {
                                 scope.launch {
                                     val lock = container.database.folderLockDao().getForVault(vaultId, targetFolder.lockId)
@@ -1125,11 +1125,11 @@ fun FoldersScreen(
                             modifier = Modifier.fillMaxWidth()
                         )
                         SuyaButton(
-                            text = "Disable folder fingerprint",
+                            text = "Disable folder biometric",
                             onClick = {
                                 scope.launch {
                                     val disabled = container.folderLockManager.disableBiometric(targetFolder.lockId)
-                                    folderActionStatus = if (disabled) "Folder fingerprint disabled" else "Unlock this folder first"
+                                    folderActionStatus = if (disabled) "Folder biometric disabled" else "Unlock this folder first"
                                     selectedFolderForAction = null
                                 }
                             },
@@ -1368,7 +1368,7 @@ fun FoldersScreen(
     if (showEnrollBiometricDialog && enrollLockId != null) {
         SuyaDialog(
             onDismissRequest = { showEnrollBiometricDialog = false; enrollInput = "" },
-            title = "Enable folder fingerprint",
+            title = "Enable folder biometric",
             confirmText = if (enrollTypeCode == 0) "Continue" else null,
             onConfirm = if (enrollTypeCode == 0) ({ enrollFolderBiometric(enrollInput.toCharArray()); enrollInput = "" }) else null,
             content = {
