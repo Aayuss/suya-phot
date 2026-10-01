@@ -86,6 +86,7 @@ import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.feature.importmedia.rememberMoveSourceDeletionHandler
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
@@ -200,6 +201,10 @@ fun FoldersScreen(
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    val finishMoveImport = rememberMoveSourceDeletionHandler(container) { status ->
+        folderActionStatus = status
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
@@ -207,17 +212,24 @@ fun FoldersScreen(
                 val results = container.importCoordinator.importBatch(
                     uris = uris,
                     folderId = currentParentId,
-                    mode = ImportMode.COPY,
+                    mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
+                val successes = results.filterIsInstance<ImportResult.Success>()
+                val imported = successes.count { !it.alreadyExisted }
+                val duplicates = successes.count { it.alreadyExisted }
                 val failed = results.count { it is ImportResult.Failure }
-                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
+
+                if (successes.isNotEmpty()) {
+                    folderActionStatus = "$imported secured, $duplicates already protected, $failed failed. Removing public originals…"
+                    finishMoveImport(successes)
+                } else {
+                    folderActionStatus = "0 secured, $failed failed"
+                }
             }
         }
     }
