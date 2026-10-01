@@ -1,7 +1,10 @@
 package com.suyaphot.app.domain.importmedia
 
 import android.content.Context
+import android.content.ContentUris
 import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import androidx.room.withTransaction
 import com.suyaphot.app.core.crypto.Aead
 import com.suyaphot.app.core.crypto.VaultCrypto
@@ -265,6 +268,7 @@ class ImportCoordinator(
             vaultJobDao.updateState(jobId, JobState.READING_SOURCE.code, System.currentTimeMillis())
             val resolvedSource = metadataReader.resolve(uri)
             val sourceMeta = metadataReader.read(resolvedSource)
+            val sourceDeleteUri = canonicalMediaStoreUri(sourceMeta, uri)
 
             // 2. Encrypting stream to .partial file
             vaultJobDao.updateState(jobId, JobState.ENCRYPTING.code, System.currentTimeMillis())
@@ -318,12 +322,35 @@ class ImportCoordinator(
                             now = nowDuplicate
                         )
                     } else {
+                        val deletePayloadRaw = ImportJobPayload(
+                            sourceUri = sourceDeleteUri.toString(),
+                            targetFolderId = folderId,
+                            itemId = existing.id,
+                            mode = mode
+                        ).serialize()
+                        val deletePayloadEncrypted = try {
+                            Aead.encryptWithPrependedNonce(
+                                session.metaSubkey,
+                                deletePayloadRaw,
+                                "job:$jobId:v1".toByteArray(Charsets.UTF_8)
+                            )
+                        } finally {
+                            deletePayloadRaw.fill(0)
+                        }
+                        check(
+                            vaultJobDao.updateEncryptedPayload(
+                                jobId,
+                                vaultId,
+                                deletePayloadEncrypted,
+                                nowDuplicate
+                            ) == 1
+                        )
                         vaultJobDao.updateState(jobId, JobState.AWAITING_SOURCE_DELETE.code, nowDuplicate)
                     }
                     return@withContext ImportResult.Success(
                         jobId = jobId,
                         itemId = existing.id,
-                        uri = uri,
+                        uri = sourceDeleteUri,
                         sha256Hex = sha256Hex,
                         alreadyExisted = true,
                         mode = mode
@@ -383,7 +410,7 @@ class ImportCoordinator(
             // 7. Transactional DB commit (Section 15)
             val now = System.currentTimeMillis()
             val stagedRaw = ImportJobPayload(
-                sourceUri = uri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
+                sourceUri = sourceDeleteUri.toString(), targetFolderId = folderId, itemId = itemId, mode = mode,
                 stagedMedia = ImportJobPayload.StagedMedia(
                     mediaTypeCode = sourceMeta.mediaType.code,
                     plaintextSize = verifyResult.plaintextSize,
@@ -448,7 +475,7 @@ class ImportCoordinator(
             ImportResult.Success(
                 jobId = jobId,
                 itemId = itemId,
-                uri = uri,
+                uri = sourceDeleteUri,
                 sha256Hex = sha256Hex,
                 mode = mode
             )
@@ -487,6 +514,23 @@ class ImportCoordinator(
         } finally {
             session.close()
         }
+    }
+
+    private fun canonicalMediaStoreUri(
+        source: MetadataReader.ExtractedSourceMetadata,
+        fallback: Uri
+    ): Uri {
+        val id = source.metadata.sourceMediaStoreId ?: return fallback
+        val volume = source.metadata.sourceVolume
+            ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.VOLUME_EXTERNAL_PRIMARY else "external"
+
+        return runCatching {
+            val collection = when (source.mediaType) {
+                MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volume)
+                MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volume)
+            }
+            ContentUris.withAppendedId(collection, id)
+        }.getOrDefault(fallback)
     }
 
     /**
