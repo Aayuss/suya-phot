@@ -61,7 +61,7 @@ class SourceDeletionCoordinator(
         val deletedUris = mutableListOf<Uri>()
 
         // Try direct deletion first (works for files owned by this app or under legacy storage)
-        for (uri in uris) {
+        for ((index, uri) in uris.withIndex()) {
             try {
                 val rows = deleteUri(uri)
                 if (rows <= 0) {
@@ -71,9 +71,14 @@ class SourceDeletionCoordinator(
                 }
             } catch (rse: RecoverableSecurityException) {
                 // API 29 per-item user consent
+                // API 29 grants consent per item. Keep every still-unprocessed URI
+                // attached to this operation so no MOVE job can be abandoned if the
+                // first protected source interrupts the loop. After consent we retry
+                // all of them; any URI that still needs its own consent is recorded
+                // as retained/failed and can be finished from the attention flow.
                 return DeletionOutcome.RequiresUserConsent(
                     rse.userAction.actionIntent.intentSender,
-                    listOf(uri),
+                    listOf(uri) + uris.drop(index + 1),
                     deletedUris,
                     DeleteConsentMode.API29_RETRY_REQUIRED
                 )
