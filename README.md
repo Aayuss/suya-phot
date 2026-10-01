@@ -3,6 +3,18 @@
 Native Android encrypted photo and video privacy vault and gallery application built with Kotlin and Jetpack Compose.
 Optimized for the **Samsung Galaxy S23 Ultra** and modern Android devices (API 29+).
 
+[![Download Latest APK](https://img.shields.io/badge/Download-Latest%20APK-orange?style=for-the-badge&logo=android)](https://github.com/Aayuss/suya-phot/releases/latest/download/suya-phot.apk)
+[![Latest Release](https://img.shields.io/github/v/release/Aayuss/suya-phot?style=for-the-badge&color=blue)](https://github.com/Aayuss/suya-phot/releases/latest)
+
+---
+
+### 📲 Quick Download
+- **[👉 Download Latest Release APK (`suya-phot.apk`)](https://github.com/Aayuss/suya-phot/releases/latest/download/suya-phot.apk)**
+- Alternative direct mirror: **[app-release.apk](https://github.com/Aayuss/suya-phot/releases/latest/download/app-release.apk)**
+- View release notes & history: **[GitHub Releases](https://github.com/Aayuss/suya-phot/releases/latest)**
+
+> **Note**: Tapping the direct download link above always fetches the latest executable `.apk` directly onto your Android device — ready for immediate tap-to-install without having to browse releases.
+
 ---
 
 ## Overview
