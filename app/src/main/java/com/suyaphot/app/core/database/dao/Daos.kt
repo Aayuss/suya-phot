@@ -457,7 +457,7 @@ interface VaultJobDao {
         DELETE FROM jobs
         WHERE vaultId = :vaultId
           AND stateCode IN (7, 8, 9)
-          AND (sourceDispositionCode IS NULL OR sourceDispositionCode IN (0, 2, 3))
+          AND (sourceDispositionCode IS NULL OR sourceDispositionCode IN (2, 3))
           AND updatedAt < :cutoffTimestamp
     """)
     suspend fun purgeResolvedCompletedJobs(vaultId: String, cutoffTimestamp: Long): Int
