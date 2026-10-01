@@ -52,6 +52,7 @@ fun SuyaTopBar(
     modifier: Modifier = Modifier,
     navigationIcon: ImageVector? = null,
     onNavigationClick: (() -> Unit)? = null,
+    onTitleLongClick: (() -> Unit)? = null,
     actions: @Composable () -> Unit = {}
 ) {
     Row(
@@ -79,7 +80,15 @@ fun SuyaTopBar(
                 fontFamily = SoraFontFamily,
                 fontWeight = FontWeight.Medium,
                 fontSize = 20.sp,
-                color = SuyaColors.White
+                color = SuyaColors.White,
+                modifier = if (onTitleLongClick != null) {
+                    Modifier.combinedClickable(
+                        onClick = {},
+                        onLongClick = onTitleLongClick
+                    )
+                } else {
+                    Modifier
+                }
             )
         }
         Row(
