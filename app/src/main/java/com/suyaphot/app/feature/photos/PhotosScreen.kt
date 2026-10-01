@@ -749,13 +749,12 @@ fun PhotosScreen(
                             detectDragGesturesAfterLongPress(
                                 onDragStart = { position ->
                                     val index = indexAt(position.x, position.y)
-                                        ?: return@detectDragGesturesAfterLongPress
-                                    val id = idAt(index)
-                                        ?: return@detectDragGesturesAfterLongPress
-
-                                    anchorIndex = index
-                                    baselineSelection = selectedMediaIds.keys.toSet()
-                                    selectedMediaIds[id] = Unit
+                                    val id = index?.let(::idAt)
+                                    if (index != null && id != null) {
+                                        anchorIndex = index
+                                        baselineSelection = selectedMediaIds.keys.toSet()
+                                        selectedMediaIds[id] = Unit
+                                    }
                                 },
                                 onDragEnd = {
                                     anchorIndex = null
@@ -767,20 +766,19 @@ fun PhotosScreen(
                                 },
                                 onDrag = { change, _ ->
                                     val anchor = anchorIndex
-                                        ?: return@detectDragGesturesAfterLongPress
                                     val current = indexAt(change.position.x, change.position.y)
-                                        ?: return@detectDragGesturesAfterLongPress
+                                    if (anchor != null && current != null) {
+                                        change.consume()
 
-                                    change.consume()
+                                        val from = minOf(anchor, current)
+                                        val to = maxOf(anchor, current)
+                                        val rangeIds = (from..to)
+                                            .mapNotNull(::idAt)
 
-                                    val from = minOf(anchor, current)
-                                    val to = maxOf(anchor, current)
-                                    val rangeIds = (from..to)
-                                        .mapNotNull(::idAt)
-
-                                    selectedMediaIds.clear()
-                                    baselineSelection.forEach { selectedMediaIds[it] = Unit }
-                                    rangeIds.forEach { selectedMediaIds[it] = Unit }
+                                        selectedMediaIds.clear()
+                                        baselineSelection.forEach { selectedMediaIds[it] = Unit }
+                                        rangeIds.forEach { selectedMediaIds[it] = Unit }
+                                    }
                                 }
                             )
                         }
