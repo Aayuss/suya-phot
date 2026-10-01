@@ -335,7 +335,7 @@ fun FoldersScreen(
                     folderId = currentParentId,
                     mode = ImportMode.MOVE,
                     onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
+                        scope.launch { importProgressText = "Securing $current of $total items..." }
                     }
                 )
                 isImporting = false
@@ -754,7 +754,7 @@ fun FoldersScreen(
                     actions = {
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
-                            contentDescription = "Import media here",
+                            contentDescription = "Move media here",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(
@@ -822,8 +822,8 @@ fun FoldersScreen(
                 EmptyState(
                     icon = Icons.Default.Folder,
                     title = if (currentParentId == null) "No folders created" else "This folder is empty",
-                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Import media or create subfolders inside.",
-                    actionText = if (hiddenMode && currentParentId == null) null else "Import Photos & Videos",
+                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Move media to vault or create subfolders inside.",
+                    actionText = if (hiddenMode && currentParentId == null) null else "Move Photos & Videos",
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
