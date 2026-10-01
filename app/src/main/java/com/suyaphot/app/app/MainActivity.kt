@@ -89,6 +89,7 @@ fun MainAppHost(container: AppContainer) {
     val hideSensitiveUi by container.sessionManager.hideSensitiveUi.collectAsState()
 
     var activeTab by rememberSaveable { mutableStateOf(SuyaNavTab.PHOTOS) }
+    var hiddenEntryRequest by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     var activeViewerItemId by remember { mutableStateOf<String?>(null) }
     var activeViewerScope by remember { mutableStateOf<ViewerAccessScope?>(null) }
     var activeViewerCollection by remember { mutableStateOf<ViewerCollection?>(null) }
@@ -203,6 +204,12 @@ fun MainAppHost(container: AppContainer) {
                                 container.folderAccessManager.clear()
                             }
                             activeTab = it
+                        },
+                        onTabLongPressed = { tab ->
+                            if (tab == SuyaNavTab.FOLDERS) {
+                                activeTab = SuyaNavTab.FOLDERS
+                                hiddenEntryRequest++
+                            }
                         }
                     )
                 },
@@ -224,6 +231,7 @@ fun MainAppHost(container: AppContainer) {
                             SuyaNavTab.FOLDERS -> {
                                 FoldersScreen(
                                     container = container,
+                                    hiddenEntryRequest = hiddenEntryRequest,
                                     onMediaClick = { itemId, viewerScope, collection -> activeViewerScope = viewerScope; activeViewerCollection = collection; activeViewerItemId = itemId },
                                     onFolderOpened = { /* folder traversal handled internally */ }
                                 )

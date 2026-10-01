@@ -128,7 +128,7 @@ fun LockScreen(
             val decryptCipher = container.keyManager.createBiometricDecryptCipher(vault.id, iv)
             val promptInfo = BiometricPrompt.PromptInfo.Builder()
                 .setTitle("Unlock Suya Phot")
-                .setSubtitle("Use your fingerprint to unlock your secure vault")
+                .setSubtitle("Use your biometric to unlock your secure vault")
                 .setNegativeButtonText(if (showPatternInput) "Use Pattern" else "Use PIN")
                 .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                 .build()
@@ -156,7 +156,7 @@ fun LockScreen(
                     }
 
                     override fun onAuthenticationFailed() {
-                        errorMessage = "Fingerprint not recognized"
+                        errorMessage = "Biometric not recognized"
                     }
                 }
             )

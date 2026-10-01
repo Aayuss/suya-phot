@@ -9,6 +9,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -47,7 +48,6 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.outlined.Delete
@@ -85,7 +85,10 @@ import com.suyaphot.app.core.model.Folder
 import com.suyaphot.app.core.model.MediaItem
 import com.suyaphot.app.core.model.MediaType
 import com.suyaphot.app.core.model.ImportMode
+import com.suyaphot.app.core.model.JobState
+import com.suyaphot.app.core.model.SourceDisposition
 import com.suyaphot.app.domain.importmedia.ImportResult
+import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.domain.restore.RestoreResult
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.domain.folders.FolderAccessRequirement
@@ -117,6 +120,7 @@ import kotlinx.coroutines.withContext
 fun FoldersScreen(
     container: AppContainer,
     modifier: Modifier = Modifier,
+    hiddenEntryRequest: Int = 0,
     onMediaClick: (itemId: String, scope: ViewerAccessScope?, collection: ViewerCollection) -> Unit = { _, _, _ -> },
     onFolderOpened: (folderId: String) -> Unit = {}
 ) {
@@ -200,24 +204,81 @@ fun FoldersScreen(
     var isImporting by remember { mutableStateOf(false) }
     var importProgressText by remember { mutableStateOf("") }
     var pendingImportUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveConsent by remember { mutableStateOf<List<ImportResult.Success>>(emptyList()) }
+    var pendingMoveConsentMode by remember { mutableStateOf<SourceDeletionCoordinator.DeleteConsentMode?>(null) }
+
+    suspend fun markFolderMoveResults(results: List<ImportResult.Success>, disposition: SourceDisposition, errorCode: String? = null) =
+        withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            for (res in results) container.database.vaultJobDao().updateTerminalImportState(
+                res.jobId, vaultId, JobState.COMPLETED.code, disposition.code, errorCode, now
+            )
+        }
+
+    val folderMoveConsentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        container.sessionManager.endSystemActivity()
+        val current = pendingMoveConsent
+        val mode = pendingMoveConsentMode
+        pendingMoveConsent = emptyList()
+        pendingMoveConsentMode = null
+        scope.launch {
+            if (result.resultCode == android.app.Activity.RESULT_OK && mode != null) {
+                val verified = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.completeConsent(current.map { it.uri }, mode) }
+                val deleted = current.filter { it.uri in verified.deletedUris }
+                val retained = current.filter { it.uri in verified.retainedUris }
+                markFolderMoveResults(deleted, SourceDisposition.DELETED)
+                markFolderMoveResults(retained, SourceDisposition.DELETE_FAILED, "SOURCE_DELETE_FAILED_VAULT_SAFE")
+                folderActionStatus = if (retained.isEmpty()) "Moved into Suya Phot. Originals removed from Gallery."
+                    else "Vault copies are safe, but Android kept " + retained.size + " original(s)."
+            } else {
+                markFolderMoveResults(current, SourceDisposition.RETAINED_BY_USER)
+                folderActionStatus = "Vault copies are safe. Originals were kept in Gallery."
+            }
+        }
+    }
+
+    fun finishFolderMovedSources(successes: List<ImportResult.Success>) {
+        if (successes.isEmpty()) return
+        scope.launch {
+            when (val outcome = withContext(Dispatchers.IO) { container.sourceDeletionCoordinator.deleteSources(successes.map { it.uri }) }) {
+                is SourceDeletionCoordinator.DeletionOutcome.CompletedDirectly -> {
+                    val deleted = successes.filter { it.uri in outcome.deletedUris }
+                    markFolderMoveResults(deleted, SourceDisposition.DELETED)
+                    folderActionStatus = "Moved " + deleted.size + " item(s) into Suya Phot."
+                }
+                is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent -> {
+                    val directlyDeleted = successes.filter { it.uri in outcome.deletedUris }
+                    markFolderMoveResults(directlyDeleted, SourceDisposition.DELETED)
+                    pendingMoveConsent = successes.filter { it.uri in outcome.uris }
+                    pendingMoveConsentMode = outcome.mode
+                    container.sessionManager.beginSystemActivity()
+                    folderMoveConsentLauncher.launch(IntentSenderRequest.Builder(outcome.intentSender).build())
+                }
+                is SourceDeletionCoordinator.DeletionOutcome.Failed -> {
+                    val directlyDeleted = successes.filter { it.uri in outcome.deletedUris }
+                    val retained = successes.filter { it.uri in outcome.uris }
+                    markFolderMoveResults(directlyDeleted, SourceDisposition.DELETED)
+                    markFolderMoveResults(retained, SourceDisposition.DELETE_FAILED, "SOURCE_DELETE_FAILED_VAULT_SAFE")
+                    folderActionStatus = "Vault copies are safe, but Android kept " + retained.size + " original(s)."
+                }
+            }
+        }
+    }
+
     fun startImport(uris: List<Uri>) {
         if (uris.isNotEmpty()) {
             isImporting = true
             scope.launch {
                 val results = container.importCoordinator.importBatch(
-                    uris = uris,
-                    folderId = currentParentId,
-                    mode = ImportMode.COPY,
-                    onItemComplete = { current, total, _ ->
-                        scope.launch { importProgressText = "Importing $current of $total items..." }
-                    }
+                    uris = uris, folderId = currentParentId, mode = ImportMode.MOVE,
+                    onItemComplete = { current, total, _ -> scope.launch { importProgressText = "Moving $current of $total items into vault..." } }
                 )
                 isImporting = false
                 importProgressText = ""
-                val imported = results.count { it is ImportResult.Success && !it.alreadyExisted }
-                val duplicates = results.count { it is ImportResult.Success && it.alreadyExisted }
+                val successes = results.filterIsInstance<ImportResult.Success>()
                 val failed = results.count { it is ImportResult.Failure }
-                folderActionStatus = "Import: $imported added, $duplicates duplicates, $failed failed"
+                if (successes.isNotEmpty()) finishFolderMovedSources(successes)
+                if (successes.isEmpty()) folderActionStatus = "No items moved; $failed failed"
             }
         }
     }
@@ -443,6 +504,18 @@ fun FoldersScreen(
         }
     }
 
+    LaunchedEffect(hiddenEntryRequest) {
+        if (hiddenEntryRequest > 0 && currentParentId == null && !hiddenMode) {
+            val vault = container.database.vaultDao().getVault(vaultId)
+            gateTypeCode = vault?.credentialTypeCode ?: 0
+            hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
+            gateInput = ""
+            gateError = null
+            pendingFolderId = null
+            showHiddenAuth = true
+        }
+    }
+
     BackHandler(currentParentId != null || hiddenMode) { navigateUp() }
 
     fun launchFolderBiometric() {
@@ -610,25 +683,9 @@ fun FoldersScreen(
                         { navigateUp() }
                     } else null,
                     actions = {
-                        if (currentParentId == null && !hiddenMode) {
-                            SuyaIconButton(
-                                icon = Icons.Default.VisibilityOff,
-                                contentDescription = "Hidden folders",
-                                onClick = {
-                                    scope.launch {
-                                        val vault = container.database.vaultDao().getVault(vaultId)
-                                        gateTypeCode = vault?.credentialTypeCode ?: 0
-                                        hiddenBioIv = vault?.biometricIv?.takeIf { vault.biometricEnvelope != null }
-                                        gateInput = ""
-                                        gateError = null
-                                        showHiddenAuth = true
-                                    }
-                                }
-                            )
-                        }
                         if (!hiddenMode || currentParentId != null) SuyaIconButton(
                             icon = Icons.Default.Add,
-                            contentDescription = "Import media here",
+                            contentDescription = "Move media here",
                             onClick = {
                                 container.sessionManager.beginSystemActivity()
                                 pickerLauncher.launch(
@@ -696,8 +753,8 @@ fun FoldersScreen(
                 EmptyState(
                     icon = Icons.Default.Folder,
                     title = if (currentParentId == null) "No folders created" else "This folder is empty",
-                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Import media or create subfolders inside.",
-                    actionText = if (hiddenMode && currentParentId == null) null else "Import Photos & Videos",
+                    subtitle = if (currentParentId == null) "Create organized, nested folders for your private media." else "Move media here or create subfolders inside.",
+                    actionText = if (hiddenMode && currentParentId == null) null else "Move Photos & Videos",
                     onActionClick = {
                         container.sessionManager.beginSystemActivity()
                         pickerLauncher.launch(
@@ -907,7 +964,7 @@ fun FoldersScreen(
                     if (pendingLockId != null && pendingLockBioIv != null) {
                         Spacer(modifier = Modifier.height(8.dp))
                         SuyaButton(
-                            text = "Use fingerprint",
+                            text = "Use biometric",
                             onClick = { launchFolderBiometric() },
                             variant = ButtonVariant.Secondary,
                             modifier = Modifier.fillMaxWidth()
@@ -916,7 +973,7 @@ fun FoldersScreen(
                     if (showHiddenAuth && hiddenBioIv != null) {
                         Spacer(modifier = Modifier.height(8.dp))
                         SuyaButton(
-                            text = "Use fingerprint",
+                            text = "Use biometric",
                             onClick = { launchHiddenBiometric() },
                             variant = ButtonVariant.Secondary,
                             modifier = Modifier.fillMaxWidth()

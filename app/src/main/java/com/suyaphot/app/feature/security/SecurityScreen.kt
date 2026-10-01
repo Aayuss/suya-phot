@@ -88,6 +88,7 @@ fun SecurityScreen(
     val screenshotProtection by container.preferences.screenshotProtection.collectAsState(initial = true)
     val intruderEnabled by container.preferences.intruderSelfieEnabled.collectAsState(initial = false)
     val intruderThreshold by container.preferences.intruderTriggerCount.collectAsState(initial = 3)
+    val biometricOnLaunch by container.preferences.biometricOnLaunch.collectAsState(initial = true)
 
     var showSecondaryPinDialog by remember { mutableStateOf(false) }
     var currentSecondaryPinInput by remember { mutableStateOf("") }
@@ -264,8 +265,8 @@ fun SecurityScreen(
                 // Biometric Unlock
                 if (canEnrollBiometrics) {
                     SecurityToggleRow(
-                        title = "Fingerprint Unlock",
-                        subtitle = "Biometric unwrap via Android Keystore; hardware protection depends on the device",
+                        title = "Biometric Unlock",
+                        subtitle = "Use Android strong biometrics. Fingerprint works on supported devices; face works only when Android classifies it as strong.",
                         icon = Icons.Default.Fingerprint,
                         checked = isBiometricEnrolled,
                         onCheckedChange = { enable ->
@@ -310,6 +311,18 @@ fun SecurityScreen(
                             }
                         }
                     )
+
+                    if (isBiometricEnrolled) {
+                        SecurityToggleRow(
+                            title = "Auto-prompt Biometric",
+                            subtitle = "Show the biometric prompt automatically when the vault lock screen opens",
+                            icon = Icons.Default.Fingerprint,
+                            checked = biometricOnLaunch,
+                            onCheckedChange = { enabled ->
+                                scope.launch { container.preferences.setBiometricOnLaunch(enabled) }
+                            }
+                        )
+                    }
                 }
 
                 // Screenshot & Recents Protection Toggle
