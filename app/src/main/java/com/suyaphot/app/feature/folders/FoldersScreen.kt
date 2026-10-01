@@ -473,7 +473,7 @@ fun FoldersScreen(
                                 pendingLockId = null
                                 pendingLockBioIv = null
                                 pendingFolderId?.let { attemptOpenFolder(it) }
-                            } else gateError = "Fingerprint unavailable; use the folder credential"
+                            } else gateError = "Biometric unavailable; use the folder credential"
                         }
                     }
                 }
@@ -486,7 +486,7 @@ fun FoldersScreen(
                     .build(),
                 BiometricPrompt.CryptoObject(cipher)
             )
-        } catch (_: Exception) { gateError = "Fingerprint unavailable; use the folder credential" }
+        } catch (_: Exception) { gateError = "Biometric unavailable; use the folder credential" }
     }
 
     fun launchHiddenBiometric() {
@@ -505,7 +505,7 @@ fun FoldersScreen(
                                 showHiddenAuth = false
                                 hiddenMode = true
                                 pendingFolderId?.let { attemptOpenFolder(it) }
-                            } else gateError = "Fingerprint unavailable; use your vault credential"
+                            } else gateError = "Biometric unavailable; use your vault credential"
                         }
                     }
                 }
@@ -518,7 +518,7 @@ fun FoldersScreen(
                     .build(),
                 BiometricPrompt.CryptoObject(cipher)
             )
-        } catch (_: Exception) { gateError = "Fingerprint unavailable; use your vault credential" }
+        } catch (_: Exception) { gateError = "Biometric unavailable; use your vault credential" }
     }
 
     fun enrollFolderBiometric(credential: CharArray) {
@@ -541,11 +541,11 @@ fun FoldersScreen(
                                         if (container.folderLockManager.saveBiometricEnvelope(lockId, envelope, authCipher.iv)) {
                                             showEnrollBiometricDialog = false
                                             selectedFolderForAction = null
-                                            folderActionStatus = "Fingerprint enabled for folder"
+                                            folderActionStatus = "Biometric enabled for folder"
                                         } else enrollError = "Could not save fingerprint setting"
                                     }
                                 }
-                            } catch (_: Exception) { enrollError = "Fingerprint enrollment failed" }
+                            } catch (_: Exception) { enrollError = "Biometric enrollment failed" }
                             finally { token.fill(0) }
                         }
                         override fun onAuthenticationError(errorCode: Int, errString: CharSequence) { token.fill(0) }
@@ -553,13 +553,13 @@ fun FoldersScreen(
                 )
                 prompt.authenticate(
                     BiometricPrompt.PromptInfo.Builder()
-                        .setTitle("Enable folder fingerprint")
+                        .setTitle("Enable folder biometric")
                         .setNegativeButtonText("Cancel")
                         .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                         .build(),
                     BiometricPrompt.CryptoObject(cipher)
                 )
-            } catch (_: Exception) { token.fill(0); enrollError = "Fingerprint unavailable" }
+            } catch (_: Exception) { token.fill(0); enrollError = "Biometric unavailable" }
         }
     }
 
@@ -920,7 +920,7 @@ fun FoldersScreen(
                     if (pendingLockId != null && pendingLockBioIv != null) {
                         Spacer(modifier = Modifier.height(8.dp))
                         SuyaButton(
-                            text = "Use fingerprint",
+                            text = "Use biometric",
                             onClick = { launchFolderBiometric() },
                             variant = ButtonVariant.Secondary,
                             modifier = Modifier.fillMaxWidth()
@@ -929,7 +929,7 @@ fun FoldersScreen(
                     if (showHiddenAuth && hiddenBioIv != null) {
                         Spacer(modifier = Modifier.height(8.dp))
                         SuyaButton(
-                            text = "Use fingerprint",
+                            text = "Use biometric",
                             onClick = { launchHiddenBiometric() },
                             variant = ButtonVariant.Secondary,
                             modifier = Modifier.fillMaxWidth()
@@ -1323,7 +1323,7 @@ fun FoldersScreen(
     if (showEnrollBiometricDialog && enrollLockId != null) {
         SuyaDialog(
             onDismissRequest = { showEnrollBiometricDialog = false; enrollInput = "" },
-            title = "Enable folder fingerprint",
+            title = "Enable folder biometric",
             confirmText = if (enrollTypeCode == 0) "Continue" else null,
             onConfirm = if (enrollTypeCode == 0) ({ enrollFolderBiometric(enrollInput.toCharArray()); enrollInput = "" }) else null,
             content = {
