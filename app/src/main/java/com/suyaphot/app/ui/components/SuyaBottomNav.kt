@@ -108,7 +108,14 @@ fun SuyaBottomNav(
                         label = "nav_icon_tint"
                     )
 
-                    val tabWidth = if (selected) selectedWidth else compactWidth
+                    val tabWidth by animateDpAsState(
+                        targetValue = if (selected) selectedWidth else compactWidth,
+                        animationSpec = spring(
+                            dampingRatio = 0.9f,
+                            stiffness = Spring.StiffnessMedium
+                        ),
+                        label = "nav_tab_width"
+                    )
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
