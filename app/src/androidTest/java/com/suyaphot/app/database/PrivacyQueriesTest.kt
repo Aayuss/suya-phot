@@ -81,4 +81,31 @@ class PrivacyQueriesTest {
             assertEquals(listOf("hidden"), db.folderDao().getHiddenRoots("vault").first().map { it.folder.id })
         } finally { db.close() }
     }
+
+    @Test fun folderContentCountIncludesDirectSubfolders() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, SuyaDatabase::class.java).build()
+        try {
+            db.vaultDao().insert(VaultEntity("vault", 0, 1, 1, byteArrayOf(1)))
+            db.folderDao().insert(FolderEntity("parent", "vault", null, byteArrayOf(1), 1, 1, null, 0))
+            db.folderDao().insert(FolderEntity("child", "vault", "parent", byteArrayOf(1), 2, 2, null, 0))
+
+            val root = db.folderDao().getSubFoldersWithCount("vault", null).first()
+            assertEquals(1, root.size)
+            assertEquals("parent", root.single().folder.id)
+            assertEquals(1, root.single().itemCount)
+
+            db.mediaItemDao().insert(
+                MediaItemEntity(
+                    "media", "vault", "parent", 0, byteArrayOf(1), "media.sph", null,
+                    1, 1, "hash", 3, 3, false, null, null
+                )
+            )
+            val withMedia = db.folderDao().getSubFoldersWithCount("vault", null).first()
+            assertEquals(2, withMedia.single().itemCount)
+        } finally {
+            db.close()
+        }
+    }
+
 }
