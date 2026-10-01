@@ -52,6 +52,7 @@ fun SuyaTopBar(
     modifier: Modifier = Modifier,
     navigationIcon: ImageVector? = null,
     onNavigationClick: (() -> Unit)? = null,
+    onTitleLongClick: (() -> Unit)? = null,
     actions: @Composable () -> Unit = {}
 ) {
     Row(
@@ -63,7 +64,18 @@ fun SuyaTopBar(
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.weight(1f)
+            modifier = Modifier
+                .weight(1f)
+                .then(
+                    if (onTitleLongClick != null) {
+                        Modifier.combinedClickable(
+                            onClick = {},
+                            onLongClick = onTitleLongClick
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
         ) {
             if (navigationIcon != null && onNavigationClick != null) {
                 SuyaIconButton(
