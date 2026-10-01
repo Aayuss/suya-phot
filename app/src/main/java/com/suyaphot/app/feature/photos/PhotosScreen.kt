@@ -126,6 +126,7 @@ fun PhotosScreen(
     var allMatchingIds by remember { mutableStateOf<Set<String>?>(null) }
     val gridState = rememberLazyGridState()
     var dragSelectionAnchor by remember { mutableStateOf<Int?>(null) }
+    var dragSelectionBaseline by remember { mutableStateOf<Set<String>>(emptySet()) }
     val isInSelectionMode by remember { derivedStateOf { selectedMediaIds.isNotEmpty() || allMatchingIds != null } }
     val gridCols by container.preferences.gridColumns.collectAsState(initial = 3)
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
@@ -613,6 +614,8 @@ fun PhotosScreen(
 
                             fun selectInclusive(from: Int, to: Int) {
                                 allMatchingIds = null
+                                selectedMediaIds.clear()
+                                dragSelectionBaseline.forEach { selectedMediaIds[it] = Unit }
                                 val start = minOf(from, to)
                                 val end = maxOf(from, to)
                                 for (index in start..end) {
@@ -629,6 +632,7 @@ fun PhotosScreen(
                                             position.y < info.offset.y + info.size.height
                                     }
                                     if (hit != null) {
+                                        dragSelectionBaseline = selectedMediaIds.keys.toSet()
                                         dragSelectionAnchor = hit.index
                                         selectInclusive(hit.index, hit.index)
                                     }
@@ -652,8 +656,14 @@ fun PhotosScreen(
                                         change.position.y > size.height - edge -> scope.launch { gridState.scrollBy(30.dp.toPx()) }
                                     }
                                 },
-                                onDragEnd = { dragSelectionAnchor = null },
-                                onDragCancel = { dragSelectionAnchor = null }
+                                onDragEnd = {
+                                    dragSelectionAnchor = null
+                                    dragSelectionBaseline = emptySet()
+                                },
+                                onDragCancel = {
+                                    dragSelectionAnchor = null
+                                    dragSelectionBaseline = emptySet()
+                                }
                             )
                         }
                 ) {
