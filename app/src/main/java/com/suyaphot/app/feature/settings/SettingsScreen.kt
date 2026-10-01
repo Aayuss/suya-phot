@@ -1,5 +1,7 @@
 package com.suyaphot.app.feature.settings
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -24,6 +26,7 @@ import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Storage
@@ -46,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,6 +63,8 @@ import com.suyaphot.app.ui.components.SuyaButton
 import com.suyaphot.app.ui.components.SuyaTopBar
 import com.suyaphot.app.ui.theme.SoraFontFamily
 import com.suyaphot.app.ui.theme.SuyaColors
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -71,10 +77,12 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
 
     var storageBytes by remember { mutableLongStateOf(0L) }
+    var biometricEnrolled by remember { mutableStateOf(false) }
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
     val retentionDays by container.preferences.trashRetentionDays.collectAsState(initial = 30)
     val autoLockMs by container.preferences.autoLockTimeoutMs.collectAsState(initial = 0L)
@@ -85,9 +93,13 @@ fun SettingsScreen(
     var showBackupRestore by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(vaultId) {
-        storageBytes = withContext(Dispatchers.IO) {
-            container.vaultFileStore.getVaultStorageBytes(vaultId)
+        val snapshot = withContext(Dispatchers.IO) {
+            val bytes = container.vaultFileStore.getVaultStorageBytes(vaultId)
+            val vault = if (vaultId.isNotBlank()) container.database.vaultDao().getVault(vaultId) else null
+            bytes to (vault?.biometricEnvelope != null && vault.biometricIv != null)
         }
+        storageBytes = snapshot.first
+        biometricEnrolled = snapshot.second
     }
 
     if (showBackupRestore) {
@@ -213,6 +225,70 @@ fun SettingsScreen(
                     checked = lockOnScreenOff,
                     onCheckedChange = { scope.launch { container.preferences.setLockOnScreenOff(it) } }
                 )
+
+                SettingToggleRow(
+                    title = "Biometric Unlock",
+                    subtitle = "Use fingerprint or another Android strong biometric when supported",
+                    checked = biometricEnrolled,
+                    onCheckedChange = { enable ->
+                        val unlocked = session as? VaultSession.Unlocked ?: return@SettingToggleRow
+                        val activity = context as? FragmentActivity ?: return@SettingToggleRow
+
+                        if (!enable) {
+                            scope.launch(Dispatchers.IO) {
+                                container.keyManager.deleteBiometricKey(unlocked.vaultId)
+                                container.database.vaultDao().updateBiometricEnvelope(unlocked.vaultId, null, null)
+                                withContext(Dispatchers.Main) { biometricEnrolled = false }
+                            }
+                            return@SettingToggleRow
+                        }
+
+                        if (
+                            BiometricManager.from(context).canAuthenticate(
+                                BiometricManager.Authenticators.BIOMETRIC_STRONG
+                            ) != BiometricManager.BIOMETRIC_SUCCESS
+                        ) {
+                            return@SettingToggleRow
+                        }
+
+                        runCatching {
+                            val cipher = container.keyManager.createBiometricEncryptCipher(unlocked.vaultId)
+                            val prompt = BiometricPrompt(
+                                activity,
+                                ContextCompat.getMainExecutor(activity),
+                                object : BiometricPrompt.AuthenticationCallback() {
+                                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                                        val authCipher = result.cryptoObject?.cipher ?: return
+                                        val current = container.sessionManager.sessionState.value as? VaultSession.Unlocked ?: return
+                                        if (current.vaultId != unlocked.vaultId) return
+                                        current.masterKeyHandle.useBytes { masterKey ->
+                                            val envelope = authCipher.doFinal(masterKey)
+                                            val iv = authCipher.iv
+                                            scope.launch(Dispatchers.IO) {
+                                                container.database.vaultDao().updateBiometricEnvelope(
+                                                    unlocked.vaultId,
+                                                    envelope,
+                                                    iv
+                                                )
+                                                withContext(Dispatchers.Main) { biometricEnrolled = true }
+                                            }
+                                        }
+                                    }
+                                }
+                            )
+                            prompt.authenticate(
+                                BiometricPrompt.PromptInfo.Builder()
+                                    .setTitle("Enable Biometric Unlock")
+                                    .setSubtitle("Confirm a strong biometric for Suya Phot")
+                                    .setNegativeButtonText("Cancel")
+                                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                                    .build(),
+                                BiometricPrompt.CryptoObject(cipher)
+                            )
+                        }
+                    }
+                )
+
 
                 if (showSortDialog) {
                     ChoiceDialog(
