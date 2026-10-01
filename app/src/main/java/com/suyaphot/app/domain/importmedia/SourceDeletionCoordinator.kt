@@ -100,7 +100,19 @@ class SourceDeletionCoordinator(
         // On API 30+, request user permission via MediaStore.createDeleteRequest
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             return try {
-                val pendingIntent = MediaStore.createDeleteRequest(resolver, remainingUris)
+                // ACTION_OPEN_DOCUMENT often returns MediaDocumentsProvider document
+                // URIs. MediaStore's scoped-storage consent API expects MediaStore URIs,
+                // so map local document URIs back to their underlying media row when
+                // Android can do so. Cloud/foreign providers stay untouched and will
+                // safely fall through to the retained-original path if unsupported.
+                val requestUris = remainingUris.map { uri ->
+                    if (DocumentsContract.isDocumentUri(context, uri)) {
+                        runCatching { MediaStore.getMediaUri(context, uri) }.getOrNull() ?: uri
+                    } else {
+                        uri
+                    }
+                }
+                val pendingIntent = MediaStore.createDeleteRequest(resolver, requestUris)
                 DeletionOutcome.RequiresUserConsent(
                     pendingIntent.intentSender, remainingUris, deletedUris,
                     DeleteConsentMode.API30_SYSTEM_DELETE_REQUEST
