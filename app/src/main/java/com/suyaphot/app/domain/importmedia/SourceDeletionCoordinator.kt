@@ -64,10 +64,13 @@ class SourceDeletionCoordinator(
         for ((index, uri) in uris.withIndex()) {
             try {
                 val rows = deleteUri(uri)
-                if (rows <= 0) {
-                    remainingUris.add(uri)
-                } else {
+                if (rows > 0 || probeAbsent(uri)) {
+                    // Treat an already-absent source as successfully moved. This is
+                    // especially important when reconciling older COPY imports whose
+                    // public original may have been removed outside Suya Phot.
                     deletedUris.add(uri)
+                } else {
+                    remainingUris.add(uri)
                 }
             } catch (rse: RecoverableSecurityException) {
                 // API 29 per-item user consent
