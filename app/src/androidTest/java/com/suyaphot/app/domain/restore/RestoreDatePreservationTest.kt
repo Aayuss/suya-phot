@@ -411,4 +411,82 @@ class RestoreDatePreservationTest {
             sourceUri?.let { runCatching { resolver.delete(it, null, null) } }
         }
     }
+
+    @Test
+    fun testExtractRelativePathFromDiskPath() {
+        val reader = com.suyaphot.app.core.media.MetadataReader(ApplicationProvider.getApplicationContext())
+        assertEquals("DCIM/Camera/", reader.extractRelativePathFromDiskPath("/storage/emulated/0/DCIM/Camera/Photo_25.jpg"))
+        assertEquals("Pictures/Screenshots/", reader.extractRelativePathFromDiskPath("/storage/emulated/0/Pictures/Screenshots/Screenshot_1.png"))
+        assertEquals("Movies/", reader.extractRelativePathFromDiskPath("/storage/emulated/0/Movies/Video.mp4"))
+        assertEquals("Download/", reader.extractRelativePathFromDiskPath("/mnt/user/0/primary/Download/Document.pdf"))
+    }
+
+    @Test
+    fun testFallbackRestorePathDefaultsToCameraAndNeverSuyaPhotRestored() = runBlocking {
+        val app = ApplicationProvider.getApplicationContext<SuyaApp>()
+        val container = app.container
+        val resolver = app.contentResolver
+
+        if (container.sessionManager.sessionState.value !is VaultSession.Unlocked) {
+            val existingVault = container.database.vaultDao().getVaultByKind(com.suyaphot.app.core.model.VaultKind.REAL.code)
+            if (existingVault != null) {
+                container.pinAuthenticator.authenticateWithPin("123456".toCharArray())
+            }
+        }
+        val unlockedSession = container.sessionManager.sessionState.value as VaultSession.Unlocked
+        val vaultId = unlockedSession.vaultId
+
+        // Insert dummy image with 'Suya Phot Restored' as relative path to verify it gets sanitized to DCIM/Camera/
+        val initialValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "test_fallback_photo.jpg")
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Suya Phot Restored/")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val sourceUri = resolver.insert(collection, initialValues)
+        assertNotNull("Failed to insert source media", sourceUri)
+
+        try {
+            val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+            resolver.openFileDescriptor(sourceUri!!, "w")?.use { pfd ->
+                FileOutputStream(pfd.fileDescriptor).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                    out.flush()
+                }
+            }
+            val publishSource = ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_PENDING, 0)
+            }
+            resolver.update(sourceUri, publishSource, null, null)
+
+            val importResult = container.importCoordinator.importSingle(
+                uri = sourceUri,
+                folderId = null,
+                mode = ImportMode.COPY
+            )
+            assertTrue(importResult is ImportResult.Success)
+            val itemId = (importResult as ImportResult.Success).itemId
+
+            resolver.delete(sourceUri, null, null)
+
+            val restoreResult = container.restoreCoordinator.restoreItem(itemId = itemId, move = true)
+            assertTrue("Restore should succeed: $restoreResult", restoreResult is RestoreResult.Success)
+            val restoredUri = checkNotNull((restoreResult as RestoreResult.Success).publicUri)
+
+            try {
+                resolver.query(restoredUri, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH), null, null, null)?.use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    val path = cursor.getString(0)
+                    assertEquals("${Environment.DIRECTORY_DCIM}/Camera/", path)
+                    assertFalse(path.contains("Suya Phot Restored"))
+                } ?: fail("Cursor was null")
+            } finally {
+                resolver.delete(restoredUri, null, null)
+            }
+        } finally {
+            sourceUri?.let { runCatching { resolver.delete(it, null, null) } }
+        }
+    }
 }
+

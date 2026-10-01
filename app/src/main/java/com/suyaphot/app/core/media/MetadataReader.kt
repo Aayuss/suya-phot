@@ -225,8 +225,27 @@ class MetadataReader(private val context: Context) {
                         }
                     }
                 }
+                runCatching {
+                    val link = android.system.Os.readlink("/proc/self/fd/${pfd.fd}")
+                    if (!link.isNullOrBlank()) {
+                        if (relPath == null) {
+                            relPath = extractRelativePathFromDiskPath(link)
+                        }
+                        if (displayName == null) {
+                            val name = link.substringAfterLast('/')
+                            if (name.isNotBlank()) displayName = name
+                        }
+                    }
+                }
             }
         } catch (ignored: Exception) {}
+
+        if (relPath?.contains("Suya Phot Restored") == true) {
+            relPath = "${android.os.Environment.DIRECTORY_DCIM}/Camera/"
+        }
+        if (relPath == null) {
+            relPath = "${android.os.Environment.DIRECTORY_DCIM}/Camera/"
+        }
 
         // Fallback to filename timestamp if dateTaken is still unresolved
         if (dateTaken == null) {
@@ -380,6 +399,25 @@ class MetadataReader(private val context: Context) {
                 sdf.parse(dateStr.trim())?.time
             }.getOrNull()
             if (epoch != null && epoch > 0L) return epoch
+        }
+        return null
+    }
+
+    fun extractRelativePathFromDiskPath(diskPath: String): String? {
+        val standardRoots = listOf("DCIM/", "Pictures/", "Movies/", "Download/", "Documents/", "Music/")
+        for (root in standardRoots) {
+            val idx = diskPath.indexOf("/$root")
+            if (idx != -1) {
+                val sub = diskPath.substring(idx + 1)
+                val dir = sub.substringBeforeLast('/')
+                return if (dir.endsWith("/")) dir else "$dir/"
+            }
+        }
+        val regex = Regex("""^/(?:storage/emulated/\d+|mnt/user/\d+/primary|storage/[^/]+)/(.*)/[^/]+$""")
+        val match = regex.find(diskPath)
+        if (match != null) {
+            val relDir = match.groupValues[1]
+            return if (relDir.endsWith("/")) relDir else "$relDir/"
         }
         return null
     }

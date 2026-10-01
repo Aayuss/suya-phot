@@ -2,6 +2,7 @@ package com.suyaphot.app.domain.importmedia
 
 import android.content.Context
 import android.net.Uri
+import android.os.Environment
 import com.suyaphot.app.core.media.MetadataReader
 import com.suyaphot.app.core.model.ImportMode
 import com.suyaphot.app.core.model.PrivateMediaMetadata
@@ -64,7 +65,7 @@ class PendingShareManager(
                     val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull() ?: "application/octet-stream"
                     PrivateMediaMetadata(
                         originalDisplayName = displayName,
-                        originalRelativePath = null,
+                        originalRelativePath = "${Environment.DIRECTORY_DCIM}/Camera/",
                         originalMimeType = mime,
                         originalContentUri = uri.toString(),
                         dateTakenMs = now,

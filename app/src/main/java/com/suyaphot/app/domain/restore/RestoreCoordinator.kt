@@ -61,7 +61,7 @@ class RestoreCoordinator(
             ?.replace('\\', '/')
             ?.trimStart('/')
             ?.split('/')
-            ?.filter { it.isNotBlank() && it != "." && it != ".." && it.none(Char::isISOControl) }
+            ?.filter { it.isNotBlank() && it != "." && it != ".." && it.none(Char::isISOControl) && !it.contains("Suya Phot Restored") }
             .orEmpty()
         return if (segments.isEmpty()) fallback else segments.joinToString("/", postfix = "/")
     }
@@ -132,9 +132,10 @@ class RestoreCoordinator(
         } else MediaStore.Images.Media.getContentUri(volume)
         var collectionUri = collectionFor(targetVolume)
 
-        val defaultFolder = if (isVideo) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
-        val fallbackPath = "$defaultFolder/Suya Phot Restored/"
-        val restoreRelPath = safeRelativePath(customRelativePath ?: metadata.originalRelativePath, fallbackPath)
+        val fallbackPath = "${Environment.DIRECTORY_DCIM}/Camera/"
+        val candidatePath = customRelativePath
+            ?: metadata.originalRelativePath?.takeIf { !it.contains("Suya Phot Restored") }
+        val restoreRelPath = safeRelativePath(candidatePath, fallbackPath)
         val restoredDisplayName = safeDisplayName(metadata.originalDisplayName, itemId)
         val safeMimeType = metadata.originalMimeType.takeIf {
             if (isVideo) it.startsWith("video/") else it.startsWith("image/")
