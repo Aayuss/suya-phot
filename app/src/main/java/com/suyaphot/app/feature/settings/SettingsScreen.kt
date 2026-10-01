@@ -1,5 +1,7 @@
 package com.suyaphot.app.feature.settings
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -49,9 +51,13 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import com.suyaphot.app.R
 import com.suyaphot.app.BuildConfig
 import com.suyaphot.app.app.AppContainer
+import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.auth.LockReason
 import com.suyaphot.app.domain.auth.VaultSession
 import com.suyaphot.app.ui.components.ButtonVariant
@@ -71,8 +77,19 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
+
+    val realVault by container.database.vaultDao()
+        .observeVaultByKind(VaultKind.REAL.code)
+        .collectAsState(initial = null)
+    val biometricEnabled = realVault?.biometricEnvelope != null && realVault?.biometricIv != null
+    val biometricOnLaunch by container.preferences.biometricOnLaunch.collectAsState(initial = true)
+    val canUseStrongBiometric = remember(context) {
+        BiometricManager.from(context).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+            BiometricManager.BIOMETRIC_SUCCESS
+    }
 
     var storageBytes by remember { mutableLongStateOf(0L) }
     val sortOrder by container.preferences.sortOrder.collectAsState(initial = "DATE_TAKEN_DESC")
@@ -213,6 +230,70 @@ fun SettingsScreen(
                     checked = lockOnScreenOff,
                     onCheckedChange = { scope.launch { container.preferences.setLockOnScreenOff(it) } }
                 )
+
+                if (canUseStrongBiometric && realVault != null) {
+                    SettingToggleRow(
+                        title = "Biometric Unlock",
+                        subtitle = "Use fingerprint or another strong biometric supported by Android",
+                        checked = biometricEnabled,
+                        onCheckedChange = { enable ->
+                            val activity = context as? FragmentActivity ?: return@SettingToggleRow
+                            val vault = realVault ?: return@SettingToggleRow
+                            if (enable) {
+                                try {
+                                    val encryptCipher = container.keyManager.createBiometricEncryptCipher(vault.id)
+                                    val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                                        .setTitle("Enable Biometric Unlock")
+                                        .setSubtitle("Confirm a strong biometric to protect your vault key")
+                                        .setNegativeButtonText("Cancel")
+                                        .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                                        .build()
+                                    val prompt = BiometricPrompt(
+                                        activity,
+                                        ContextCompat.getMainExecutor(activity),
+                                        object : BiometricPrompt.AuthenticationCallback() {
+                                            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                                                val cipher = result.cryptoObject?.cipher ?: return
+                                                val current = container.sessionManager.sessionState.value
+                                                if (current is VaultSession.Unlocked) {
+                                                    current.masterKeyHandle.useBytes { masterKey ->
+                                                        val envelope = cipher.doFinal(masterKey)
+                                                        val iv = cipher.iv
+                                                        scope.launch(Dispatchers.IO) {
+                                                            container.database.vaultDao()
+                                                                .updateBiometricEnvelope(vault.id, envelope, iv)
+                                                            container.preferences.setBiometricOnLaunch(true)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    )
+                                    prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(encryptCipher))
+                                } catch (_: Exception) {
+                                    // Device/biometric state can change between capability check and prompt.
+                                }
+                            } else {
+                                scope.launch(Dispatchers.IO) {
+                                    container.keyManager.deleteBiometricKey(vault.id)
+                                    container.database.vaultDao().updateBiometricEnvelope(vault.id, null, null)
+                                    container.preferences.setBiometricOnLaunch(false)
+                                }
+                            }
+                        }
+                    )
+
+                    if (biometricEnabled) {
+                        SettingToggleRow(
+                            title = "Auto-prompt biometric",
+                            subtitle = "Show the biometric prompt automatically when the vault is locked",
+                            checked = biometricOnLaunch,
+                            onCheckedChange = { enabled ->
+                                scope.launch { container.preferences.setBiometricOnLaunch(enabled) }
+                            }
+                        )
+                    }
+                }
 
                 if (showSortDialog) {
                     ChoiceDialog(
