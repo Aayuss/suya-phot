@@ -84,4 +84,39 @@ class CanonicalDeletionUriTest {
             )
         )
     }
+
+    @Test
+    fun localPhotoPickerUriCanResolveEvenWhenProjectionOmitsVolumeAndId() {
+        val fallback = Uri.parse(
+            "content://media/picker/0/com.android.providers.media.photopicker/media/1000000198"
+        )
+
+        val resolved = canonicalDeletionUri(
+            fallback = fallback,
+            mediaType = MediaType.IMAGE,
+            metadata = metadata(null, null)
+        )
+
+        assertEquals(
+            "content://media/external_primary/images/media/1000000198",
+            resolved.toString()
+        )
+    }
+
+    @Test
+    fun cloudPickerAuthorityIsNeverReinterpretedAsLocalMediaStoreRow() {
+        val fallback = Uri.parse(
+            "content://media/picker/0/com.example.cloudphotos/media/cloud-42"
+        )
+
+        assertEquals(
+            fallback,
+            canonicalDeletionUri(
+                fallback = fallback,
+                mediaType = MediaType.IMAGE,
+                metadata = metadata(null, null)
+            )
+        )
+    }
+
 }
