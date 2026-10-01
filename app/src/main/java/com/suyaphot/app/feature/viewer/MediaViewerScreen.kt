@@ -322,7 +322,7 @@ private fun MediaViewerPage(
         container.sessionManager.endSystemActivity()
     }
 
-    var mediaEntity by remember { mutableStateOf<MediaItemEntity?>(null) }
+    var mediaEntity by remember(itemId) { mutableStateOf<MediaItemEntity?>(null) }
     var metadata by remember { mutableStateOf<PrivateMediaMetadata?>(null) }
     var fullBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember { mutableStateOf(true) }
@@ -726,8 +726,16 @@ private fun MediaViewerPage(
                             onClick = {
                                 val current = mediaEntity ?: return@SuyaIconButton
                                 val newFav = !current.favorite
+
+                                // Optimistic UI: the star responds on the tap frame instead of
+                                // waiting for Room I/O. Roll back only if persistence fails.
+                                mediaEntity = current.copy(favorite = newFav)
                                 scope.launch {
-                                    val activeVaultId = session?.vaultId ?: return@launch
+                                    val activeVaultId = session?.vaultId
+                                    if (activeVaultId == null) {
+                                        if (mediaEntity?.id == current.id) mediaEntity = current
+                                        return@launch
+                                    }
                                     val updated = withContext(Dispatchers.IO) {
                                         container.database.mediaItemDao().updateFavoriteForVault(
                                             activeVaultId,
@@ -736,8 +744,8 @@ private fun MediaViewerPage(
                                             System.currentTimeMillis()
                                         )
                                     }
-                                    if (updated == 1) {
-                                        mediaEntity = current.copy(favorite = newFav)
+                                    if (updated != 1 && mediaEntity?.id == current.id) {
+                                        mediaEntity = current
                                     }
                                 }
                             }
