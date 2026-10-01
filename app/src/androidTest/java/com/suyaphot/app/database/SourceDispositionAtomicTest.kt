@@ -140,7 +140,8 @@ class SourceDispositionAtomicTest {
             )
         }
 
-        // Resolved & Old -> Purged
+        // Resolved & Old -> Purged, except legacy COPY jobs. NOT_APPLICABLE is
+        // retained until the user explicitly finishes moving or keeps the public original.
         insertJob("job_not_applicable_old", JobState.COMPLETED.code, SourceDisposition.NOT_APPLICABLE.code, oldTimestamp)
         insertJob("job_deleted_old", JobState.COMPLETED.code, SourceDisposition.DELETED.code, oldTimestamp)
         insertJob("job_retained_user_old", JobState.COMPLETED.code, SourceDisposition.RETAINED_BY_USER.code, oldTimestamp)
@@ -158,9 +159,9 @@ class SourceDispositionAtomicTest {
         insertJob("job_deleted_recent", JobState.COMPLETED.code, SourceDisposition.DELETED.code, recentTimestamp)
 
         val purgedCount = db.vaultJobDao().purgeResolvedCompletedJobs(vaultId, testCutoff)
-        assertEquals(4, purgedCount)
+        assertEquals(3, purgedCount)
 
-        assertNull(db.vaultJobDao().getJob("job_not_applicable_old"))
+        assertNotNull(db.vaultJobDao().getJob("job_not_applicable_old"))
         assertNull(db.vaultJobDao().getJob("job_deleted_old"))
         assertNull(db.vaultJobDao().getJob("job_retained_user_old"))
         assertNull(db.vaultJobDao().getJob("job_null_disp_old"))
