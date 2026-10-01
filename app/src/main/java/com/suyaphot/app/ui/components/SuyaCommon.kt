@@ -274,7 +274,11 @@ fun FolderTile(
                     color = SuyaColors.White
                 )
                 Text(
-                    text = if (folder.lockId != null || folder.effectiveProtected) "Locked" else "${folder.itemCount} items",
+                    text = if (folder.lockId != null || folder.effectiveProtected) {
+                        "Locked"
+                    } else {
+                        "${folder.itemCount} ${if (folder.itemCount == 1) "item" else "items"}"
+                    },
                     fontFamily = SoraFontFamily,
                     fontSize = 12.sp,
                     color = SuyaColors.TextMuted
