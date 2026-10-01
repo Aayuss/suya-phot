@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -152,7 +153,8 @@ fun SuyaTextField(
     placeholder: String = "",
     visualTransformation: VisualTransformation = VisualTransformation.None,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
-    keyboardActions: KeyboardActions = KeyboardActions.Default
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
+    trailingIcon: (@Composable () -> Unit)? = null
 ) {
     Column(modifier = modifier) {
         if (label != null) {
@@ -172,33 +174,43 @@ fun SuyaTextField(
                 .fillMaxWidth()
                 .height(48.dp)
         ) {
-            Box(
-                contentAlignment = Alignment.CenterStart,
-                modifier = Modifier.padding(horizontal = 14.dp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(start = 14.dp, end = if (trailingIcon != null) 4.dp else 14.dp)
             ) {
-                if (value.isEmpty() && placeholder.isNotEmpty()) {
-                    Text(
-                        text = placeholder,
-                        fontFamily = SoraFontFamily,
-                        fontSize = 14.sp,
-                        color = SuyaColors.TextMuted
+                Box(
+                    contentAlignment = Alignment.CenterStart,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (value.isEmpty() && placeholder.isNotEmpty()) {
+                        Text(
+                            text = placeholder,
+                            fontFamily = SoraFontFamily,
+                            fontSize = 14.sp,
+                            color = SuyaColors.TextMuted
+                        )
+                    }
+                    BasicTextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        singleLine = true,
+                        visualTransformation = visualTransformation,
+                        keyboardOptions = keyboardOptions,
+                        keyboardActions = keyboardActions,
+                        cursorBrush = SolidColor(SuyaColors.Accent),
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontFamily = SoraFontFamily,
+                            fontSize = 14.sp,
+                            color = SuyaColors.White
+                        ),
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
-                BasicTextField(
-                    value = value,
-                    onValueChange = onValueChange,
-                    singleLine = true,
-                    visualTransformation = visualTransformation,
-                    keyboardOptions = keyboardOptions,
-                    keyboardActions = keyboardActions,
-                    cursorBrush = SolidColor(SuyaColors.Accent),
-                    textStyle = androidx.compose.ui.text.TextStyle(
-                        fontFamily = SoraFontFamily,
-                        fontSize = 14.sp,
-                        color = SuyaColors.White
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (trailingIcon != null) {
+                    trailingIcon()
+                }
             }
         }
     }

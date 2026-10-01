@@ -60,11 +60,11 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
+import com.suyaphot.app.ui.components.FavoriteViewerButton
+import com.suyaphot.app.ui.components.SuyaSeekBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -340,8 +340,8 @@ private fun MediaViewerPage(
     }
 
     var mediaEntity by remember(itemId) { mutableStateOf<MediaItemEntity?>(null) }
-    var favoriteOverride by remember(itemId) { mutableStateOf<Boolean?>(null) }
-    val isFavorite = favoriteOverride ?: (mediaEntity?.favorite == true)
+    var isFavorite by remember(itemId) { mutableStateOf(false) }
+    var pendingFavVersion by remember(itemId) { mutableLongStateOf(0L) }
     var metadata by remember(itemId) { mutableStateOf<PrivateMediaMetadata?>(null) }
     var fullBitmap by remember(itemId) { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember(itemId) { mutableStateOf(true) }
@@ -582,6 +582,7 @@ private fun MediaViewerPage(
             ViewerLoad()
         }
         mediaEntity = load.entity
+        isFavorite = load.entity?.favorite == true
         metadata = load.metadata
         fullBitmap = load.bitmap
         tempPlaybackFile = load.playbackFile
@@ -700,15 +701,7 @@ private fun MediaViewerPage(
                         }
                     }
                 } else if (entity.mediaTypeCode == MediaType.VIDEO.code && tempPlaybackFile != null) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = { isChromeVisible = !isChromeVisible }
-                            )
-                    ) {
+                    Box(modifier = Modifier.fillMaxSize()) {
                         AndroidView(
                             factory = { ctx ->
                                 val view = LayoutInflater.from(ctx).inflate(R.layout.view_suya_player, null) as PlayerView
@@ -735,17 +728,18 @@ private fun MediaViewerPage(
                                     it.playWhenReady = true
                                 }
                                 view.player = player
-                                view.setOnClickListener {
-                                    isChromeVisible = !isChromeVisible
-                                }
                                 view
                             },
-                            update = { view ->
-                                view.setOnClickListener {
-                                    isChromeVisible = !isChromeVisible
-                                }
-                            },
                             modifier = Modifier.fillMaxSize()
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(Unit) {
+                                    detectTapGestures(
+                                        onTap = { isChromeVisible = !isChromeVisible }
+                                    )
+                                }
                         )
                     }
                 }
@@ -892,32 +886,38 @@ private fun MediaViewerPage(
                             .padding(horizontal = 12.dp)
                     )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SuyaIconButton(
-                            icon = if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
-                            contentDescription = "Favorite",
-                            active = isFavorite,
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FavoriteViewerButton(
+                            isFavorite = isFavorite,
                             onClick = {
-                                val current = mediaEntity ?: return@SuyaIconButton
-                                val newFav = !isFavorite
-                                favoriteOverride = newFav
+                                val current = mediaEntity ?: return@FavoriteViewerButton
+                                val targetFav = !isFavorite
+                                isFavorite = targetFav
+                                val thisVersion = ++pendingFavVersion
                                 scope.launch {
-                                    val activeVaultId = session?.vaultId
+                                    val activeVaultId = container.sessionManager.currentVaultId ?: session?.vaultId
                                     if (activeVaultId == null) {
-                                        favoriteOverride = null
+                                        if (thisVersion == pendingFavVersion) {
+                                            isFavorite = current.favorite
+                                        }
                                         return@launch
                                     }
                                     val updated = runCatching {
                                         withContext(Dispatchers.IO) {
                                             container.database.mediaItemDao().updateFavoriteForVault(
-                                                activeVaultId, current.id, newFav, System.currentTimeMillis()
+                                                activeVaultId, current.id, targetFav, System.currentTimeMillis()
                                             )
                                         }
                                     }.getOrDefault(0)
-                                    if (updated == 1) {
-                                        mediaEntity = mediaEntity?.copy(favorite = newFav)
-                                    } else {
-                                        favoriteOverride = null
+                                    if (thisVersion == pendingFavVersion) {
+                                        if (updated == 1) {
+                                            mediaEntity = mediaEntity?.copy(favorite = targetFav)
+                                        } else {
+                                            isFavorite = current.favorite
+                                        }
                                     }
                                 }
                             }
@@ -965,25 +965,24 @@ private fun MediaViewerPage(
                                 (pos.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
                             } else 0f
 
-                            Slider(
-                                value = sliderPos,
-                                onValueChange = { frac ->
+                            SuyaSeekBar(
+                                progress = sliderPos,
+                                onSeekStarted = {
                                     isUserSeeking = true
-                                    seekFraction = frac
                                     onSeekingChanged(true)
                                 },
-                                onValueChangeFinished = {
-                                    val targetMs = (seekFraction * durationMs).toLong()
+                                onSeekProgress = { frac ->
+                                    seekFraction = frac
+                                    val targetMs = (frac * durationMs).toLong()
+                                    currentPositionMs = targetMs
+                                },
+                                onSeekFinished = { frac ->
+                                    val targetMs = (frac * durationMs).toLong()
                                     exoPlayer?.seekTo(targetMs)
                                     currentPositionMs = targetMs
                                     isUserSeeking = false
                                     onSeekingChanged(false)
                                 },
-                                colors = SliderDefaults.colors(
-                                    thumbColor = SuyaColors.Accent,
-                                    activeTrackColor = SuyaColors.Accent,
-                                    inactiveTrackColor = SuyaColors.White.copy(alpha = 0.3f)
-                                ),
                                 modifier = Modifier
                                     .weight(1f)
                                     .padding(horizontal = 8.dp)

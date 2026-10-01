@@ -81,7 +81,12 @@ class MetadataReader(private val context: Context) {
             resolver.query(uri, projection, null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val idCol = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
-                    if (idCol != -1) mediaStoreId = cursor.getLong(idCol)
+                    if (idCol != -1 && !cursor.isNull(idCol)) {
+                        val rowId = cursor.getLong(idCol)
+                        if (rowId > 0L) {
+                            mediaStoreId = rowId
+                        }
+                    }
 
                     val nameCol = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
                     if (nameCol != -1) displayName = cursor.getString(nameCol)

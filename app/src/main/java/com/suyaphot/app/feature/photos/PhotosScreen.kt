@@ -101,6 +101,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import androidx.paging.LoadState
+import androidx.paging.cachedIn
 import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.paging.compose.itemKey
 
@@ -327,8 +329,23 @@ fun PhotosScreen(
         MediaFilter.VIDEOS -> GalleryFilter.VIDEOS
         MediaFilter.FAVORITES -> GalleryFilter.FAVORITES
     }
-    val pagingFlow = remember(vaultId, galleryFilter, sortOrder) {
-        container.galleryRepository.paged(vaultId, galleryFilter, sortOrder)
+    val allFlow = remember(vaultId, sortOrder) {
+        container.galleryRepository.paged(vaultId, GalleryFilter.ALL, sortOrder).cachedIn(scope)
+    }
+    val photosFlow = remember(vaultId, sortOrder) {
+        container.galleryRepository.paged(vaultId, GalleryFilter.PHOTOS, sortOrder).cachedIn(scope)
+    }
+    val videosFlow = remember(vaultId, sortOrder) {
+        container.galleryRepository.paged(vaultId, GalleryFilter.VIDEOS, sortOrder).cachedIn(scope)
+    }
+    val favoritesFlow = remember(vaultId, sortOrder) {
+        container.galleryRepository.paged(vaultId, GalleryFilter.FAVORITES, sortOrder).cachedIn(scope)
+    }
+    val pagingFlow = when (selectedFilter) {
+        MediaFilter.ALL -> allFlow
+        MediaFilter.PHOTOS -> photosFlow
+        MediaFilter.VIDEOS -> videosFlow
+        MediaFilter.FAVORITES -> favoritesFlow
     }
     val pagedEntities = pagingFlow.collectAsLazyPagingItems()
     var searchEntities by remember { mutableStateOf<List<MediaItemEntity>>(emptyList()) }
@@ -626,8 +643,11 @@ fun PhotosScreen(
                 modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp)
             )
 
+            val isPagingRefreshing = pagedEntities.loadState.refresh is LoadState.Loading
+            val isPagingEmpty = !isPagingRefreshing && pagedEntities.loadState.refresh is LoadState.NotLoading && pagedEntities.itemCount == 0
+
             // Media Grid or Empty State
-            if (((isSearching && searchEntities.isEmpty()) || (!isSearching && pagedEntities.itemCount == 0)) && !isImporting) {
+            if (((isSearching && searchEntities.isEmpty()) || (!isSearching && isPagingEmpty)) && !isImporting) {
                 EmptyState(
                     icon = Icons.Default.PhotoLibrary,
                     title = if (searchQuery.isNotBlank()) "No search results" else "No media in vault",
@@ -663,8 +683,10 @@ fun PhotosScreen(
                                 selectedMediaIds.clear()
                                 dragSelectionBase.forEach { selectedMediaIds[it] = Unit }
 
-                                val from = minOf(anchor, current)
-                                val to = maxOf(anchor, current)
+                                val totalCount = if (isSearching) searchEntities.size else pagedEntities.itemCount
+                                if (totalCount <= 0) return@longPressDragSelect
+                                val from = minOf(anchor, current).coerceIn(0, totalCount - 1)
+                                val to = maxOf(anchor, current).coerceIn(0, totalCount - 1)
                                 for (index in from..to) {
                                     val id = if (isSearching) {
                                         searchEntities.getOrNull(index)?.id

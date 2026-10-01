@@ -136,13 +136,45 @@ data class MediaItemEntity(
         if (other !is MediaItemEntity) return false
         return id == other.id &&
                 vaultId == other.vaultId &&
-                sha256Hex == other.sha256Hex
+                folderId == other.folderId &&
+                mediaTypeCode == other.mediaTypeCode &&
+                encryptedMetadata.contentEquals(other.encryptedMetadata) &&
+                encryptedFileRelativePath == other.encryptedFileRelativePath &&
+                encryptedThumbRelativePath == other.encryptedThumbRelativePath &&
+                plaintextSize == other.plaintextSize &&
+                cipherSize == other.cipherSize &&
+                sha256Hex == other.sha256Hex &&
+                importedAt == other.importedAt &&
+                updatedAt == other.updatedAt &&
+                favorite == other.favorite &&
+                deletedAt == other.deletedAt &&
+                previousFolderId == other.previousFolderId &&
+                dateTakenMs == other.dateTakenMs &&
+                encryptedPreviewRelativePath == other.encryptedPreviewRelativePath &&
+                cleanupStateCode == other.cleanupStateCode &&
+                concealed == other.concealed
     }
 
     override fun hashCode(): Int {
         var result = id.hashCode()
         result = 31 * result + vaultId.hashCode()
+        result = 31 * result + (folderId?.hashCode() ?: 0)
+        result = 31 * result + mediaTypeCode
+        result = 31 * result + encryptedMetadata.contentHashCode()
+        result = 31 * result + encryptedFileRelativePath.hashCode()
+        result = 31 * result + (encryptedThumbRelativePath?.hashCode() ?: 0)
+        result = 31 * result + plaintextSize.hashCode()
+        result = 31 * result + cipherSize.hashCode()
         result = 31 * result + sha256Hex.hashCode()
+        result = 31 * result + importedAt.hashCode()
+        result = 31 * result + updatedAt.hashCode()
+        result = 31 * result + favorite.hashCode()
+        result = 31 * result + (deletedAt?.hashCode() ?: 0)
+        result = 31 * result + (previousFolderId?.hashCode() ?: 0)
+        result = 31 * result + (dateTakenMs?.hashCode() ?: 0)
+        result = 31 * result + (encryptedPreviewRelativePath?.hashCode() ?: 0)
+        result = 31 * result + cleanupStateCode
+        result = 31 * result + concealed.hashCode()
         return result
     }
 }

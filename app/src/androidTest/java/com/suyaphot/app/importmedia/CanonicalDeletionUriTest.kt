@@ -119,4 +119,39 @@ class CanonicalDeletionUriTest {
         )
     }
 
+    @Test
+    fun googlePlayMediaModulePickerUriResolvesToCanonicalMediaStoreRow() {
+        val fallback = Uri.parse(
+            "content://media/picker/0/com.google.android.providers.media.module/media/1000000062"
+        )
+
+        val resolved = canonicalDeletionUri(
+            fallback = fallback,
+            mediaType = MediaType.IMAGE,
+            metadata = metadata(null, null)
+        )
+
+        assertEquals(
+            "content://media/external_primary/images/media/1000000062",
+            resolved.toString()
+        )
+    }
+
+    @Test
+    fun zeroOrNegativeMediaStoreIdDoesNotProduceZeroIdUri() {
+        val fallback = Uri.parse(
+            "content://media/picker/0/com.android.providers.media.photopicker/media/1000000062"
+        )
+
+        val resolved = canonicalDeletionUri(
+            fallback = fallback,
+            mediaType = MediaType.IMAGE,
+            metadata = metadata("external_primary", 0L)
+        )
+
+        assertEquals(
+            "content://media/external_primary/images/media/1000000062",
+            resolved.toString()
+        )
+    }
 }

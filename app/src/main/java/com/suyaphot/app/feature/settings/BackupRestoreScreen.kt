@@ -558,26 +558,23 @@ fun BackupRestoreScreen(
                             fontSize = 13.sp,
                             color = SuyaColors.TextMuted
                         )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
+                        SuyaTextField(
+                            value = exportRecoveryCode,
+                            onValueChange = { exportRecoveryCode = it.uppercase() },
+                            label = "Recovery Code",
+                            placeholder = "e.g. 7K9P-4X2B-W8MN-...",
+                            visualTransformation = if (exportCodeRevealed) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { exportCodeRevealed = !exportCodeRevealed }) {
+                                    Icon(
+                                        imageVector = if (exportCodeRevealed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = if (exportCodeRevealed) "Hide Code" else "Reveal Code",
+                                        tint = SuyaColors.TextMuted
+                                    )
+                                }
+                            },
                             modifier = Modifier.fillMaxWidth()
-                        ) {
-                            SuyaTextField(
-                                value = exportRecoveryCode,
-                                onValueChange = { exportRecoveryCode = it.uppercase() },
-                                label = "Recovery Code",
-                                placeholder = "e.g. 7K9P-4X2B-W8MN-...",
-                                visualTransformation = if (exportCodeRevealed) VisualTransformation.None else PasswordVisualTransformation(),
-                                modifier = Modifier.weight(1f)
-                            )
-                            IconButton(onClick = { exportCodeRevealed = !exportCodeRevealed }) {
-                                Icon(
-                                    imageVector = if (exportCodeRevealed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = if (exportCodeRevealed) "Hide Code" else "Reveal Code",
-                                    tint = SuyaColors.TextMuted
-                                )
-                            }
-                        }
+                        )
                     }
                 }
             )
@@ -651,26 +648,23 @@ fun BackupRestoreScreen(
                                 fontSize = 13.sp,
                                 color = SuyaColors.TextMuted
                             )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
+                            SuyaTextField(
+                                value = restoreRecoveryCode,
+                                onValueChange = { restoreRecoveryCode = it.uppercase() },
+                                label = "Recovery Code",
+                                placeholder = "XXXX-XXXX-XXXX-...",
+                                visualTransformation = if (restoreCodeRevealed) VisualTransformation.None else PasswordVisualTransformation(),
+                                trailingIcon = {
+                                    IconButton(onClick = { restoreCodeRevealed = !restoreCodeRevealed }) {
+                                        Icon(
+                                            imageVector = if (restoreCodeRevealed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                            contentDescription = if (restoreCodeRevealed) "Hide Code" else "Reveal Code",
+                                            tint = SuyaColors.TextMuted
+                                        )
+                                    }
+                                },
                                 modifier = Modifier.fillMaxWidth()
-                            ) {
-                                SuyaTextField(
-                                    value = restoreRecoveryCode,
-                                    onValueChange = { restoreRecoveryCode = it.uppercase() },
-                                    label = "Recovery Code",
-                                    placeholder = "XXXX-XXXX-XXXX-...",
-                                    visualTransformation = if (restoreCodeRevealed) VisualTransformation.None else PasswordVisualTransformation(),
-                                    modifier = Modifier.weight(1f)
-                                )
-                                IconButton(onClick = { restoreCodeRevealed = !restoreCodeRevealed }) {
-                                    Icon(
-                                        imageVector = if (restoreCodeRevealed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                        contentDescription = if (restoreCodeRevealed) "Hide Code" else "Reveal Code",
-                                        tint = SuyaColors.TextMuted
-                                    )
-                                }
-                            }
+                            )
                             restoreError?.let {
                                 Text(it, color = SuyaColors.Negative, fontSize = 13.sp, fontFamily = SoraFontFamily)
                             }

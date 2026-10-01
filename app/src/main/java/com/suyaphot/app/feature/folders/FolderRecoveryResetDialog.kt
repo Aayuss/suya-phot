@@ -114,26 +114,23 @@ fun FolderRecoveryResetDialog(
                     color = SuyaColors.TextMuted,
                     fontSize = 12.sp
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
+                SuyaTextField(
+                    value = recoveryCode,
+                    onValueChange = { recoveryCode = it.uppercase().take(32) },
+                    label = "Vault Recovery Code",
+                    placeholder = "XXXX-XXXX-XXXX-...",
+                    visualTransformation = if (revealRecoveryCode) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { revealRecoveryCode = !revealRecoveryCode }) {
+                            Icon(
+                                imageVector = if (revealRecoveryCode) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (revealRecoveryCode) "Hide Recovery Code" else "Reveal Recovery Code",
+                                tint = SuyaColors.TextMuted
+                            )
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth()
-                ) {
-                    SuyaTextField(
-                        value = recoveryCode,
-                        onValueChange = { recoveryCode = it.uppercase().take(32) },
-                        label = "Vault Recovery Code",
-                        placeholder = "XXXX-XXXX-XXXX-...",
-                        visualTransformation = if (revealRecoveryCode) VisualTransformation.None else PasswordVisualTransformation(),
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(onClick = { revealRecoveryCode = !revealRecoveryCode }) {
-                        Icon(
-                            imageVector = if (revealRecoveryCode) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                            contentDescription = if (revealRecoveryCode) "Hide Recovery Code" else "Reveal Recovery Code",
-                            tint = SuyaColors.TextMuted
-                        )
-                    }
-                }
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SuyaButton(
                         text = "New PIN",

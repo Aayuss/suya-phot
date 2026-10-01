@@ -15,7 +15,10 @@ import java.io.FileNotFoundException
 class SourceDeletionCoordinator(
     private val context: Context,
     private val deleteUri: (Uri) -> Int = { context.contentResolver.delete(it, null, null) },
-    private val probeAbsent: (Uri) -> Boolean = { uri ->
+    probeAbsent: ((Uri) -> Boolean)? = null,
+    val probePresence: (Uri) -> SourcePresence = probeAbsent?.let { legacy ->
+        { uri: Uri -> if (legacy(uri)) SourcePresence.ABSENT else SourcePresence.PRESENT }
+    } ?: { uri ->
         try {
             val cursor = context.contentResolver.query(
                 uri,
@@ -26,28 +29,33 @@ class SourceDeletionCoordinator(
             )
             val exists = cursor?.use { it.moveToFirst() } ?: false
             if (!exists) {
-                true
+                SourcePresence.ABSENT
             } else {
                 try {
-                    context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { false } ?: true
+                    context.contentResolver.openAssetFileDescriptor(uri, "r")?.use {
+                        SourcePresence.PRESENT
+                    } ?: SourcePresence.PRESENT
                 } catch (_: FileNotFoundException) {
-                    true
+                    SourcePresence.ABSENT
+                } catch (_: SecurityException) {
+                    SourcePresence.PRESENT
                 } catch (_: Exception) {
-                    false
+                    SourcePresence.PRESENT
                 }
             }
         } catch (_: FileNotFoundException) {
-            true
+            SourcePresence.ABSENT
         } catch (_: IllegalArgumentException) {
-            true
+            SourcePresence.ABSENT
         } catch (_: SecurityException) {
-            // When an item is deleted from MediaStore, querying or opening it throws SecurityException because URI permission is revoked
-            true
+            SourcePresence.UNKNOWN
         } catch (_: Exception) {
-            false
+            SourcePresence.UNKNOWN
         }
     }
 ) {
+
+    enum class SourcePresence { PRESENT, ABSENT, UNKNOWN }
 
     enum class DeleteConsentMode { API29_RETRY_REQUIRED, API30_SYSTEM_DELETE_REQUEST }
 
@@ -62,7 +70,12 @@ class SourceDeletionCoordinator(
                 try { deleteUri(uri) }
                 catch (_: Exception) { 0 }
             } else 0
-            if (rows > 0 || probeAbsent(uri)) deleted += uri else retained += uri
+            val presence = probePresence(uri)
+            if (rows > 0 || presence == SourcePresence.ABSENT) {
+                deleted += uri
+            } else {
+                retained += uri
+            }
         }
         return DeletionVerification(deleted, retained)
     }

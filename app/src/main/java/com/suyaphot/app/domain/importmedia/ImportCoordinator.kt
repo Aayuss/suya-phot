@@ -194,32 +194,32 @@ enum class ImportErrorCode {
 internal fun canonicalDeletionUri(
     fallback: Uri,
     mediaType: MediaType,
-    metadata: PrivateMediaMetadata
+    metadata: PrivateMediaMetadata,
+    context: Context? = null
 ): Uri {
-    // Photo Picker grants a read-only wrapper URI. AOSP local picker URIs encode
-    // the underlying local MediaStore row ID in their final path segment:
-    // content://media/picker/<user>/<local-provider>/media/<local-id>.
-    // Use that only for the known local picker provider; never reinterpret cloud
-    // provider IDs as local MediaStore rows.
     val segments = fallback.pathSegments
     val isLocalPhotoPickerUri =
         fallback.authority == MediaStore.AUTHORITY &&
-            segments.size >= 5 &&
+            segments.size >= 4 &&
             (segments[0] == "picker" || segments[0] == "picker_get_content") &&
-            segments[2] == "com.android.providers.media.photopicker" &&
-            segments[3] == "media"
+            isLocalPhotoPickerProvider(segments) &&
+            segments.getOrNull(segments.size - 2) == "media"
 
     val pickerLocalId = if (isLocalPhotoPickerUri) {
-        segments.lastOrNull()?.toLongOrNull()
+        segments.lastOrNull()?.toLongOrNull()?.takeIf { it > 0L }
     } else {
         null
     }
 
-    val id = metadata.sourceMediaStoreId ?: pickerLocalId ?: return fallback
-    if (id < 0L) return fallback
+    val id = metadata.sourceMediaStoreId?.takeIf { it > 0L }
+        ?: pickerLocalId
+        ?: resolveMediaStoreIdFromCatalog(context, mediaType, metadata)
+        ?: return fallback
+
+    if (id <= 0L) return fallback
 
     val volume = metadata.sourceVolume?.takeIf { it.isNotBlank() }
-        ?: if (pickerLocalId != null) MediaStore.VOLUME_EXTERNAL_PRIMARY else return fallback
+        ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
 
     return runCatching {
         val collection = when (mediaType) {
@@ -228,6 +228,47 @@ internal fun canonicalDeletionUri(
         }
         ContentUris.withAppendedId(collection, id)
     }.getOrDefault(fallback)
+}
+
+private fun isLocalPhotoPickerProvider(segments: List<String>): Boolean {
+    val provider = if (segments.size >= 5) segments[2] else if (segments.size >= 4) segments[1] else null
+    if (provider == null || provider == "media") return true
+    if (provider.startsWith("com.example.") || provider.contains("cloud") || provider.contains("drive")) {
+        return false
+    }
+    return provider == "com.android.providers.media.photopicker" ||
+        provider == "com.google.android.providers.media.module" ||
+        provider == "com.android.providers.media" ||
+        provider.endsWith(".providers.media.photopicker") ||
+        provider.endsWith(".providers.media.module") ||
+        provider.endsWith(".providers.media")
+}
+
+private fun resolveMediaStoreIdFromCatalog(
+    context: Context?,
+    mediaType: MediaType,
+    metadata: PrivateMediaMetadata
+): Long? {
+    val ctx = context ?: return null
+    val displayName = metadata.originalDisplayName.takeIf { it.isNotBlank() } ?: return null
+    return runCatching {
+        val collection = when (mediaType) {
+            MediaType.IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            MediaType.VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        }
+        val projection = arrayOf(MediaStore.MediaColumns._ID)
+        val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
+        val selectionArgs = arrayOf(displayName)
+        ctx.contentResolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
+            if (cursor.moveToFirst() && cursor.count == 1) {
+                val idCol = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                if (idCol != -1 && !cursor.isNull(idCol)) {
+                    val candidate = cursor.getLong(idCol)
+                    if (candidate > 0L) candidate else null
+                } else null
+            } else null
+        }
+    }.getOrNull()
 }
 
 /**
@@ -320,7 +361,7 @@ class ImportCoordinator(
             val resolvedSource = metadataReader.resolve(uri)
             val sourceMeta = metadataReader.read(resolvedSource)
             val deletionUri = if (mode == ImportMode.MOVE) {
-                canonicalDeletionUri(uri, sourceMeta.mediaType, sourceMeta.metadata)
+                canonicalDeletionUri(uri, sourceMeta.mediaType, sourceMeta.metadata, context)
             } else {
                 uri
             }

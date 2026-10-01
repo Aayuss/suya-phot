@@ -56,4 +56,34 @@ class SourceDeletionConsentTest {
         assertEquals(listOf(uri, third), result.deletedUris)
         assertEquals(listOf(second), result.retainedUris)
     }
+
+    @Test fun api30ConsentRetainsUnknownPresence() {
+        val coordinator = SourceDeletionCoordinator(
+            context = context,
+            deleteUri = { 0 },
+            probeAbsent = null,
+            probePresence = { SourceDeletionCoordinator.SourcePresence.UNKNOWN }
+        )
+        val result = coordinator.completeConsent(
+            listOf(uri),
+            SourceDeletionCoordinator.DeleteConsentMode.API30_SYSTEM_DELETE_REQUEST
+        )
+        assertEquals(emptyList<Uri>(), result.deletedUris)
+        assertEquals(listOf(uri), result.retainedUris)
+    }
+
+    @Test fun api30ConsentDeletesAbsentPresence() {
+        val coordinator = SourceDeletionCoordinator(
+            context = context,
+            deleteUri = { 0 },
+            probeAbsent = null,
+            probePresence = { SourceDeletionCoordinator.SourcePresence.ABSENT }
+        )
+        val result = coordinator.completeConsent(
+            listOf(uri),
+            SourceDeletionCoordinator.DeleteConsentMode.API30_SYSTEM_DELETE_REQUEST
+        )
+        assertEquals(listOf(uri), result.deletedUris)
+        assertEquals(emptyList<Uri>(), result.retainedUris)
+    }
 }
