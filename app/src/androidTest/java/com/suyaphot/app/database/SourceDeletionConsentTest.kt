@@ -88,6 +88,7 @@ class SourceDeletionConsentTest {
     }
 
     @Test fun api30MultiItemBatchDeleteBundlesAllItemsIntoSingleConsentRequest() {
+        org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R)
         val uri1 = Uri.parse("content://media/external/images/media/101")
         val uri2 = Uri.parse("content://media/external/images/media/102")
         val uri3 = Uri.parse("content://media/external/images/media/103")
@@ -123,6 +124,7 @@ class SourceDeletionConsentTest {
     }
 
     @Test fun api30MultiItemWithMixedResultsDirectlyDeletesOwnedAndBatchesUnowned() {
+        org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R)
         val ownedUri = Uri.parse("content://media/external/images/media/201")
         val unowned1 = Uri.parse("content://media/external/images/media/202")
         val unowned2 = Uri.parse("content://media/external/images/media/203")
@@ -160,6 +162,7 @@ class SourceDeletionConsentTest {
     }
 
     @Test fun api30DeduplicatesUris() {
+        org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R)
         val uri1 = Uri.parse("content://media/external/images/media/301")
         val capturedBatchUris = mutableListOf<Uri>()
 
@@ -185,5 +188,33 @@ class SourceDeletionConsentTest {
 
         assertEquals(listOf(uri1), consentOutcome.uris)
         assertEquals(listOf(uri1), capturedBatchUris)
+    }
+
+    @Test fun api29MultiItemConsentPromptsPerItem() {
+        org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R)
+        val uri1 = Uri.parse("content://media/external/images/media/401")
+        val uri2 = Uri.parse("content://media/external/images/media/402")
+
+        val intent = android.content.Intent("TEST_ACTION")
+        val pendingIntent = android.app.PendingIntent.getActivity(
+            context, 0, intent, android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val icon = android.graphics.drawable.Icon.createWithResource(context, android.R.drawable.ic_delete)
+        val action = android.app.RemoteAction(icon, "Delete", "Delete", pendingIntent)
+        val rse = android.app.RecoverableSecurityException(SecurityException("Denied"), "Delete", action)
+
+        val coordinator = SourceDeletionCoordinator(
+            context = context,
+            deleteUri = { throw rse },
+            probeAbsent = null,
+            probePresence = { SourceDeletionCoordinator.SourcePresence.PRESENT }
+        )
+
+        val outcome = coordinator.deleteSources(listOf(uri1, uri2))
+        org.junit.Assert.assertTrue(outcome is SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent)
+        val consentOutcome = outcome as SourceDeletionCoordinator.DeletionOutcome.RequiresUserConsent
+
+        assertEquals(SourceDeletionCoordinator.DeleteConsentMode.API29_RETRY_REQUIRED, consentOutcome.mode)
+        assertEquals(listOf(uri1), consentOutcome.uris)
     }
 }
