@@ -48,7 +48,8 @@ class ShareReceiverActivity : ComponentActivity() {
                     container.sourceDeletionCoordinator.completeConsent(uris, mode)
                 }
             }
-            Toast.makeText(applicationContext, "Saved to Suya Phot", Toast.LENGTH_SHORT).show()
+            val msg = if (result.resultCode == Activity.RESULT_OK && mode != null && uris.isNotEmpty()) "Moved to Suya Phot" else "Saved to Suya Phot"
+            Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show()
             finish()
         }
     }
@@ -180,12 +181,17 @@ class ShareReceiverActivity : ComponentActivity() {
                 }
             }
         } else if (intent.action == Intent.ACTION_SEND_MULTIPLE) {
-            val streamUris = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
-            } else {
+            val streamUris = runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                }
+            }.getOrNull() ?: runCatching {
                 @Suppress("DEPRECATION")
-                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
-            }
+                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+            }.getOrNull()
             streamUris?.forEach(::addIfValid)
 
             intent.clipData?.let { clip ->

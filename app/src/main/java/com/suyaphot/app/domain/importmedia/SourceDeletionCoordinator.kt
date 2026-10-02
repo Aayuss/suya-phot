@@ -52,7 +52,8 @@ class SourceDeletionCoordinator(
         } catch (_: Exception) {
             SourcePresence.UNKNOWN
         }
-    }
+    },
+    private val createBatchDeleteRequest: ((android.content.ContentResolver, Collection<Uri>) -> IntentSender)? = null
 ) {
 
     enum class SourcePresence { PRESENT, ABSENT, UNKNOWN }
@@ -70,7 +71,13 @@ class SourceDeletionCoordinator(
                 try { deleteUri(uri) }
                 catch (_: Exception) { 0 }
             } else 0
-            val presence = probePresence(uri)
+            var presence = probePresence(uri)
+            if (mode == DeleteConsentMode.API30_SYSTEM_DELETE_REQUEST && presence != SourcePresence.ABSENT) {
+                try {
+                    Thread.sleep(50)
+                } catch (_: InterruptedException) {}
+                presence = probePresence(uri)
+            }
             if (rows > 0 || presence == SourcePresence.ABSENT) {
                 deleted += uri
             } else {
@@ -83,14 +90,25 @@ class SourceDeletionCoordinator(
     /**
      * Attempts direct deletion. If not permitted by scoped storage, returns an IntentSender
      * to prompt the user for deletion consent via ActivityResultContracts.StartIntentSenderForResult.
+     * On API 30+, all items requiring consent are bundled into a single batch delete prompt.
      */
     fun deleteSources(uris: List<Uri>): DeletionOutcome {
         val resolver = context.contentResolver
+        val distinctUris = uris.distinct()
+        if (distinctUris.isEmpty()) {
+            return DeletionOutcome.CompletedDirectly(emptyList())
+        }
+
         val remainingUris = mutableListOf<Uri>()
         val deletedUris = mutableListOf<Uri>()
 
         // Try direct deletion first (works for files owned by this app or under legacy storage)
-        for (uri in uris) {
+        for (uri in distinctUris) {
+            if (probePresence(uri) == SourcePresence.ABSENT) {
+                deletedUris.add(uri)
+                continue
+            }
+
             try {
                 val rows = deleteUri(uri)
                 if (rows <= 0) {
@@ -99,17 +117,23 @@ class SourceDeletionCoordinator(
                     deletedUris.add(uri)
                 }
             } catch (rse: RecoverableSecurityException) {
-                // API 29 per-item user consent
-                return DeletionOutcome.RequiresUserConsent(
-                    rse.userAction.actionIntent.intentSender,
-                    listOf(uri),
-                    deletedUris,
-                    DeleteConsentMode.API29_RETRY_REQUIRED
-                )
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    // On API 30+, unowned items throw RecoverableSecurityException on direct delete.
+                    // Accumulate all unowned items to request batch deletion consent in one prompt.
+                    remainingUris.add(uri)
+                } else {
+                    // On API 29, Android has no batch createDeleteRequest API; prompt per-item.
+                    return DeletionOutcome.RequiresUserConsent(
+                        rse.userAction.actionIntent.intentSender,
+                        listOf(uri),
+                        deletedUris,
+                        DeleteConsentMode.API29_RETRY_REQUIRED
+                    )
+                }
             } catch (se: SecurityException) {
                 remainingUris.add(uri)
             } catch (e: Exception) {
-                SafeLog.w("SourceDeletionCoordinator", "Could not directly delete a source item")
+                SafeLog.w("SourceDeletionCoordinator", "Could not directly delete a source item: $uri", e)
                 remainingUris.add(uri)
             }
         }
@@ -118,16 +142,19 @@ class SourceDeletionCoordinator(
             return DeletionOutcome.CompletedDirectly(deletedUris)
         }
 
-        // On API 30+, request user permission via MediaStore.createDeleteRequest
+        // On API 30+, request batch user permission via MediaStore.createDeleteRequest
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             return try {
-                val pendingIntent = MediaStore.createDeleteRequest(resolver, remainingUris)
+                val intentSender = createBatchDeleteRequest?.invoke(resolver, remainingUris)
+                    ?: MediaStore.createDeleteRequest(resolver, remainingUris).intentSender
                 DeletionOutcome.RequiresUserConsent(
-                    pendingIntent.intentSender, remainingUris, deletedUris,
+                    intentSender,
+                    remainingUris,
+                    deletedUris,
                     DeleteConsentMode.API30_SYSTEM_DELETE_REQUEST
                 )
             } catch (e: Exception) {
-                SafeLog.e("SourceDeletionCoordinator", "Failed creating delete request", e)
+                SafeLog.e("SourceDeletionCoordinator", "Failed creating batch delete request", e)
                 DeletionOutcome.Failed(remainingUris, "DELETE_REQUEST_FAILED", deletedUris)
             }
         }

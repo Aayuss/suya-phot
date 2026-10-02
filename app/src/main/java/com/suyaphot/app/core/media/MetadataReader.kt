@@ -344,7 +344,7 @@ class MetadataReader(private val context: Context) {
             originalDisplayName = finalDisplayName,
             originalRelativePath = relPath,
             originalMimeType = finalMimeType,
-            originalContentUri = canonicalMediaStoreUri?.toString() ?: uri.toString(),
+            originalContentUri = canonicalMediaStoreUri?.toString() ?: source.sourceUri.toString(),
             dateTakenMs = finalDateTaken,
             dateModifiedMs = finalDateModified,
             width = width,
