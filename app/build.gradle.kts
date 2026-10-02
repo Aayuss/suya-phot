@@ -55,10 +55,6 @@ android {
             if (releaseSigning != null) {
                 signingConfig = releaseSigning
             } else {
-                val isCI = System.getenv("CI") == "true"
-                if (isCI) {
-                    throw GradleException("Release signing is mandatory in CI. Missing SUYA_ANDROID_KEYSTORE_PATH or credentials.")
-                }
                 signingConfig = signingConfigs.getByName("debug")
             }
         }
@@ -169,3 +165,14 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
+
+gradle.taskGraph.whenReady {
+    val executingReleasePackaging = allTasks.any {
+        it.name in setOf("assembleRelease", "bundleRelease", "packageRelease")
+    }
+    val isCI = System.getenv("CI") == "true"
+    if (executingReleasePackaging && isCI && android.signingConfigs.findByName("release") == null) {
+        throw GradleException("Release signing is mandatory in CI when packaging release artifacts. Missing SUYA_ANDROID_KEYSTORE_PATH or credentials.")
+    }
+}
+
