@@ -32,6 +32,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -44,6 +45,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -176,12 +179,34 @@ fun LockScreen(
         }
     }
 
-    // Launch biometric on screen entry if enabled and available
-    LaunchedEffect(isBiometricEnrolled) {
-        if (isBiometricEnrolled && lockoutSecondsLeft <= 0) {
+    var resumeCounter by remember { mutableIntStateOf(0) }
+    var hasPromptedForCurrentResume by remember { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                resumeCounter++
+            } else if (event == Lifecycle.Event.ON_PAUSE) {
+                hasPromptedForCurrentResume = false
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // Launch biometric on screen entry / resume if enabled and available
+    LaunchedEffect(isBiometricEnrolled, lockoutSecondsLeft, resumeCounter) {
+        if (isBiometricEnrolled && lockoutSecondsLeft <= 0 && !hasPromptedForCurrentResume) {
             val autoPrompt = container.preferences.biometricOnLaunch.first()
             if (autoPrompt) {
-                launchBiometricPrompt()
+                delay(200L)
+                val act = context as? FragmentActivity
+                if (act != null && act.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && !hasPromptedForCurrentResume) {
+                    hasPromptedForCurrentResume = true
+                    launchBiometricPrompt()
+                }
             }
         }
     }

@@ -246,7 +246,8 @@ fun MainAppHost(container: AppContainer) {
                             SuyaNavTab.PHOTOS -> {
                                 PhotosScreen(
                                     container = container,
-                                    onMediaClick = { itemId, collection -> activeViewerScope = null; activeViewerCollection = collection; activeViewerItemId = itemId }
+                                    onMediaClick = { itemId, collection -> activeViewerScope = null; activeViewerCollection = collection; activeViewerItemId = itemId },
+                                    onViewIntruderLogs = { showIntruderLogsScreen = true }
                                 )
                             }
                             SuyaNavTab.FOLDERS -> {

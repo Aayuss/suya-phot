@@ -104,11 +104,6 @@ class SourceDeletionCoordinator(
 
         // Try direct deletion first (works for files owned by this app or under legacy storage)
         for (uri in distinctUris) {
-            if (probePresence(uri) == SourcePresence.ABSENT) {
-                deletedUris.add(uri)
-                continue
-            }
-
             try {
                 val rows = deleteUri(uri)
                 if (rows <= 0) {
@@ -144,18 +139,23 @@ class SourceDeletionCoordinator(
 
         // On API 30+, request batch user permission via MediaStore.createDeleteRequest
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            return try {
-                val intentSender = createBatchDeleteRequest?.invoke(resolver, remainingUris)
-                    ?: MediaStore.createDeleteRequest(resolver, remainingUris).intentSender
-                DeletionOutcome.RequiresUserConsent(
-                    intentSender,
-                    remainingUris,
-                    deletedUris,
-                    DeleteConsentMode.API30_SYSTEM_DELETE_REQUEST
-                )
-            } catch (e: Exception) {
-                SafeLog.e("SourceDeletionCoordinator", "Failed creating batch delete request", e)
-                DeletionOutcome.Failed(remainingUris, "DELETE_REQUEST_FAILED", deletedUris)
+            val mediaStoreUris = remainingUris.filter { it.authority == MediaStore.AUTHORITY }
+            if (mediaStoreUris.isNotEmpty()) {
+                return try {
+                    val intentSender = createBatchDeleteRequest?.invoke(resolver, mediaStoreUris)
+                        ?: MediaStore.createDeleteRequest(resolver, mediaStoreUris).intentSender
+                    DeletionOutcome.RequiresUserConsent(
+                        intentSender,
+                        mediaStoreUris,
+                        deletedUris,
+                        DeleteConsentMode.API30_SYSTEM_DELETE_REQUEST
+                    )
+                } catch (e: Exception) {
+                    SafeLog.e("SourceDeletionCoordinator", "Failed creating batch delete request", e)
+                    DeletionOutcome.Failed(mediaStoreUris, "DELETE_REQUEST_FAILED", deletedUris)
+                }
+            } else {
+                return DeletionOutcome.Failed(remainingUris, "NON_MEDIASTORE_URIS", deletedUris)
             }
         }
 

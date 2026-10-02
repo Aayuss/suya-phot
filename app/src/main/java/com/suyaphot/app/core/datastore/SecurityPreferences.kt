@@ -32,6 +32,7 @@ class SecurityPreferences(private val context: Context) {
         // Rate limiting state
         private val KEY_FAILED_ATTEMPTS = intPreferencesKey("failed_attempts")
         private val KEY_LOCKOUT_UNTIL_TIMESTAMP = longPreferencesKey("lockout_until_timestamp")
+        private val KEY_LAST_DISMISSED_INTRUDER_TIMESTAMP = longPreferencesKey("last_dismissed_intruder_timestamp")
     }
 
     // Auto-lock delay in ms: 0L = immediate on background, 30_000L = 30s, 60_000L = 1m, 300_000L = 5m
@@ -60,6 +61,7 @@ class SecurityPreferences(private val context: Context) {
     // Rate limiting
     val failedAttempts: Flow<Int> = context.dataStore.data.map { it[KEY_FAILED_ATTEMPTS] ?: 0 }
     val lockoutUntilTimestamp: Flow<Long> = context.dataStore.data.map { it[KEY_LOCKOUT_UNTIL_TIMESTAMP] ?: 0L }
+    val lastDismissedIntruderTimestamp: Flow<Long> = context.dataStore.data.map { it[KEY_LAST_DISMISSED_INTRUDER_TIMESTAMP] ?: 0L }
 
     suspend fun setAutoLockTimeoutMs(timeoutMs: Long) {
         require(timeoutMs in setOf(0L, 30_000L, 60_000L, 300_000L)) { "Unsupported auto-lock timeout" }
@@ -116,6 +118,12 @@ class SecurityPreferences(private val context: Context) {
         context.dataStore.edit {
             it[KEY_FAILED_ATTEMPTS] = 0
             it[KEY_LOCKOUT_UNTIL_TIMESTAMP] = 0L
+        }
+    }
+
+    suspend fun setLastDismissedIntruderTimestamp(timestamp: Long) {
+        context.dataStore.edit {
+            it[KEY_LAST_DISMISSED_INTRUDER_TIMESTAMP] = timestamp
         }
     }
 }

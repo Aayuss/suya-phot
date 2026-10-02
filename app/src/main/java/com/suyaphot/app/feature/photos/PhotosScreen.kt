@@ -36,6 +36,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Unarchive
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -81,6 +83,7 @@ import com.suyaphot.app.core.database.entity.VaultJobEntity
 import com.suyaphot.app.core.model.JobType
 import com.suyaphot.app.core.model.JobState
 import com.suyaphot.app.core.model.SourceDisposition
+import com.suyaphot.app.core.model.VaultKind
 import com.suyaphot.app.domain.importmedia.ImportJobPayload
 import com.suyaphot.app.domain.importmedia.SourceDeletionCoordinator
 import com.suyaphot.app.ui.components.ButtonVariant
@@ -110,12 +113,23 @@ import androidx.paging.compose.itemKey
 fun PhotosScreen(
     container: AppContainer,
     onMediaClick: (itemId: String, collection: ViewerCollection) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onViewIntruderLogs: () -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val session = container.sessionManager.sessionState.collectAsState().value
     val vaultId = (session as? VaultSession.Unlocked)?.vaultId ?: ""
+    val isRealVault = (session as? VaultSession.Unlocked)?.kind == VaultKind.REAL
+    val intruderEvents by remember(vaultId) {
+        if (vaultId.isBlank()) kotlinx.coroutines.flow.flowOf(emptyList())
+        else container.database.intruderEventDao().getEventsForVault(vaultId)
+    }.collectAsState(initial = emptyList())
+    val lastDismissedIntruderTimestamp by container.preferences.lastDismissedIntruderTimestamp.collectAsState(initial = 0L)
+    val unacknowledgedIntruders = remember(intruderEvents, lastDismissedIntruderTimestamp, isRealVault) {
+        if (!isRealVault) emptyList()
+        else intruderEvents.filter { it.createdAt > lastDismissedIntruderTimestamp }
+    }
 
     var selectedFilter by remember { mutableStateOf(MediaFilter.ALL) }
     var isSearchVisible by remember { mutableStateOf(false) }
@@ -451,6 +465,78 @@ fun PhotosScreen(
                     color = SuyaColors.TextMuted,
                     modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp)
                 )
+            }
+
+            // Intruder Alert Banner
+            if (unacknowledgedIntruders.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = SuyaColors.Negative.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, SuyaColors.Negative.copy(alpha = 0.35f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 6.dp)
+                        .testTag("intruder_alert_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = SuyaColors.Negative.copy(alpha = 0.2f),
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = "Intruder Alert",
+                                    tint = SuyaColors.Negative,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Intruder Attempt Detected",
+                                fontFamily = SoraFontFamily,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp,
+                                color = SuyaColors.White
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            val count = unacknowledgedIntruders.size
+                            Text(
+                                text = if (count == 1) "1 failed unlock attempt recorded" else "$count failed unlock attempts recorded",
+                                fontFamily = SoraFontFamily,
+                                fontSize = 12.sp,
+                                color = SuyaColors.TextMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        SuyaButton(
+                            text = "View",
+                            onClick = onViewIntruderLogs,
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.height(34.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        SuyaIconButton(
+                            icon = Icons.Default.Close,
+                            contentDescription = "Dismiss intruder alert",
+                            onClick = {
+                                scope.launch {
+                                    val maxTimestamp = unacknowledgedIntruders.maxOfOrNull { it.createdAt } ?: System.currentTimeMillis()
+                                    container.preferences.setLastDismissedIntruderTimestamp(maxTimestamp)
+                                }
+                            },
+                            size = 32
+                        )
+                    }
+                }
             }
 
             // Attention Banner for Interrupted / Failed Source Deletions
