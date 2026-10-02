@@ -1,13 +1,21 @@
 package com.suyaphot.app.feature.onboarding
 
+import android.app.Activity
+import android.content.Intent
+import android.view.WindowManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -18,13 +26,20 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,9 +54,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -102,6 +119,53 @@ fun SetupScreen(
 
     var createdVaultId by rememberSaveable { mutableStateOf<String?>(null) }
     var showRestoreScreen by remember { mutableStateOf(false) }
+
+    val clipboardManager = LocalClipboardManager.current
+    val createDocLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri ->
+        if (uri != null) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    context.contentResolver.openOutputStream(uri)?.use { os ->
+                        val content = """
+                            ========================================
+                            SUYA PHOT - VAULT RECOVERY KIT
+                            ========================================
+
+                            Recovery Code:
+                            $generatedRecoveryCode
+
+                            IMPORTANT:
+                            Keep this code safe and confidential.
+                            If you forget your PIN or pattern, this is
+                            the ONLY way to recover your vault photos.
+                            ========================================
+                        """.trimIndent()
+                        os.write(content.toByteArray(Charsets.UTF_8))
+                        os.flush()
+                    }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Recovery kit saved successfully", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Failed to save recovery kit: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
+    val activity = context as? Activity
+    DisposableEffect(currentStep, activity) {
+        if (currentStep == SetupStep.RECOVERY_KIT) {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        onDispose {
+            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -461,18 +525,88 @@ fun SetupScreen(
                                 contentAlignment = Alignment.Center,
                                 modifier = Modifier.padding(20.dp)
                             ) {
-                                Text(
-                                    text = generatedRecoveryCode,
-                                    fontFamily = SoraFontFamily,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 16.sp,
-                                    letterSpacing = 1.sp,
-                                    color = SuyaColors.White,
-                                    textAlign = TextAlign.Center
-                                )
+                                SelectionContainer {
+                                    Text(
+                                        text = generatedRecoveryCode,
+                                        fontFamily = SoraFontFamily,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 16.sp,
+                                        letterSpacing = 1.sp,
+                                        color = SuyaColors.White,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
                             }
                         }
-                        Spacer(modifier = Modifier.height(32.dp))
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    clipboardManager.setText(AnnotatedString(generatedRecoveryCode))
+                                    Toast.makeText(context, "Recovery code copied to clipboard", Toast.LENGTH_SHORT).show()
+                                },
+                                shape = RoundedCornerShape(20.dp),
+                                border = BorderStroke(1.dp, SuyaColors.StrokeMid),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = SuyaColors.White),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp), tint = SuyaColors.Accent)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Copy", fontFamily = SoraFontFamily, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    createDocLauncher.launch("suya-phot-recovery-kit.txt")
+                                },
+                                shape = RoundedCornerShape(20.dp),
+                                border = BorderStroke(1.dp, SuyaColors.StrokeMid),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = SuyaColors.White),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Icon(Icons.Default.Download, contentDescription = "Download", modifier = Modifier.size(16.dp), tint = SuyaColors.Accent)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Download", fontFamily = SoraFontFamily, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_SUBJECT, "Suya Phot Vault Recovery Kit")
+                                        putExtra(
+                                            Intent.EXTRA_TEXT,
+                                            "Suya Phot Vault Recovery Kit\n\nRecovery Code: $generatedRecoveryCode\n\nKeep this code safe and confidential."
+                                        )
+                                    }
+                                    context.startActivity(Intent.createChooser(shareIntent, "Save Recovery Code"))
+                                },
+                                shape = RoundedCornerShape(20.dp),
+                                border = BorderStroke(1.dp, SuyaColors.StrokeMid),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = SuyaColors.White),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Icon(Icons.Default.Share, contentDescription = "Share", modifier = Modifier.size(16.dp), tint = SuyaColors.Accent)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Share", fontFamily = SoraFontFamily, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "Tip: You can copy, download, share, or screenshot this code to store it safely.",
+                            fontFamily = SoraFontFamily,
+                            fontSize = 12.sp,
+                            color = SuyaColors.TextMuted,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 12.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(28.dp))
                         SuyaButton(
                             text = "I Have Saved This Code",
                             onClick = {
