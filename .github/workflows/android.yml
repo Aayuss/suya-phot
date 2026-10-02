@@ -26,8 +26,55 @@ jobs:
 
       - uses: gradle/actions/wrapper-validation@v4
 
+      - name: Decode release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.SUYA_ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 --decode > /tmp/suya-android-release.jks
+            chmod 600 /tmp/suya-android-release.jks
+            echo "SUYA_ANDROID_KEYSTORE_PATH=/tmp/suya-android-release.jks" >> $GITHUB_ENV
+          else
+            echo "::warning::Release keystore secret is not set."
+          fi
+
       - name: Verify tests, lint, debug, and minified release
+        env:
+          SUYA_ANDROID_KEYSTORE_PATH: ${{ env.SUYA_ANDROID_KEYSTORE_PATH }}
+          SUYA_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.SUYA_ANDROID_KEYSTORE_PASSWORD }}
+          SUYA_ANDROID_KEY_ALIAS: ${{ secrets.SUYA_ANDROID_KEY_ALIAS }}
+          SUYA_ANDROID_KEY_PASSWORD: ${{ secrets.SUYA_ANDROID_KEY_PASSWORD }}
         run: ./gradlew clean test lint assembleDebug assembleRelease
+
+      - name: Verify release APK signature
+        env:
+          EXPECTED_CERT_SHA256: ${{ vars.SUYA_ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          APK="app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner 2>/dev/null | sort | tail -n 1)"
+          if [ -z "$APKSIGNER" ]; then
+            echo "ERROR: apksigner not found."
+            exit 1
+          fi
+          echo "Using apksigner: $APKSIGNER"
+          VERIFY_OUTPUT="$($APKSIGNER verify --verbose --print-certs "$APK")"
+          echo "$VERIFY_OUTPUT"
+
+          if [ -n "$EXPECTED_CERT_SHA256" ]; then
+            ACTUAL_CERT="$(echo "$VERIFY_OUTPUT" | awk '/Signer #1 certificate SHA-256 digest:/{print tolower($NF); exit}' | tr -d ':[:space:]')"
+            CLEAN_EXPECTED="$(echo "$EXPECTED_CERT_SHA256" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')"
+            echo "Actual cert:   $ACTUAL_CERT"
+            echo "Expected cert: $CLEAN_EXPECTED"
+            if [ "$ACTUAL_CERT" != "$CLEAN_EXPECTED" ]; then
+              echo "ERROR: Release APK signing certificate does not match expected SHA-256!"
+              exit 1
+            fi
+            echo "Release APK signature matches permanent certificate fingerprint."
+          fi
+
+      - name: Clean up decoded keystore
+        if: always()
+        run: rm -f /tmp/suya-android-release.jks
 
       - name: Upload release APK artifact
         uses: actions/upload-artifact@v4

@@ -24,9 +24,13 @@ android {
     }
 
     val keystorePath = providers.gradleProperty("SUYA_KEYSTORE_PATH").orNull
+        ?: providers.environmentVariable("SUYA_ANDROID_KEYSTORE_PATH").orNull
     val keystorePassword = providers.gradleProperty("SUYA_KEYSTORE_PASSWORD").orNull
+        ?: providers.environmentVariable("SUYA_ANDROID_KEYSTORE_PASSWORD").orNull
     val keyAlias = providers.gradleProperty("SUYA_KEY_ALIAS").orNull
+        ?: providers.environmentVariable("SUYA_ANDROID_KEY_ALIAS").orNull
     val keyPassword = providers.gradleProperty("SUYA_KEY_PASSWORD").orNull
+        ?: providers.environmentVariable("SUYA_ANDROID_KEY_PASSWORD").orNull
 
     signingConfigs {
         if (keystorePath != null && keystorePassword != null && keyAlias != null && keyPassword != null) {
@@ -47,7 +51,16 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            val releaseSigning = signingConfigs.findByName("release")
+            if (releaseSigning != null) {
+                signingConfig = releaseSigning
+            } else {
+                val isCI = System.getenv("CI") == "true"
+                if (isCI) {
+                    throw GradleException("Release signing is mandatory in CI. Missing SUYA_ANDROID_KEYSTORE_PATH or credentials.")
+                }
+                signingConfig = signingConfigs.getByName("debug")
+            }
         }
         debug {
             applicationIdSuffix = ".debug"
