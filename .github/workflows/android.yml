@@ -61,7 +61,7 @@ jobs:
           echo "$VERIFY_OUTPUT"
 
           if [ -n "$EXPECTED_CERT_SHA256" ]; then
-            ACTUAL_CERT="$(echo "$VERIFY_OUTPUT" | awk '/Signer #1 certificate SHA-256 digest:/{print tolower($NF); exit}' | tr -d ':[:space:]')"
+            ACTUAL_CERT="$(echo "$VERIFY_OUTPUT" | awk '/certificate SHA-256 digest:/{print tolower($NF); exit}' | tr -d ':[:space:]')"
             CLEAN_EXPECTED="$(echo "$EXPECTED_CERT_SHA256" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')"
             echo "Actual cert:   $ACTUAL_CERT"
             echo "Expected cert: $CLEAN_EXPECTED"
